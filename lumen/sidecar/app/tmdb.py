@@ -29,6 +29,7 @@ BACKDROP_SIZE = "w780"
 LANGUAGE = "en-US"
 REQUEST_DELAY_SECONDS = 0.12
 DEFAULT_LIMIT = 40
+BROWSE_LIMIT = 40
 
 # Resolution and quality markers that fill IPTV channel names but never appear in
 # a real film title, so they have to go before we ask TMDB about the name.
@@ -147,6 +148,55 @@ def build_row_updates(media_type: str, details: Dict[str, Any]) -> Dict[str, Any
     }
 
 
+def browse_entries(
+    trending: Dict[str, Any],
+    movies: Dict[str, Any],
+    shows: Dict[str, Any],
+    movie_genres: Dict[str, Any],
+    tv_genres: Dict[str, Any],
+    limit: int = BROWSE_LIMIT,
+) -> List[Dict[str, Any]]:
+    """Normalize TMDB list payloads into catalogue rows, best first and de-duplicated."""
+    genre_names = {
+        "movie": {g["id"]: g["name"] for g in movie_genres.get("genres") or []},
+        "tv": {g["id"]: g["name"] for g in tv_genres.get("genres") or []},
+    }
+    sources: List[Tuple[str, Dict[str, Any]]] = []
+    for item in trending.get("results") or []:
+        if item.get("media_type") in ("movie", "tv"):
+            sources.append((item["media_type"], item))
+    sources += [("movie", item) for item in movies.get("results") or []]
+    sources += [("tv", item) for item in shows.get("results") or []]
+
+    seen = set()
+    entries: List[Dict[str, Any]] = []
+    for media_type, item in sources:
+        if len(entries) >= limit:
+            break
+        tmdb_id = item.get("id")
+        name = item.get("title") or item.get("name")
+        if not isinstance(tmdb_id, int) or not name or (media_type, tmdb_id) in seen:
+            continue
+        seen.add((media_type, tmdb_id))
+        date = item.get("release_date") if media_type == "movie" else item.get("first_air_date")
+        date = date or item.get("release_date") or item.get("first_air_date")
+        names = genre_names[media_type]
+        genres = [names[g] for g in item.get("genre_ids") or [] if g in names]
+        vote = item.get("vote_average")
+        entries.append({
+            "tmdb_id": tmdb_id,
+            "tmdb_type": media_type,
+            "name": name,
+            "poster_path": item.get("poster_path"),
+            "backdrop_path": item.get("backdrop_path"),
+            "overview": item.get("overview") or None,
+            "release_year": first_year(date),
+            "rating": round(float(vote), 1) if isinstance(vote, (int, float)) else None,
+            "genre_names": ";".join(genres) if genres else None,
+        })
+    return entries
+
+
 class TmdbClient:
     """Thin TMDB client. Pass `client` to inject a test transport."""
 
@@ -194,6 +244,15 @@ class TmdbClient:
 
     async def details(self, media_type: str, tmdb_id: Any) -> Dict[str, Any]:
         return await self._get(f"/{media_type}/{tmdb_id}")
+
+    async def browse(self) -> List[Dict[str, Any]]:
+        """Trending and top-rated titles as catalogue rows. Makes five requests."""
+        trending = await self._get("/trending/all/week")
+        movies = await self._get("/movie/top_rated")
+        shows = await self._get("/tv/top_rated")
+        movie_genres = await self._get("/genre/movie/list")
+        tv_genres = await self._get("/genre/tv/list")
+        return browse_entries(trending, movies, shows, movie_genres, tv_genres)
 
     async def aclose(self) -> None:
         if self._client is not None and self._owns_client:

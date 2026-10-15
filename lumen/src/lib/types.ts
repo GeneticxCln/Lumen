@@ -46,6 +46,22 @@ export interface TmdbStatus {
   backdrop_size: string;
 }
 
+/**
+ * A title from TMDB's trending and top-rated lists. It is not necessarily in the local library,
+ * so it is shown for information only and never offered for playback.
+ */
+export interface BrowseTitle {
+  tmdb_id: number;
+  tmdb_type: "movie" | "tv";
+  name: string;
+  poster_path?: string | null;
+  backdrop_path?: string | null;
+  overview?: string | null;
+  release_year?: number | null;
+  rating?: number | null;
+  genre_names?: string | null;
+}
+
 /** Result of one enrichment run. `remaining` counts titles never attempted yet. */
 export interface EnrichResult {
   enriched: number;

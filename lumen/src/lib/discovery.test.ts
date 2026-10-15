@@ -1,4 +1,4 @@
-import { filterChannels, recommendChannels, uniqueHistory, readPreferences, artworkCategory, themes, resolveTheme, contentKind, inferGenre, inferGenres, groupsOf, genresOf, yearOf, matchesFacets, buildFacets, facetCount, EMPTY_FACETS, ALL_FACETS, UNKNOWN_FACET } from "./discovery.ts";
+import { filterChannels, recommendChannels, uniqueHistory, readPreferences, artworkCategory, themes, resolveTheme, contentKind, inferGenre, inferGenres, groupsOf, genresOf, yearOf, matchesFacets, buildFacets, facetCount, catalogShelves, isCatalogTitle, browseCaption, EMPTY_FACETS, ALL_FACETS, UNKNOWN_FACET } from "./discovery.ts";
 import type { FacetValue } from "./discovery.ts";
 import type { Channel, HistoryEntry } from "./types.ts";
 
@@ -117,4 +117,35 @@ assert(inNews.groups[0].count === categorised.length && inNews.years[0].count ==
 assert(buildFacets(categorised, { ...EMPTY_FACETS, genre: "News" }).genres.find((value) => value.value === "News")?.count === 2, "Genre counts reflect every title in an inferred group tag");
 assert(buildFacets(categorised, { ...EMPTY_FACETS, group: "Movies", genre: "Animation" }).years[0].count === 1, "Narrowing two facets narrows the third");
 
+// --- Discovery shelves: the TMDB catalogue -----------------------------------
+const matched = (id: number, name: string, genres: string, rating: number, year: number): Channel => ({
+  id, playlist_id: 1, name, url: `https://example.org/${id}`, group_title: "Movies", tmdb_id: id, tmdb_type: "movie", genre_names: genres, rating, release_year: year,
+});
+const catalogue: Channel[] = [
+  matched(1, "Alpha", "Drama;Crime", 7.1, 2001),
+  matched(2, "Bravo", "Drama", 8.4, 2019),
+  matched(3, "Charlie", "Comedy", 6.0, 2023),
+  matched(4, "Delta", "Drama", 7.7, 2010),
+  { id: 5, playlist_id: 2, name: "Unmatched News", url: "https://example.org/news", group_title: "News", rating: 9.9, release_year: 2025 },
+  { id: 6, playlist_id: 2, name: "Unmatched Drama", url: "https://example.org/drama", group_title: "Drama" },
+];
+assert(!isCatalogTitle(catalogue[4]) && isCatalogTitle(catalogue[0]), "Only TMDB-matched titles are catalogue titles");
+const shelves = catalogShelves(catalogue);
+const shelfTitles = shelves.map((shelf) => shelf.title);
+assert(shelfTitles.join("|") === "Top rated|Recently released|Drama", `Catalogue shelves are Top rated, Recently released and genre shelves with 2+ titles (got ${shelfTitles.join("|")})`);
+assert(!shelves.some((shelf) => shelf.channels.some((channel) => channel.id >= 5)), "Unmatched playlist entries never appear on catalogue shelves");
+assert(shelves[0].channels.map((channel) => channel.name).join(",") === "Bravo,Delta,Alpha,Charlie", "Top rated sorts by TMDB rating, highest first");
+assert(shelves[1].channels[0].name === "Charlie" && shelves[1].channels[shelves[1].channels.length - 1].name === "Alpha", "Recently released sorts newest first");
+assert(shelves[2].channels.map((channel) => channel.name).join(",") === "Bravo,Delta,Alpha", "Genre shelves hold every title with that TMDB genre, best rated first");
+assert(catalogShelves([]).length === 0 && catalogShelves(channels).length === 0, "No TMDB-matched titles means no catalogue shelves");
+const many = Array.from({ length: 30 }, (_, index) => matched(100 + index, `Title ${index}`, "Action", index / 10, 2000 + index));
+const capped = catalogShelves(many);
+assert(capped.every((shelf) => shelf.channels.length <= 20), "Each catalogue shelf is capped at 20 titles");
+assert(capped.find((shelf) => shelf.title === "Action")?.channels[0].name === "Title 29", "The capped shelf keeps the best-rated titles");
+
+// --- Discovery browse titles: TMDB trending and top-rated, not in the library -----
+assert(browseCaption({ tmdb_id: 1, tmdb_type: "movie", name: "Film", release_year: 2008, rating: 7.2, genre_names: "Animation;Family;Comedy" }) === "2008 · ★ 7.2 · Animation · Family", "Browse captions show year, rating and up to two genres");
+assert(browseCaption({ tmdb_id: 2, tmdb_type: "tv", name: "Show", release_year: null, rating: 0, genre_names: null }) === "On TMDB", "Browse captions fall back when TMDB gave no metadata");
+
 console.log("Category facet checks passed; every title reachable via Group, Genre and Year.");
+console.log("Discovery shelf checks passed.");

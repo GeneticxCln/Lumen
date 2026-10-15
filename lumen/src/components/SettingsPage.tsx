@@ -5,13 +5,13 @@ import type { Channel, Playlist, PosterCandidate, Profile, TmdbStatus } from "..
 import { defaultPreferences, themes, applyTheme } from "../lib/discovery";
 import type { Preferences } from "../lib/discovery";
 import { POSTER_FRAME_OPTIONS } from "../lib/local";
-import { LocalBrowser } from "./LocalBrowser";
 import { ProfileSettings } from "./ProfileSettings";
+import { AccountSignIn } from "./AccountSignIn";
 import { MediaShelf } from "./MediaShelf";
 import { Icon } from "./Icon";
 import type { IconName } from "./Icon";
 
-export type SettingsSection = "account" | "sources" | "files" | "mylist" | "metadata" | "playback" | "appearance" | "shortcuts";
+export type SettingsSection = "account" | "sources" | "mylist" | "metadata" | "playback" | "appearance" | "shortcuts";
 
 interface SettingsPageProps {
   preferences: Preferences;
@@ -21,7 +21,6 @@ interface SettingsPageProps {
   onAddSource: () => void;
   onDeleteSource: (id: number) => Promise<void>;
   onRefresh: () => void;
-  onPlayFile: (path: string, name?: string) => void | Promise<void>;
   onPlayChannel: (channel: Channel) => void;
   onDetails: (channel: Channel) => void;
   onToggleFavorite: (id: number) => void;
@@ -34,13 +33,11 @@ interface SettingsPageProps {
   onProfilesChanged: () => void | Promise<void>;
 }
 
-// Must match the frame times the backends accept when saving.
 const posterFrameChoices = POSTER_FRAME_OPTIONS.map((option) => ({ seconds: String(option.seconds), label: option.label }));
 
 const sections: { id: SettingsSection; label: string; description: string; icon: IconName; group: string }[] = [
   { id: "account", label: "Account", description: "Profiles on this device", icon: "profile", group: "ACCOUNT" },
   { id: "sources", label: "Sources", description: "Manage your connected playlists", icon: "grid", group: "YOUR LIBRARY" },
-  { id: "files", label: "Local files", description: "Browse media on this device", icon: "folder", group: "YOUR LIBRARY" },
   { id: "mylist", label: "My List", description: "Your saved titles, all together", icon: "bookmark", group: "YOUR LIBRARY" },
   { id: "metadata", label: "Metadata", description: "TMDB posters, genres and years", icon: "film", group: "YOUR LIBRARY" },
   { id: "playback", label: "Playback", description: "Fine-tune your viewing experience", icon: "play", group: "PREFERENCES" },
@@ -56,7 +53,6 @@ export function SettingsPage({
   onAddSource,
   onDeleteSource,
   onRefresh,
-  onPlayFile,
   onPlayChannel,
   onDetails,
   onToggleFavorite,
@@ -146,6 +142,8 @@ export function SettingsPage({
       setTmdbKey("");
       const status = await tmdbStatus();
       setTmdb(status);
+      // Discovery loads TMDB browse titles only when a key exists, so it must reload now.
+      onRefresh();
       setTmdbNotice(status.configured ? "API key saved on this device." : "API key cleared.");
     } catch (failure) {
       setError(errorMessage(failure));
@@ -319,10 +317,11 @@ export function SettingsPage({
           </div>
         )}
         {section === "playback" && engineError && <div className="dialog-error" role="alert">Playback settings could not be loaded: {engineError}<button className="icon-button" aria-label="Retry loading playback settings" onClick={() => setLoadRevision((value) => value + 1)}><Icon name="refresh" size={16} /></button></div>}
-        {(section === "sources" || section === "files" || section === "mylist") && loadError && <div className="dialog-error" role="alert">{loadError}</div>}
+        {(section === "sources" || section === "mylist") && loadError && <div className="dialog-error" role="alert">{loadError}</div>}
 
         {section === "account" && (
           <>
+            <AccountSignIn />
             <h3 className="settings-section-title">Who is watching</h3>
             <p>
               Each profile keeps its own watch history and My List on this device. The library of sources
@@ -395,15 +394,6 @@ export function SettingsPage({
               </div>
             ))}
           </>
-        )}
-
-        {section === "files" && (
-          <div className="settings-files">
-            <p className="settings-intro">
-              Browse your folders and play with the native engine. Resume position is remembered per file.
-            </p>
-            <LocalBrowser onPlayFile={onPlayFile} onPlaylistImported={onRefresh} />
-          </div>
         )}
 
         {section === "mylist" && (

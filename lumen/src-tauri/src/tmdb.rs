@@ -13,7 +13,8 @@ use crate::error::{PlayerError, Result};
 use crate::secrets;
 use chrono::Utc;
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use sqlx::{Pool, Sqlite};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -28,6 +29,8 @@ pub const API_KEY_SETTING: &str = "tmdb_api_key";
 /// gap between them so a 1000-row library cannot trip the abuse limiter.
 const REQUEST_GAP_MS: u64 = 120;
 const HTTP_TIMEOUT_SECS: u64 = 20;
+/// Titles returned by one browse call. Bounded so the Discovery shelves stay light.
+pub const BROWSE_LIMIT: usize = 40;
 
 #[derive(Debug)]
 pub struct EnrichOutcome {
@@ -530,9 +533,245 @@ pub async fn counts(pool: &Pool<Sqlite>) -> Result<(i64, i64)> {
     Ok((enriched, total))
 }
 
+/// One title from TMDB's browse lists. It is not necessarily in the local library,
+/// so the UI can describe it but must not offer playback.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct BrowseTitle {
+    pub tmdb_id: i64,
+    pub tmdb_type: &'static str,
+    pub name: String,
+    pub poster_path: Option<String>,
+    pub backdrop_path: Option<String>,
+    pub overview: Option<String>,
+    pub release_year: Option<i64>,
+    pub rating: Option<f64>,
+    pub genre_names: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ListResponse {
+    #[serde(default)]
+    results: Vec<ListItem>,
+}
+
+#[derive(Deserialize)]
+struct ListItem {
+    #[serde(default)]
+    id: Option<i64>,
+    #[serde(default)]
+    media_type: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    release_date: Option<String>,
+    #[serde(default)]
+    first_air_date: Option<String>,
+    #[serde(default)]
+    poster_path: Option<String>,
+    #[serde(default)]
+    backdrop_path: Option<String>,
+    #[serde(default)]
+    overview: Option<String>,
+    #[serde(default)]
+    vote_average: Option<f64>,
+    #[serde(default)]
+    genre_ids: Vec<i64>,
+}
+
+#[derive(Deserialize, Default)]
+struct GenreListResponse {
+    #[serde(default)]
+    genres: Vec<GenreEntry>,
+}
+
+#[derive(Deserialize)]
+struct GenreEntry {
+    id: i64,
+    name: String,
+}
+
+/// Turns the raw TMDB list payloads into de-duplicated catalogue rows, best first.
+/// Trending entries that are people or other non-title kinds are dropped.
+fn browse_rows(
+    trending: ListResponse,
+    movies: ListResponse,
+    shows: ListResponse,
+    movie_genres: GenreListResponse,
+    tv_genres: GenreListResponse,
+    limit: usize,
+) -> Vec<BrowseTitle> {
+    let names_by_id = |list: &GenreListResponse| -> HashMap<i64, String> {
+        list.genres.iter().map(|g| (g.id, g.name.clone())).collect()
+    };
+    let movie_names = names_by_id(&movie_genres);
+    let tv_names = names_by_id(&tv_genres);
+
+    let mut sources: Vec<(&'static str, ListItem)> = Vec::new();
+    for item in trending.results {
+        match item.media_type.as_deref() {
+            Some("movie") => sources.push(("movie", item)),
+            Some("tv") => sources.push(("tv", item)),
+            _ => {}
+        }
+    }
+    sources.extend(movies.results.into_iter().map(|item| ("movie", item)));
+    sources.extend(shows.results.into_iter().map(|item| ("tv", item)));
+
+    let mut seen: HashSet<(&'static str, i64)> = HashSet::new();
+    let mut rows = Vec::new();
+    for (media_type, item) in sources {
+        if rows.len() >= limit {
+            break;
+        }
+        let Some(tmdb_id) = item.id else { continue };
+        let name = [item.title, item.name]
+            .into_iter()
+            .flatten()
+            .find(|value| !value.trim().is_empty());
+        let Some(name) = name else { continue };
+        if !seen.insert((media_type, tmdb_id)) {
+            continue;
+        }
+
+        let (primary, fallback) = if media_type == "movie" {
+            (item.release_date.as_deref(), item.first_air_date.as_deref())
+        } else {
+            (item.first_air_date.as_deref(), item.release_date.as_deref())
+        };
+        let names = if media_type == "movie" { &movie_names } else { &tv_names };
+        let genres: Vec<&str> = item
+            .genre_ids
+            .iter()
+            .filter_map(|id| names.get(id).map(String::as_str))
+            .collect();
+
+        rows.push(BrowseTitle {
+            tmdb_id,
+            tmdb_type: media_type,
+            name,
+            poster_path: item.poster_path,
+            backdrop_path: item.backdrop_path,
+            overview: item.overview.filter(|text| !text.is_empty()),
+            release_year: year_from(primary.or(fallback)),
+            rating: item.vote_average.map(|vote| (vote * 10.0).round() / 10.0),
+            genre_names: if genres.is_empty() { None } else { Some(genres.join(";")) },
+        });
+    }
+    rows
+}
+
+fn browse_failure(failure: TmdbFailure) -> PlayerError {
+    match failure {
+        TmdbFailure::Unauthorized => {
+            PlayerError::InvalidArg("TMDB rejected the API key (HTTP 401)".into())
+        }
+        TmdbFailure::Other(message) => PlayerError::Http(message),
+    }
+}
+
+async fn browse_list<T: serde::de::DeserializeOwned>(
+    http: &reqwest::Client,
+    key: &str,
+    path: &str,
+    requests: &mut i64,
+) -> Result<T> {
+    let payload = tmdb_get(http, key, path, &[], requests)
+        .await
+        .map_err(browse_failure)?;
+    serde_json::from_value(payload).map_err(|e| PlayerError::Json(e.to_string()))
+}
+
+/// Trending and top-rated titles, for browsing beyond the local library. Makes five requests.
+pub async fn browse(key: &str) -> Result<Vec<BrowseTitle>> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| PlayerError::Http(e.to_string()))?;
+    let mut requests = 0_i64;
+
+    let trending: ListResponse = browse_list(&http, key, "/trending/all/week", &mut requests).await?;
+    let movies: ListResponse = browse_list(&http, key, "/movie/top_rated", &mut requests).await?;
+    let shows: ListResponse = browse_list(&http, key, "/tv/top_rated", &mut requests).await?;
+    let movie_genres: GenreListResponse =
+        browse_list(&http, key, "/genre/movie/list", &mut requests).await?;
+    let tv_genres: GenreListResponse =
+        browse_list(&http, key, "/genre/tv/list", &mut requests).await?;
+
+    Ok(browse_rows(
+        trending,
+        movies,
+        shows,
+        movie_genres,
+        tv_genres,
+        BROWSE_LIMIT,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browse_rows_orders_dedupes_skips_and_limits() {
+        let parse = |value: serde_json::Value| -> ListResponse {
+            serde_json::from_value(value).unwrap()
+        };
+        let trending = parse(serde_json::json!({"results": [
+            {"id": 1, "media_type": "movie", "title": "Alpha", "release_date": "2024-03-01",
+             "vote_average": 7.456, "genre_ids": [28, 999], "overview": "Trending film"},
+            {"id": 50, "media_type": "person", "name": "Not a title"},
+            {"id": 2, "media_type": "tv", "name": "Beta", "first_air_date": "2021-09-10",
+             "vote_average": 8.0, "genre_ids": [10759]},
+        ]}));
+        let movies = parse(serde_json::json!({"results": [
+            {"id": 1, "title": "Alpha", "release_date": "2024-03-01"},
+            {"id": 3, "title": "Gamma", "release_date": "", "genre_ids": []},
+            {"title": "No id"},
+            {"id": 9, "title": "   "},
+        ]}));
+        let shows = parse(serde_json::json!({"results": [
+            {"id": 2, "name": "Beta duplicate"},
+            {"id": 4, "name": "Delta", "first_air_date": "1999-01-01"},
+        ]}));
+        let genres = |value: serde_json::Value| -> GenreListResponse {
+            serde_json::from_value(value).unwrap()
+        };
+        let movie_genres = genres(serde_json::json!({"genres": [{"id": 28, "name": "Action"}]}));
+        let tv_genres = genres(serde_json::json!({"genres": [{"id": 10759, "name": "Action & Adventure"}]}));
+
+        let rows = browse_rows(trending, movies, shows, movie_genres, tv_genres, 10);
+        let keys: Vec<(&str, i64)> = rows.iter().map(|r| (r.tmdb_type, r.tmdb_id)).collect();
+        assert_eq!(keys, vec![("movie", 1), ("tv", 2), ("movie", 3), ("tv", 4)]);
+
+        assert_eq!(rows[0].name, "Alpha");
+        assert_eq!(rows[0].release_year, Some(2024));
+        assert_eq!(rows[0].rating, Some(7.5));
+        assert_eq!(rows[0].genre_names.as_deref(), Some("Action"));
+        assert_eq!(rows[0].overview.as_deref(), Some("Trending film"));
+        assert_eq!(rows[1].genre_names.as_deref(), Some("Action & Adventure"));
+        assert_eq!(rows[2].release_year, None);
+        assert_eq!(rows[2].rating, None);
+        assert_eq!(rows[2].genre_names, None);
+        assert_eq!(rows[3].release_year, Some(1999));
+    }
+
+    #[test]
+    fn browse_rows_respects_limit() {
+        let movies: ListResponse = serde_json::from_value(serde_json::json!({"results": [
+            {"id": 1, "title": "One"}, {"id": 2, "title": "Two"}, {"id": 3, "title": "Three"},
+        ]})).unwrap();
+        let rows = browse_rows(
+            ListResponse::default(),
+            movies,
+            ListResponse::default(),
+            GenreListResponse::default(),
+            GenreListResponse::default(),
+            2,
+        );
+        assert_eq!(rows.len(), 2);
+    }
 
     #[test]
     fn normalize_key_trims_and_rejects_blank_input() {

@@ -1128,6 +1128,17 @@ pub async fn tmdb_enrich(
     }))
 }
 
+/// Trending and top-rated TMDB titles, so Discovery can show more than the matched library.
+#[tauri::command]
+pub async fn tmdb_browse(app: AppHandle) -> Result<serde_json::Value> {
+    let pool = ensure_db(&app).await?;
+    let (key, _source) = tmdb::api_key(pool)
+        .await?
+        .ok_or_else(|| PlayerError::InvalidArg("TMDB API key not configured".into()))?;
+    let titles = tmdb::browse(&key).await?;
+    Ok(serde_json::json!({ "titles": titles }))
+}
+
 #[tauri::command]
 pub async fn tmdb_clear_enrichment(app: AppHandle) -> Result<serde_json::Value> {
     let pool = ensure_db(&app).await?;

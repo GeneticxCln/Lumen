@@ -233,6 +233,7 @@ export function usePlayer() {
     playerState,
     currentTitle,
     currentUrl,
+    currentChannelId,
     volume,
     muted,
     seekRequest,

@@ -165,7 +165,7 @@ export function Transport({
       </div>
 
       {state.qualityLevels.length === 0 && state.qualityHelp && <small className="player-option-hint">{state.qualityHelp}</small>}
-      {state.buffering && <div className="buffering-indicator" role="status">Buffering stream...</div>}
+      {/* The centered spinner in PlayerOverlay owns the buffering announcement, so the controls must not repeat it. */}
       {state.error && <div className="error-message" role="alert">{state.error}</div>}
     </div>
   );

@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { Channel } from "../lib/types";
-import { artworkCategory } from "../lib/discovery";
+import type { BrowseTitle, Channel } from "../lib/types";
+import { artworkCategory, browseCaption } from "../lib/discovery";
 import { TMDB_BACKDROP_SIZE, tmdbImage } from "../lib/tauri";
 import { Icon } from "./Icon";
 
@@ -18,6 +18,54 @@ export function ChannelArtwork({ channel, hero = false }: { channel: Channel; he
     {channel.tvg_logo && !logoFailed && <img className="source-logo" src={channel.tvg_logo} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setLogoFailed(true)} />}
     {!hero && <span className="art-title">{channel.name}</span>}
   </div>;
+}
+
+function BrowseArtwork({ title }: { title: BrowseTitle }) {
+  const [artFailed, setArtFailed] = useState(false);
+  const backdrop = tmdbImage(title.backdrop_path ?? undefined, TMDB_BACKDROP_SIZE);
+  return <div className="channel-art">
+    {backdrop && !artFailed
+      ? <img className="landscape-art tmdb-art" src={backdrop} alt="" loading="lazy" onError={() => setArtFailed(true)} />
+      : <img className="landscape-art" src="/artwork/landscape.svg" alt="" aria-hidden="true" />}
+    <span className="art-title">{title.name}</span>
+  </div>;
+}
+
+interface BrowseShelfProps {
+  title: string;
+  subtitle?: string;
+  titles: BrowseTitle[];
+  compact: boolean;
+}
+
+/**
+ * TMDB titles that are not necessarily in the library. Cards show artwork and details only:
+ * there is no play, My List or details control, because nothing here can be played.
+ */
+export function BrowseShelf({ title, subtitle, titles, compact }: BrowseShelfProps) {
+  const ref = useRef<HTMLDivElement>(null);
+  const width = compact ? 224 : 280;
+  if (!titles.length) return null;
+  const scroll = (direction: 1 | -1) => ref.current?.scrollBy({
+    left: direction * ref.current.clientWidth * .8,
+    behavior: document.documentElement.classList.contains("reduce-motion") || window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth",
+  });
+  return <section className="media-shelf" aria-label={title}>
+    <div className="shelf-heading"><div><h2>{title}<span className="shelf-count">{titles.length}</span></h2>{subtitle && <p>{subtitle}</p>}</div>
+      <div className="shelf-arrows"><button className="icon-button" aria-label={`Scroll ${title} left`} onClick={() => scroll(-1)}><Icon name="chevron" style={{ transform: "rotate(180deg)" }} /></button><button className="icon-button" aria-label={`Scroll ${title} right`} onClick={() => scroll(1)}><Icon name="chevron" /></button></div>
+    </div>
+    <div className="shelf-track" ref={ref} tabIndex={0} aria-label={`${title} titles`}>
+      <div style={{ display: "flex", gap: 12, width: "max-content", paddingRight: 12 }}>
+        {titles.map((item) => <article className="media-card" key={`${item.tmdb_type}-${item.tmdb_id}`} style={{ width: width - 12 }}>
+          <div className="card-art-button">
+            <BrowseArtwork title={item} />
+            <span className="card-badge">Not in library</span>
+          </div>
+          <div className="card-bottom"><div><h3>{item.name}</h3><p>{browseCaption(item)}</p></div></div>
+        </article>)}
+      </div>
+    </div>
+  </section>;
 }
 
 interface ShelfProps {

@@ -1,5 +1,8 @@
 import { useState, useEffect, useMemo, useCallback, useRef, lazy, Suspense } from "react";
 import { Transport } from "./components/Transport";
+import { PlayerOverlay } from "./components/PlayerOverlay";
+import { PLAYER_SEEK_STEP_SECONDS, PLAYER_VOLUME_STEP, playerShortcutFor } from "./lib/playerKeys";
+import type { PlayerShortcut } from "./lib/playerKeys";
 import { SourceDialog } from "./components/SourceDialog";
 import { SettingsPage } from "./components/SettingsPage";
 import { ProfileGate } from "./components/ProfileGate";
@@ -10,20 +13,24 @@ import type { IconName } from "./components/Icon";
 import { ChannelArtwork } from "./components/MediaShelf";
 import { FacetBrowser } from "./components/FacetBrowser";
 import { DiscoveryPage } from "./components/DiscoveryPage";
+import { LocalDevicePage } from "./components/LocalDevicePage";
 import { SearchEnginePage } from "./components/SearchEnginePage";
 const VideoStage = lazy(() => import("./components/VideoStage").then((module) => ({ default: module.VideoStage })));
 import { usePlayer } from "./hooks/usePlayer";
 import { useChannels } from "./hooks/useChannels";
-import { activeProfile, errorMessage, getHistory, isTauriRuntime, listProfiles } from "./lib/tauri";
+import { activeProfile, browseTmdb, errorMessage, getHistory, isTauriRuntime, listProfiles, setPlayerFullscreen, tmdbStatus } from "./lib/tauri";
+import type { BrowseTitle } from "./lib/types";
 import type { Channel, HistoryEntry, Profile } from "./lib/types";
-import { readPreferences, recommendChannels, contentKind, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
+import { readPreferences, recommendChannels, catalogShelves, contentKind, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
+import { isLocalPath } from "./lib/local";
+import { nextEpisode } from "./lib/episodes";
 import type { FacetSelection, Preferences } from "./lib/discovery";
 import "./App.css";
 
-type Page = "discovery" | "search" | "movies" | "series" | "live" | "settings";
+type Page = "discovery" | "search" | "movies" | "series" | "live" | "local" | "settings";
 
-// The top bar is exactly these four destinations: Discovery is the media on this device and the
-// other three are your own sources. Settings is deliberately absent — the header controls (My
+// The top bar is exactly these five destinations: Discovery, Movies, Series and Live TV are your
+// own sources, and Local Device is the media on this computer. Settings is deliberately absent — the header controls (My
 // List and the profile button) and the footer already open it, so an entry would only duplicate
 // them. Search is not a destination either: it lives in the top bar on every page.
 type NavPage = Exclude<Page, "settings">;
@@ -33,9 +40,10 @@ const pages: { id: NavPage; label: string; icon: IconName }[] = [
   { id: "movies", label: "Movies", icon: "film" },
   { id: "series", label: "Series", icon: "series" },
   { id: "live", label: "Live TV", icon: "tv" },
+  { id: "local", label: "Local Device", icon: "monitor" },
 ];
 
-const headings: Record<Exclude<Page, "discovery" | "search" | "settings">, { title: string; blurb: string }> = {
+const headings: Record<Exclude<Page, "discovery" | "search" | "local" | "settings">, { title: string; blurb: string }> = {
   movies: { title: "Movies.", blurb: "Films and on-demand titles from your own sources." },
   series: { title: "Series.", blurb: "Shows and episodic titles from your own sources." },
   live: { title: "Live. Right now.", blurb: "Channels that are broadcasting as you browse." },
@@ -62,6 +70,7 @@ function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const library = useChannels(refresh);
+  const [browseTitles, setBrowseTitles] = useState<BrowseTitle[]>([]);
   const player = usePlayer();
   const details = library.allChannels.find((channel) => channel.id === detailId) || null;
   const currentProfile = profiles.find((profile) => profile.id === activeProfileId) || null;
@@ -105,6 +114,19 @@ function App() {
     return () => { active = false; };
   }, [refresh, player.currentUrl, activeProfileId]);
 
+  // TMDB's trending and top-rated titles appear once a key is configured. Without one, or if
+  // TMDB is unreachable, Discovery simply has no browse shelf; the library still works.
+  useEffect(() => {
+    let active = true;
+    tmdbStatus()
+      .then(async (status) => {
+        const { titles } = status.configured ? await browseTmdb() : { titles: [] };
+        if (active) setBrowseTitles(titles);
+      })
+      .catch(() => { if (active) setBrowseTitles([]); });
+    return () => { active = false; };
+  }, [refresh]);
+
   useEffect(() => {
     document.documentElement.classList.toggle("reduce-motion", preferences.reduceMotion);
   }, [preferences.reduceMotion]);
@@ -140,37 +162,72 @@ function App() {
     }
   }
 
-  const [isFullscreen, setIsFullscreen] = useState(() => document.fullscreenElement !== null);
+  // Desktop fullscreen drives the mpv window; the browser preview uses the Fullscreen API.
+  const [isFullscreen, setIsFullscreen] = useState(false);
   useEffect(() => {
+    if (isTauriRuntime()) return;
     const syncFullscreen = () => setIsFullscreen(document.fullscreenElement !== null);
     document.addEventListener("fullscreenchange", syncFullscreen);
     return () => document.removeEventListener("fullscreenchange", syncFullscreen);
   }, []);
-  const toggleFullscreen = useCallback(() => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(), []);
+  const toggleFullscreen = useCallback(async () => {
+    const next = !isFullscreen;
+    if (isTauriRuntime()) {
+      await setPlayerFullscreen(next);
+    } else if (next) {
+      await document.documentElement.requestFullscreen();
+    } else if (document.fullscreenElement) {
+      await document.exitFullscreen();
+    }
+    setIsFullscreen(next);
+  }, [isFullscreen]);
+  const closePlayer = useCallback(() => {
+    setPlayerOpen(false);
+    if (isFullscreen) void run(toggleFullscreen);
+  }, [isFullscreen, toggleFullscreen]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (!preferences.keyboardShortcuts || !player.currentUrl || event.ctrlKey || event.metaKey || event.altKey) return;
       const target = event.target as HTMLElement | null;
-      if (!preferences.keyboardShortcuts || !player.currentUrl || document.querySelector("dialog[open]") || target?.closest("input, textarea, select, button, [contenteditable=true]") || event.ctrlKey || event.metaKey || event.altKey) return;
-      const actions: Record<string, () => Promise<unknown>> = {
-        " ": player.togglePause, ArrowLeft: () => player.seekRelative(-10), ArrowRight: () => player.seekRelative(10),
-        m: player.toggleMute, M: player.toggleMute, "9": () => player.changeVolume(player.volume - 5), "0": () => player.changeVolume(player.volume + 5),
-        f: toggleFullscreen,
+      // Text fields keep their keys. Sliders are excluded from that rule so the arrows seek instead of nudging the slider.
+      if (target?.closest("input:not([type=range]), textarea, select, [contenteditable=true]")) return;
+      // Space on a focused button already activates that button; handling it here would toggle twice.
+      if (event.key === " " && target?.closest("button, a")) return;
+      if (!playerOpen && document.querySelector("dialog[open]")) return;
+      const shortcut = playerShortcutFor(event.key);
+      if (!shortcut || (shortcut === "close" && !playerOpen)) return;
+      event.preventDefault();
+      const actions: Record<PlayerShortcut, () => Promise<unknown>> = {
+        "toggle-pause": player.togglePause,
+        "seek-back": () => player.seekRelative(-PLAYER_SEEK_STEP_SECONDS),
+        "seek-forward": () => player.seekRelative(PLAYER_SEEK_STEP_SECONDS),
+        "volume-down": () => player.changeVolume(player.volume - PLAYER_VOLUME_STEP),
+        "volume-up": () => player.changeVolume(player.volume + PLAYER_VOLUME_STEP),
+        "toggle-mute": player.toggleMute,
+        "toggle-fullscreen": toggleFullscreen,
+        close: async () => closePlayer(),
       };
-      const action = actions[event.key];
-      if (action) { event.preventDefault(); void run(action); }
+      void run(actions[shortcut]);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [preferences.keyboardShortcuts, player, toggleFullscreen]);
+  }, [preferences.keyboardShortcuts, player, playerOpen, toggleFullscreen, closePlayer]);
 
-  const available = useMemo(() => library.channels.filter((channel) => !preferences.hideUnavailable || !channel.last_error), [library.channels, preferences.hideUnavailable]);
+  // Files on this computer belong to the Local Device page only; every other tab shows sources.
+  const available = useMemo(() => library.channels.filter((channel) => !isLocalPath(channel.url) && (!preferences.hideUnavailable || !channel.last_error)), [library.channels, preferences.hideUnavailable]);
+  const catalog = useMemo(() => catalogShelves(available), [available]);
+  // The following episode is looked up across the whole library, not just the current search results.
+  const followingEpisode = useMemo(() => {
+    const current = library.allChannels.find((channel) => channel.id === player.currentChannelId);
+    return current ? nextEpisode(current, library.allChannels) : null;
+  }, [library.allChannels, player.currentChannelId]);
   const byKind = useMemo(() => ({
     movie: available.filter((channel) => contentKind(channel) === "movie"),
     series: available.filter((channel) => contentKind(channel) === "series"),
     live: available.filter((channel) => contentKind(channel) === "live"),
   }), [available]);
-  const myList = useMemo(() => library.allChannels.filter((channel) => library.favoriteIds.has(channel.id)), [library.allChannels, library.favoriteIds]);
+  const myList = useMemo(() => library.allChannels.filter((channel) => library.favoriteIds.has(channel.id) && !isLocalPath(channel.url)), [library.allChannels, library.favoriteIds]);
   const recommendations = useMemo(() => recommendChannels(available, preferences.personalizedRows ? history : [], preferences.personalizedRows ? library.favoriteIds : new Set()), [available, history, library.favoriteIds, preferences.personalizedRows]);
 
   // The page decides the base set (everything, or one content kind); the facets then
@@ -274,7 +331,6 @@ function App() {
         onAddSource={() => setShowSource(true)}
         onDeleteSource={library.handleDeletePlaylist}
         onRefresh={() => { setRefresh((value) => value + 1); library.loadChannels(); }}
-        onPlayFile={playFile}
         onPlayChannel={(channel) => void play(channel)}
         onDetails={setDetails}
         onToggleFavorite={(id) => void library.handleToggleFavorite(id)}
@@ -296,23 +352,27 @@ function App() {
         onRefresh={() => { setRefresh((value) => value + 1); library.loadChannels(); }}
       /> : page === "discovery" ? <DiscoveryPage
         query={library.searchQuery}
-        history={history}
-        historyError={historyError}
+        catalog={catalog}
         recommended={recommendations}
+        browse={browseTitles}
         personalized={preferences.personalizedRows}
         libraryMatches={available}
         favorites={library.favoriteIds}
         compact={preferences.compactCards}
-        busy={busy}
-        onPlayFile={playFile}
         onPlayChannel={(channel) => void play(channel)}
         onDetails={setDetails}
         onFavorite={(id) => void library.handleToggleFavorite(id)}
+        onOpenSources={() => openSettings("sources")}
+      /> : page === "local" ? <LocalDevicePage
+        query={library.searchQuery}
+        history={history}
+        historyError={historyError}
+        busy={busy}
+        onPlayFile={playFile}
         onLibraryChanged={() => { setRefresh((value) => value + 1); library.loadChannels(); }}
-        onOpenFiles={() => openSettings("files")}
         onOpenSources={() => openSettings("sources")}
       /> : <div className="browse-content standalone-content">
-          <div className="page-heading"><div><p className="eyebrow">FROM YOUR OWN SOURCES</p><h1>{headings[page as Exclude<Page, "discovery" | "search" | "settings">].title}</h1><p>{headings[page as Exclude<Page, "discovery" | "search" | "settings">].blurb}</p></div><span className="library-stat"><strong>{listForPage(page).length}</strong> titles</span></div>
+          <div className="page-heading"><div><p className="eyebrow">FROM YOUR OWN SOURCES</p><h1>{headings[page as Exclude<Page, "discovery" | "search" | "local" | "settings">].title}</h1><p>{headings[page as Exclude<Page, "discovery" | "search" | "local" | "settings">].blurb}</p></div><span className="library-stat"><strong>{listForPage(page).length}</strong> titles</span></div>
 
           <div className="browse-toolbar">
             <p className="browse-summary" role="status">
@@ -344,16 +404,26 @@ function App() {
       {page !== "settings" && <div className="browse-content">
         {historyError && <p className="muted-note" role="status">Recently watched is unavailable: {historyError}</p>}
         {profileError && <p className="muted-note" role="status">Profiles are unavailable here: {profileError}</p>}
-        <footer><span className="footer-brand">LUMEN</span><span>Your media. Your rules.</span><button onClick={() => openSettings("sources")}>Settings & preferences</button><span className="engine-label"><span className="tiny-dot" />Native mpv playback</span></footer>
+        <footer><span className="footer-brand">LUMEN</span><span>Your media. Your rules.</span><button onClick={() => openSettings("sources")}>Settings & preferences</button></footer>
       </div>}
     </main>
 
     {player.currentUrl && <aside className="now-playing-dock" aria-label="Now playing"><button className="dock-title" onClick={() => setPlayerOpen(true)}><span className="dock-play-icon"><Icon name="play" /></span><span><small>NOW PLAYING</small><strong>{player.currentTitle || player.playerState.title}</strong></span></button><button className="secondary-button" onClick={() => setPlayerOpen(true)}>Player controls</button><button className="icon-button" aria-label="Stop playback" onClick={() => void run(player.stopPlayback)}><Icon name="stop" /></button></aside>}
     <SourceDialog isOpen={showSource} onClose={() => setShowSource(false)} onSourceAdded={() => setRefresh((value) => value + 1)} onPlayFile={playFile} />
     <Modal open={details !== null} onClose={() => setDetails(null)} title="Title details" className="details-dialog">{details && <><ChannelArtwork key={details.id} channel={details} /><div className="dialog-content"><p className="eyebrow">{details.group_title || "YOUR LIBRARY"}</p><h2>{details.name}</h2><p>From {library.playlists.find((source) => source.id === details.playlist_id)?.name || "your sources"}. Playback uses native mpv on desktop and the embedded player in browser preview.</p><p className="muted-note">{details.last_error ? `Last check failed: ${details.last_error}` : details.last_ok ? `Last successful check: ${new Date(details.last_ok * 1000).toLocaleString()}. Availability can change.` : "Availability has not been checked yet."}</p><div className="hero-buttons"><button className="primary-button" disabled={busy} onClick={() => void play(details)}><Icon name="play" />Play</button><button className="secondary-button" aria-pressed={library.favoriteIds.has(details.id)} onClick={() => void library.handleToggleFavorite(details.id)}><Icon name={library.favoriteIds.has(details.id) ? "check" : "plus"} />My List</button><button className="secondary-button" disabled={library.probing} onClick={() => void library.handleProbeVisible([details.id])}>{library.probing ? "Checking…" : "Check stream"}</button></div></div></>}</Modal>
-    <Modal open={playerOpen} onClose={() => setPlayerOpen(false)} title={player.currentTitle || player.playerState.title || "Now playing"} className="player-dialog" keepMounted>
-      <div className="native-player-stage" style={{ padding: 0, overflow: "hidden", minHeight: "380px", display: "flex", flexDirection: "column" }}>
-        {isTauriRuntime() ? <div style={{ padding: 40, textAlign: "center" }}><Icon name="play" size={40} /><h2>{player.currentTitle}</h2><p>Your video opens in the native mpv window.</p></div> : <Suspense fallback={<p className="loading">Loading player…</p>}><VideoStage
+    {player.currentUrl && <PlayerOverlay
+      title={player.currentTitle || player.playerState.title || "Now playing"}
+      paused={player.playerState.paused}
+      hidden={!playerOpen}
+      onBack={closePlayer}
+      nextEpisodeTitle={followingEpisode?.name}
+      onNextEpisode={followingEpisode ? () => void play(followingEpisode) : undefined}
+      buffering={player.playerState.buffering}
+      onTogglePause={() => void run(player.togglePause)}
+      onToggleFullscreen={() => void run(toggleFullscreen)}
+      controls={<Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); closePlayer(); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} onSelectTrack={(kind, id) => void run(() => player.selectTrack(kind, id))} onSelectQuality={(id) => void run(() => player.selectQuality(id))} isFullscreen={isFullscreen} onToggleFullscreen={() => void run(toggleFullscreen)} />}
+    >
+      {isTauriRuntime() ? <div className="player-native-card"><Icon name="play" size={40} /><h2>{player.currentTitle}</h2><p>Your video plays in the native mpv window.</p></div> : <Suspense fallback={<p className="loading">Loading player…</p>}><VideoStage
           url={player.currentUrl}
           title={player.currentTitle || player.playerState.title || null}
           paused={player.playerState.paused}
@@ -368,9 +438,7 @@ function App() {
           registerBrowserControls={player.registerBrowserControls}
           onError={player.handleVideoError}
         /></Suspense>}
-      </div>
-      <Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); setPlayerOpen(false); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} onSelectTrack={(kind, id) => void run(() => player.selectTrack(kind, id))} onSelectQuality={(id) => void run(() => player.selectQuality(id))} isFullscreen={isFullscreen} onToggleFullscreen={() => void run(toggleFullscreen)} />
-    </Modal>
+    </PlayerOverlay>}
     </div>
     {locked && <ProfileGate profiles={profiles} initialProfileId={activeProfileId} onUnlocked={handleProfilesChanged} />}
   </>;

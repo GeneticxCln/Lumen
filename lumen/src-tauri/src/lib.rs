@@ -87,6 +87,7 @@ pub fn run() {
             set_tmdb_api_key,
             tmdb_status,
             tmdb_enrich,
+            tmdb_browse,
             tmdb_clear_enrichment,
         ])
         .build(tauri::generate_context!())

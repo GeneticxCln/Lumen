@@ -1416,6 +1416,22 @@ async def invoke_bridge(cmd: str, request: Request) -> Any:
             ).fetchone()["c"]
         return {**stats, "remaining": remaining}
 
+    elif cmd == "tmdb_browse":
+        with get_conn() as conn:
+            api_key, _ = resolve_tmdb_key(conn)
+        if not api_key:
+            raise HTTPException(status_code=400, detail="TMDB API key not configured")
+        client = tmdb.TmdbClient(api_key)
+        try:
+            titles = await client.browse()
+        except tmdb.TmdbAuthError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except httpx.HTTPError as error:
+            raise HTTPException(status_code=502, detail="TMDB is unavailable") from error
+        finally:
+            await client.aclose()
+        return {"titles": titles}
+
     elif cmd == "tmdb_clear_enrichment":
         with get_conn() as conn:
             cur = conn.execute(

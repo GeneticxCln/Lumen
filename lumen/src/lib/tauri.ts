@@ -20,6 +20,7 @@ import type {
   SearchResponse,
   AccountStatus,
   SyncStatus,
+  BrowseTitle,
 } from "./types";
 import type { PosterCandidate } from "./types";
 
@@ -392,6 +393,11 @@ export async function tmdbStatus() {
 
 export async function enrichTmdb(limit?: number, force?: boolean) {
   return callBackend<EnrichResult>("tmdb_enrich", { limit, force: force || null });
+}
+
+/** Trending and top-rated TMDB titles for Discovery. Fails when no key is configured. */
+export async function browseTmdb() {
+  return callBackend<{ titles: BrowseTitle[] }>("tmdb_browse");
 }
 
 export async function clearTmdbEnrichment() {

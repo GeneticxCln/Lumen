@@ -1,4 +1,4 @@
-import type { Channel, HistoryEntry } from "./types.ts";
+import type { BrowseTitle, Channel, HistoryEntry } from "./types.ts";
 
 export const themes = [
   { id: "cinema", name: "Cinema", description: "The original. Deep charcoal, signature red.", background: "#141414", surface: "#202023", accent: "#e50914", text: "#f5f5f1" },
@@ -315,4 +315,84 @@ export function buildFacets(channels: Channel[], selection: FacetSelection): Fac
     hasTmdbGenres: channels.some((channel) => genresOf(channel).source === "tmdb"),
     enriched: channels.filter((channel) => typeof channel.tmdb_id === "number").length,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Discovery shelves: the TMDB catalogue, arranged by real TMDB metadata.
+// ---------------------------------------------------------------------------
+
+export interface CatalogShelf {
+  id: string;
+  title: string;
+  subtitle: string;
+  channels: Channel[];
+}
+
+const SHELF_SIZE = 20;
+const MAX_GENRE_SHELVES = 10;
+const MIN_GENRE_TITLES = 2;
+
+/** Only titles matched on TMDB form the catalogue; unmatched playlist entries do not. */
+export function isCatalogTitle(channel: Channel): boolean {
+  return typeof channel.tmdb_id === "number";
+}
+
+function byRating(a: Channel, b: Channel): number {
+  return (b.rating ?? 0) - (a.rating ?? 0) || a.name.localeCompare(b.name);
+}
+
+/**
+ * Discovery's default view. Matched titles are arranged into Top rated, Recently released,
+ * and one shelf per TMDB genre that holds at least MIN_GENRE_TITLES titles.
+ */
+export function catalogShelves(channels: Channel[]): CatalogShelf[] {
+  const catalog = channels.filter(isCatalogTitle);
+  if (!catalog.length) return [];
+
+  const shelves: CatalogShelf[] = [];
+
+  const topRated = catalog.filter((channel) => (channel.rating ?? 0) > 0).sort(byRating);
+  if (topRated.length) {
+    shelves.push({ id: "top-rated", title: "Top rated", subtitle: "Highest TMDB ratings in your library.", channels: topRated.slice(0, SHELF_SIZE) });
+  }
+
+  const recent = catalog
+    .filter((channel) => yearOf(channel) !== null)
+    .sort((a, b) => (b.release_year ?? 0) - (a.release_year ?? 0) || byRating(a, b));
+  if (recent.length) {
+    shelves.push({ id: "recent", title: "Recently released", subtitle: "Newest TMDB release years first.", channels: recent.slice(0, SHELF_SIZE) });
+  }
+
+  const byGenre = new Map<string, Channel[]>();
+  for (const channel of catalog) {
+    const { names, source } = genresOf(channel);
+    if (source !== "tmdb") continue;
+    for (const name of names) byGenre.set(name, [...(byGenre.get(name) || []), channel]);
+  }
+  const genreShelves = [...byGenre.entries()]
+    .filter(([, titles]) => titles.length >= MIN_GENRE_TITLES)
+    .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
+    .slice(0, MAX_GENRE_SHELVES)
+    .map(([genre, titles]) => ({
+      id: `genre-${genre}`,
+      title: genre,
+      subtitle: `${titles.length} ${titles.length === 1 ? "title" : "titles"} with this TMDB genre.`,
+      channels: [...titles].sort(byRating).slice(0, SHELF_SIZE),
+    }));
+
+  return [...shelves, ...genreShelves];
+}
+
+/**
+ * One line of detail for a browse-only TMDB title: year, rating and up to two genres.
+ * Browse titles are not in the library, so nothing here depends on local playback data.
+ */
+export function browseCaption(title: BrowseTitle): string {
+  const genres = (title.genre_names || "").split(";").map((value) => value.trim()).filter(Boolean).slice(0, 2);
+  const parts = [
+    title.release_year ? String(title.release_year) : null,
+    typeof title.rating === "number" && title.rating > 0 ? `★ ${title.rating.toFixed(1)}` : null,
+    ...genres,
+  ].filter((part): part is string => part !== null);
+  return parts.length ? parts.join(" · ") : "On TMDB";
 }
