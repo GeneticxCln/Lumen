@@ -6,6 +6,8 @@ import { createHash, randomBytes } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 
 const BASE = process.env.ACCOUNT_BASE ?? 'http://127.0.0.1:8787'
+const realFetch = globalThis.fetch
+globalThis.fetch = (url, init = {}) => realFetch(url, { ...init, headers: { Connection: 'close', ...(init.headers ?? {}) } })
 const REDIRECT = 'http://127.0.0.1:53111/callback'
 
 const b64url = (buf) => buf.toString('base64url')
@@ -59,6 +61,21 @@ const sub = `test-user-${b64url(randomBytes(6))}`
   check('authorize rejects non-loopback redirect', res.status === 400, String(res.status))
 }
 
+// 2b. Approval step: only a same-origin POST can mint a code.
+{
+  const form = new URLSearchParams({ redirect_uri: REDIRECT, state: b64url(randomBytes(16)), code_challenge: challenge, code_challenge_method: 'S256' })
+  const postForm = (headers) =>
+    fetch(`${BASE}/desktop/authorize`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...headers }, body: form, redirect: 'manual' })
+  const noOrigin = await postForm({})
+  check('authorize POST without Origin is refused', noOrigin.status === 403, String(noOrigin.status))
+  const foreign = await postForm({ Origin: 'https://evil.example' })
+  check('authorize POST from another site is refused', foreign.status === 403, String(foreign.status))
+  const signedOut = await postForm({ Origin: process.env.ACCOUNT_APP_ORIGIN ?? BASE })
+  check('authorize POST while signed out is refused', signedOut.status === 401, String(signedOut.status))
+  const put = await fetch(`${BASE}/desktop/authorize`, { method: 'PUT' })
+  check('authorize rejects other methods', put.status === 405, String(put.status))
+}
+
 // 3. Token exchange with the seeded code.
 seedCode({ sub, code, challenge, redirectUri: REDIRECT, expiresAt: Date.now() + 60_000 })
 
@@ -80,6 +97,20 @@ seedCode({ sub, code, challenge, redirectUri: REDIRECT, expiresAt: Date.now() + 
   const res = await fetch(`${BASE}/api/desktop/me`, { headers: { Authorization: `Bearer ${globalThis.TOKEN}` } })
   const body = await res.json().catch(() => ({}))
   check('me with app token returns the sub', res.status === 200 && body.sub === sub, String(res.status))
+}
+
+// 5b. A token close to expiry renews itself when used; one with plenty of time is left alone.
+{
+  const hash = sha256(globalThis.TOKEN)
+  const readExpiry = () => {
+    const out = execFileSync('npx', ['wrangler', 'd1', 'execute', 'DB', '--local', '--json', '--command', `SELECT expires_at FROM app_sessions WHERE token_hash = '${hash}';`], { cwd: new URL('..', import.meta.url), stdio: 'pipe' })
+    return JSON.parse(out.toString())[0].results[0].expires_at
+  }
+  const soon = Date.now() + 60 * 60 * 1000
+  execFileSync('npx', ['wrangler', 'd1', 'execute', 'DB', '--local', '--command', `UPDATE app_sessions SET expires_at = ${soon} WHERE token_hash = '${hash}';`], { cwd: new URL('..', import.meta.url), stdio: 'pipe' })
+  await fetch(`${BASE}/api/desktop/me`, { headers: { Authorization: `Bearer ${globalThis.TOKEN}` } })
+  const renewed = readExpiry()
+  check('a token near expiry is renewed when used', renewed - Date.now() > 10 * 24 * 60 * 60 * 1000, `${Math.round((renewed - Date.now()) / 86400000)} days left`)
 }
 
 // 6. Wrong verifier, expired code, and foreign Origin are refused.

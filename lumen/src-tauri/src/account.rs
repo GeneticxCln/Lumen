@@ -291,7 +291,7 @@ pub async fn account_status() -> Result<AccountStatus> {
 
 /// Revokes the app token on the server when reachable, then removes it locally either way.
 /// If the server is unreachable, the revoked-token record cannot be written, so the token
-/// remains valid there until it expires (30 days).
+/// remains valid there until it expires (up to 14 days after last use).
 #[tauri::command]
 pub async fn account_sign_out(app: tauri::AppHandle) -> Result<AccountStatus> {
     if let Some(token) = load_app_token()? {

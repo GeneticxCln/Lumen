@@ -493,13 +493,36 @@ async fn push_pending(pool: &Pool<Sqlite>, client: &reqwest::Client, origin: &st
     }
 }
 
-async fn pull_page(client: &reqwest::Client, origin: &str, token: &str, since: i64) -> Result<PullPage> {
-    let response = client
+/// Where the next pull page starts. The server pages in `(updated_at, kind, key)` order, so the
+/// last row received names the boundary exactly. Using the timestamp alone would skip every row
+/// that shares the boundary's `updated_at`, and a bulk migration gives many rows one timestamp.
+#[derive(Debug, Clone, PartialEq)]
+struct PullCursor {
+    since: i64,
+    after: Option<(String, String)>,
+}
+
+/// The cursor after `items`, or an error if a page claims more rows but carries none (the pull
+/// would never advance).
+fn next_cursor(items: &[SyncItem]) -> Result<PullCursor> {
+    let last = items
+        .last()
+        .ok_or_else(|| PlayerError::Io("Sync page reported more rows but returned none".into()))?;
+    Ok(PullCursor {
+        since: last.updated_at,
+        after: Some((last.kind.clone(), last.key.clone())),
+    })
+}
+
+async fn pull_page(client: &reqwest::Client, origin: &str, token: &str, cursor: &PullCursor) -> Result<PullPage> {
+    let mut request = client
         .get(format!("{origin}/api/desktop/sync"))
-        .query(&[("since", since)])
-        .bearer_auth(token)
-        .send()
-        .await?;
+        .query(&[("since", cursor.since)])
+        .bearer_auth(token);
+    if let Some((kind, key)) = &cursor.after {
+        request = request.query(&[("after_kind", kind.as_str()), ("after_key", key.as_str())]);
+    }
+    let response = request.send().await?;
     check_status(response.status())?;
     Ok(response.json::<PullPage>().await?)
 }
@@ -510,10 +533,10 @@ async fn pull_remote(pool: &Pool<Sqlite>, client: &reqwest::Client, origin: &str
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
     let mut newest = saved;
-    let mut since = saved.saturating_sub(PULL_OVERLAP_MS);
+    let mut cursor = PullCursor { since: saved.saturating_sub(PULL_OVERLAP_MS), after: None };
 
     loop {
-        let page = pull_page(client, origin, token, since).await?;
+        let page = pull_page(client, origin, token, &cursor).await?;
 
         let mut tx = pool.begin().await.map_err(sql_err)?;
         for item in &page.items {
@@ -521,19 +544,13 @@ async fn pull_remote(pool: &Pool<Sqlite>, client: &reqwest::Client, origin: &str
         }
         tx.commit().await.map_err(sql_err)?;
 
-        let page_newest = page.items.iter().map(|item| item.updated_at).max();
-        if let Some(value) = page_newest {
+        if let Some(value) = page.items.iter().map(|item| item.updated_at).max() {
             newest = newest.max(value);
         }
         if !page.has_more {
             break;
         }
-        // The server pages in updated_at order. A page that cannot advance would loop forever.
-        let next = page_newest.unwrap_or(since);
-        if next <= since {
-            return Err(PlayerError::Io("Sync page could not advance".into()));
-        }
-        since = next;
+        cursor = next_cursor(&page.items)?;
     }
 
     set_setting(pool, CURSOR_SETTING, &newest.to_string()).await
@@ -621,4 +638,28 @@ pub async fn sync_now_cmd(app: AppHandle) -> Result<SyncStatus> {
 pub async fn sync_status_cmd(app: AppHandle) -> Result<SyncStatus> {
     let pool = ensure_db(&app).await?;
     status(pool).await
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn item(kind: &str, key: &str, updated_at: i64) -> SyncItem {
+        SyncItem { kind: kind.into(), key: key.into(), payload: json!({}), updated_at, deleted: false }
+    }
+
+    #[test]
+    fn the_cursor_names_the_last_row_not_just_its_timestamp() {
+        // Every row shares one timestamp: a timestamp-only cursor could not tell them apart.
+        let page = vec![item("favorite", "a", 7), item("favorite", "b", 7), item("favorite", "c", 7)];
+        let cursor = next_cursor(&page).unwrap();
+        assert_eq!(cursor.since, 7);
+        assert_eq!(cursor.after, Some(("favorite".to_string(), "c".to_string())));
+    }
+
+    #[test]
+    fn an_empty_page_that_claims_more_cannot_loop_forever() {
+        assert!(next_cursor(&[]).is_err());
+    }
 }
