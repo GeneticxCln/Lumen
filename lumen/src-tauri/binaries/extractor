@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SIDECAR_DIR="$(cd "${SELF_DIR}/../../sidecar" && pwd)"
+export PYTHONPATH="${SIDECAR_DIR}"
+exec "${SIDECAR_DIR}/.venv/bin/python" -m app.main "$@"
