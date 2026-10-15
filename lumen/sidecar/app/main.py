@@ -12,8 +12,6 @@ from typing import Any, Dict, List, Optional
 import httpx
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, status
-from fastapi import Request
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .extract import extract_stream
@@ -24,29 +22,6 @@ from .probe import probe_urls
 TOKEN = secrets.token_urlsafe(32)
 
 app = FastAPI(title="Lumen Sidecar", docs_url=None, redoc_url=None)
-
-# The browser bridge is development-only. Native sidecars expose token-protected
-# extraction endpoints only, never the filesystem/database bridge.
-if os.environ.get("LUMEN_STANDALONE") == "1":
-    from .bridge import router as bridge_router
-    app.include_router(bridge_router)
-
-
-@app.middleware("http")
-async def protect_browser_bridge(request: Request, call_next):
-    if request.url.path.startswith("/api/"):
-        origin = request.headers.get("origin")
-        preview_port = int(os.environ.get("LUMEN_PREVIEW_PORT", "1420"))
-        allowed_origins = {f"http://127.0.0.1:{preview_port}", f"http://localhost:{preview_port}"}
-        if request.url.hostname not in {"127.0.0.1", "localhost"}:
-            return JSONResponse({"detail": "Loopback host required"}, status_code=403)
-        if origin is not None and origin not in allowed_origins:
-            return JSONResponse({"detail": "Foreign origin rejected"}, status_code=403)
-        # A non-simple header plus no CORS prevents drive-by browser requests.
-        media_request = request.url.path in {"/api/local-media", "/api/local-thumbnail", "/api/local-filmstrip"} and request.query_params.get("client") == "local-preview"
-        if not media_request and request.headers.get("x-lumen-client") != "local-preview":
-            return JSONResponse({"detail": "Local preview header required"}, status_code=403)
-    return await call_next(request)
 
 
 def verify_token(authorization: Optional[str] = Header(default=None)) -> None:
@@ -170,8 +145,6 @@ def _find_free_port() -> int:
 
 
 def _watch_stdin(server: uvicorn.Server) -> None:
-    if os.environ.get("LUMEN_STANDALONE") == "1":
-        return
     try:
         for line in sys.stdin:
             if line.strip() == "SHUTDOWN":

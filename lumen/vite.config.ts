@@ -18,12 +18,6 @@ export default defineConfig(() => ({
           port: 1421,
         }
       : undefined,
-    proxy: {
-      "/api": {
-        target: process.env.LUMEN_BRIDGE_URL || "http://127.0.0.1:43127",
-        changeOrigin: true,
-      },
-    },
     watch: {
       ignored: ["**/src-tauri/**"],
     },

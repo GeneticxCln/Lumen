@@ -52,6 +52,7 @@ fn parse_into_channels(
                 extra_headers: None,
                 last_ok: None,
                 last_error: None,
+                is_live: None,
             }])
         }
     }
@@ -128,25 +129,30 @@ async fn read_capped_body(mut response: reqwest::Response, limit: usize) -> Resu
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| PlayerError::Http(e.to_string()))?
+        .map_err(|e| PlayerError::Http(crate::error::redacted(e)))?
     {
         append_capped(&mut buffer, &chunk, limit)?;
     }
     Ok(String::from_utf8_lossy(&buffer).into_owned())
 }
 
-pub async fn import_m3u_url(url: &str, name: Option<String>) -> Result<(Playlist, Vec<Channel>)> {
-    let client = reqwest::Client::builder()
+/// Fetches and parses a playlist. The address is checked before the request, at every redirect
+/// and when the name resolves (see `netguard`); `allow_lan` is the user's opt-in for sources on
+/// their own network.
+pub async fn import_m3u_url(url: &str, name: Option<String>, allow_lan: bool) -> Result<(Playlist, Vec<Channel>)> {
+    let target = crate::netguard::validate_url(url, allow_lan)?;
+
+    let client = crate::netguard::guarded_client(allow_lan)
         .timeout(std::time::Duration::from_secs(30))
         .user_agent("Mozilla/5.0 (X11; Linux x86_64) Lumen/0.1")
         .build()
         .map_err(|e| PlayerError::Http(e.to_string()))?;
 
     let response = client
-        .get(url)
+        .get(target)
         .send()
         .await
-        .map_err(|e| PlayerError::Http(e.to_string()))?;
+        .map_err(|e| PlayerError::Http(crate::error::redacted(e)))?;
 
     if !response.status().is_success() {
         return Err(PlayerError::Http(format!(
@@ -284,5 +290,69 @@ mod tests {
         assert_eq!(channels[0].group_title.as_deref(), Some("HLS"));
         assert!(channels[0].last_ok.is_none());
         assert_eq!(playlist.source, "file");
+    }
+}
+
+#[cfg(test)]
+mod network_guard_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// A one-route HTTP server on loopback. `response` is the raw reply; `hits` counts requests.
+    async fn serve(response: String) -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = [0u8; 2048];
+                let _ = stream.read(&mut buffer).await;
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        (port, hits)
+    }
+
+    fn ok_playlist() -> String {
+        let body = "#EXTM3U\n#EXTINF:-1,One\nhttps://example.com/one.m3u8\n";
+        format!("HTTP/1.1 200 OK\r\nContent-Type: audio/mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    #[tokio::test]
+    async fn a_local_address_is_refused_before_any_connection_is_made() {
+        let (port, hits) = serve(ok_playlist()).await;
+        let error = import_m3u_url(&format!("http://127.0.0.1:{port}/list.m3u"), None, false)
+            .await
+            .expect_err("loopback must be refused by default");
+        assert!(String::from(error).contains("local"), "the message explains why");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "the server was never contacted");
+    }
+
+    #[tokio::test]
+    async fn local_network_sources_work_once_the_user_allows_them() {
+        let (port, hits) = serve(ok_playlist()).await;
+        let (_, channels) = import_m3u_url(&format!("http://127.0.0.1:{port}/list.m3u"), None, true)
+            .await
+            .expect("allowed in LAN mode");
+        assert_eq!(channels.len(), 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_the_cloud_metadata_address_is_not_followed() {
+        let redirect = "HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string();
+        let (port, hits) = serve(redirect).await;
+        // LAN mode lets the first hop (loopback) through, so only the redirect check can stop this.
+        let error = import_m3u_url(&format!("http://127.0.0.1:{port}/list.m3u"), None, true)
+            .await
+            .expect_err("the redirect target is always blocked");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "the first hop was reached");
+        assert!(!String::from(error).is_empty());
     }
 }

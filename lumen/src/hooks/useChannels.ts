@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { listPlaylists, listChannels, probeUrls, toggleFavorite, listFavorites, deletePlaylist, errorMessage } from "../lib/tauri";
 import type { Channel, Playlist } from "../lib/types";
 import { filterChannels } from "../lib/discovery";
@@ -16,10 +16,14 @@ export function useChannels(refreshTrigger = 0) {
   const [error, setError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const reload = useCallback(() => setRevision((value) => value + 1), []);
+  // The skeleton belongs to the first load only. A later reload (after "Check stream", an import,
+  // a sync) refreshes the data in place; blanking the whole library for it made one small action
+  // look like the app had restarted.
+  const loadedOnce = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    if (!loadedOnce.current) setLoading(true);
     setError(null);
     async function load() {
       try {
@@ -36,6 +40,7 @@ export function useChannels(refreshTrigger = 0) {
         setAllChannels(loaded);
         setFavoriteIds(new Set(favorites));
         setSelectedPlaylistId((current) => current !== null && sources.some((source) => source.id === current) ? current : null);
+        loadedOnce.current = true;
       } catch (failure) {
         if (!cancelled) setError(errorMessage(failure));
       } finally {

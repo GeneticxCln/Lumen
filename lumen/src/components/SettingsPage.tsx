@@ -7,6 +7,7 @@ import type { Preferences } from "../lib/discovery";
 import { POSTER_FRAME_OPTIONS } from "../lib/local";
 import { ProfileSettings } from "./ProfileSettings";
 import { AccountSignIn } from "./AccountSignIn";
+import { LanSourcesToggle } from "./LanSourcesToggle";
 import { MediaShelf } from "./MediaShelf";
 import { Icon } from "./Icon";
 import type { IconName } from "./Icon";
@@ -337,6 +338,7 @@ export function SettingsPage({
 
         {section === "sources" && (
           <>
+            <LanSourcesToggle />
             <div className="settings-actions settings-actions-top">
               <h3 className="settings-section-title" style={{ margin: 0, flex: 1 }}>
                 Connected sources · {playlists.length}

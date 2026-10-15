@@ -20,7 +20,15 @@ export interface Env {
 type Handler = (request: Request, env: Env, auth: FreebuffAuth) => Promise<Response>
 
 const CODE_TTL_MS = 60_000
-const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000
+const DAY_MS = 24 * 60 * 60 * 1000
+// A token lasts two weeks and renews itself while the app keeps syncing, so a device that stops
+// being used drops out of the account on its own instead of holding a month-long credential.
+const TOKEN_TTL_MS = 14 * DAY_MS
+const TOKEN_RENEW_WITHIN_MS = 7 * DAY_MS
+/** Rows one account may hold. Far above real use; stops an account from filling the database. */
+const SYNC_MAX_ITEMS_PER_ACCOUNT = 20_000
+/** Deletion markers older than this are no longer needed by any device that syncs. */
+const TOMBSTONE_KEEP_MS = 90 * DAY_MS
 const NO_STORE = { 'Cache-Control': 'private, no-store' }
 
 const STATE_RE = /^[A-Za-z0-9_-]{16,128}$/
@@ -70,17 +78,101 @@ function isLoopbackCallback(value: string): boolean {
   )
 }
 
-/** The desktop client starts here in the system browser. */
-async function desktopAuthorize(request: Request, env: Env, auth: FreebuffAuth): Promise<Response> {
-  const url = new URL(request.url)
-  const redirectUri = url.searchParams.get('redirect_uri') ?? ''
-  const state = url.searchParams.get('state') ?? ''
-  const challenge = url.searchParams.get('code_challenge') ?? ''
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string)
+}
 
-  if (url.searchParams.get('code_challenge_method') !== 'S256') return json({ error: 'invalid_request' }, 400)
-  if (!isLoopbackCallback(redirectUri) || !STATE_RE.test(state) || !CHALLENGE_RE.test(challenge)) {
-    return json({ error: 'invalid_request' }, 400)
+interface AuthorizeRequest {
+  redirectUri: string
+  state: string
+  challenge: string
+}
+
+/** Reads and validates the authorize parameters, or null if any is malformed. */
+function parseAuthorize(params: URLSearchParams | FormData): AuthorizeRequest | null {
+  const redirectUri = String(params.get('redirect_uri') ?? '')
+  const state = String(params.get('state') ?? '')
+  const challenge = String(params.get('code_challenge') ?? '')
+  if (String(params.get('code_challenge_method') ?? '') !== 'S256') return null
+  if (!isLoopbackCallback(redirectUri) || !STATE_RE.test(state) || !CHALLENGE_RE.test(challenge)) return null
+  return { redirectUri, state, challenge }
+}
+
+/**
+ * The page that asks the signed-in person to approve the app. Without it, any website could
+ * navigate a signed-in browser to /desktop/authorize and hand a code to whatever listens on a
+ * local port, which on a shared machine may be another user's process.
+ */
+function consentPage(request: AuthorizeRequest): string {
+  const port = new URL(request.redirectUri).port
+  const field = (name: string, value: string) => `<input type="hidden" name="${name}" value="${escapeHtml(value)}">`
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Allow Lumen</title>
+<style>body{font:16px system-ui,sans-serif;max-width:30rem;margin:12vh auto;padding:0 1rem;color:#1e2531}button{font:inherit;padding:.6rem 1.2rem;margin-right:.5rem;cursor:pointer}</style></head><body>
+<h1>Allow Lumen on this computer?</h1>
+<p>A Lumen app on this computer (listening on port <strong>${escapeHtml(port)}</strong>) is asking to sync your profiles, favorites and watch progress with your account.</p>
+<p>Only continue if you just chose <em>Sign in</em> in Lumen.</p>
+<form method="post" action="/desktop/authorize">${field('redirect_uri', request.redirectUri)}${field('state', request.state)}${field('code_challenge', request.challenge)}${field('code_challenge_method', 'S256')}
+<button type="submit">Allow</button><a href="about:blank">Cancel</a></form></body></html>`
+}
+
+function htmlResponse(body: string): Response {
+  return new Response(body, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      ...NO_STORE,
+      // The approval page must not be framed, and its form may only post back here; the redirect
+      // that follows goes to a loopback address, which form-action also governs.
+      'Content-Security-Policy':
+        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' http://127.0.0.1:* http://localhost:*; frame-ancestors 'none'; base-uri 'none'",
+      'X-Frame-Options': 'DENY',
+    },
+  })
+}
+
+/** Stores a one-time code for the signed-in user and sends the browser back to the app. */
+async function issueCode(env: Env, sub: string, request: AuthorizeRequest): Promise<Response> {
+  const code = randomToken(32)
+  const now = Date.now()
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM desktop_codes WHERE expires_at < ?').bind(now),
+    env.DB.prepare(
+      'INSERT INTO desktop_codes (code_hash, sub, redirect_uri, code_challenge, expires_at) VALUES (?, ?, ?, ?, ?)',
+    ).bind(await sha256Base64url(code), sub, request.redirectUri, request.challenge, now + CODE_TTL_MS),
+  ])
+  const back = new URL(request.redirectUri)
+  back.searchParams.set('code', code)
+  back.searchParams.set('state', request.state)
+  return new Response(null, { status: 302, headers: { Location: back.toString(), ...NO_STORE } })
+}
+
+/**
+ * The desktop client starts here in the system browser. GET shows an approval page; only a
+ * same-origin POST from that page issues the code.
+ */
+async function desktopAuthorize(request: Request, env: Env, auth: FreebuffAuth): Promise<Response> {
+  if (request.method === 'POST') {
+    // Browsers always send Origin on a form POST. A missing or foreign one means the form was
+    // not ours, so refuse before reading anything.
+    if (!request.headers.has('Origin') || !isSameOriginRequest(request, env.APP_ORIGIN)) {
+      return json({ error: 'forbidden' }, 403)
+    }
+    let form: FormData
+    try {
+      form = await request.formData()
+    } catch {
+      return json({ error: 'invalid_request' }, 400)
+    }
+    const parsed = parseAuthorize(form)
+    if (!parsed) return json({ error: 'invalid_request' }, 400)
+    const user = await auth.getUser(request)
+    if (!user) return json({ error: 'Sign in required' }, 401)
+    return issueCode(env, user.sub, parsed)
   }
+
+  const url = new URL(request.url)
+  const parsed = parseAuthorize(url.searchParams)
+  if (!parsed) return json({ error: 'invalid_request' }, 400)
 
   const user = await auth.getUser(request)
   if (!user) {
@@ -89,20 +181,7 @@ async function desktopAuthorize(request: Request, env: Env, auth: FreebuffAuth):
     signIn.searchParams.set('returnTo', url.pathname + url.search)
     return new Response(null, { status: 302, headers: { Location: signIn.toString(), ...NO_STORE } })
   }
-
-  const code = randomToken(32)
-  const now = Date.now()
-  await env.DB.batch([
-    env.DB.prepare('DELETE FROM desktop_codes WHERE expires_at < ?').bind(now),
-    env.DB.prepare(
-      'INSERT INTO desktop_codes (code_hash, sub, redirect_uri, code_challenge, expires_at) VALUES (?, ?, ?, ?, ?)',
-    ).bind(await sha256Base64url(code), user.sub, redirectUri, challenge, now + CODE_TTL_MS),
-  ])
-
-  const back = new URL(redirectUri)
-  back.searchParams.set('code', code)
-  back.searchParams.set('state', state)
-  return new Response(null, { status: 302, headers: { Location: back.toString(), ...NO_STORE } })
+  return htmlResponse(consentPage(parsed))
 }
 
 /** The desktop client exchanges its one-time code for an app token. */
@@ -150,6 +229,10 @@ async function desktopToken(request: Request, env: Env): Promise<Response> {
 
   const token = randomToken(32)
   const expiresAt = Date.now() + TOKEN_TTL_MS
+  // Expired and revoked sessions are dead weight; clear them while we are writing anyway.
+  await env.DB.prepare('DELETE FROM app_sessions WHERE expires_at < ? OR (revoked = 1 AND created_at < ?)')
+    .bind(Date.now(), Date.now() - 30 * DAY_MS)
+    .run()
   await env.DB.prepare(
     'INSERT INTO app_sessions (token_hash, sub, created_at, expires_at) VALUES (?, ?, ?, ?)',
   )
@@ -166,7 +249,13 @@ async function sessionSub(request: Request, env: Env): Promise<string | null> {
   const row = await env.DB.prepare('SELECT sub, expires_at, revoked FROM app_sessions WHERE token_hash = ?')
     .bind(await sha256Base64url(match[1]))
     .first<{ sub: string; expires_at: number; revoked: number }>()
-  if (!row || row.revoked !== 0 || row.expires_at < Date.now()) return null
+  const now = Date.now()
+  if (!row || row.revoked !== 0 || row.expires_at < now) return null
+  if (row.expires_at - now < TOKEN_RENEW_WITHIN_MS) {
+    await env.DB.prepare('UPDATE app_sessions SET expires_at = ? WHERE token_hash = ?')
+      .bind(now + TOKEN_TTL_MS, await sha256Base64url(match[1]))
+      .run()
+  }
   return row.sub
 }
 
@@ -240,13 +329,30 @@ async function desktopSync(request: Request, env: Env): Promise<Response> {
   if (!sub) return json({ error: 'Sign in required' }, 401)
 
   if (request.method === 'GET') {
-    const since = Number(new URL(request.url).searchParams.get('since') ?? '0')
+    const params = new URL(request.url).searchParams
+    const since = Number(params.get('since') ?? '0')
     if (!Number.isSafeInteger(since) || since < 0) return json({ error: 'invalid_request' }, 400)
-    const rows = await env.DB.prepare(
-      'SELECT kind, item_key, payload, updated_at, deleted FROM sync_items WHERE sub = ? AND updated_at > ? ORDER BY updated_at, kind, item_key LIMIT ?',
-    )
-      .bind(sub, since, SYNC_MAX_PULL + 1)
-      .all<{ kind: string; item_key: string; payload: string; updated_at: number; deleted: number }>()
+
+    // Rows are paged in (updated_at, kind, item_key) order. A page boundary can fall in the middle
+    // of rows that share one updated_at (a bulk migration stamps them all alike), so the next
+    // request names the last row it received and the server resumes strictly after it. Without
+    // that, `updated_at > since` would skip every remaining row with the boundary's timestamp.
+    const afterKind = params.get('after_kind')
+    const afterKey = params.get('after_key')
+    if ((afterKind === null) !== (afterKey === null)) return json({ error: 'invalid_request' }, 400)
+    if (afterKey !== null && afterKey.length > SYNC_MAX_KEY_LENGTH) return json({ error: 'invalid_request' }, 400)
+
+    const statement =
+      afterKind !== null && afterKey !== null
+        ? env.DB.prepare(
+            `SELECT kind, item_key, payload, updated_at, deleted FROM sync_items
+             WHERE sub = ? AND (updated_at > ? OR (updated_at = ? AND (kind > ? OR (kind = ? AND item_key > ?))))
+             ORDER BY updated_at, kind, item_key LIMIT ?`,
+          ).bind(sub, since, since, afterKind, afterKind, afterKey, SYNC_MAX_PULL + 1)
+        : env.DB.prepare(
+            'SELECT kind, item_key, payload, updated_at, deleted FROM sync_items WHERE sub = ? AND updated_at > ? ORDER BY updated_at, kind, item_key LIMIT ?',
+          ).bind(sub, since, SYNC_MAX_PULL + 1)
+    const rows = await statement.all<{ kind: string; item_key: string; payload: string; updated_at: number; deleted: number }>()
     const found = rows.results ?? []
     const page = found.slice(0, SYNC_MAX_PULL)
     return json({
@@ -271,6 +377,18 @@ async function desktopSync(request: Request, env: Env): Promise<Response> {
     const items = parseSyncPush(body)
     if (!items) return json({ error: 'invalid_request' }, 400)
     if (items.length === 0) return json({ ok: true, received: 0 })
+
+    // Reclaim old deletion markers first, so the quota never traps an account that only has
+    // tombstones left. Then refuse growth past the cap.
+    await env.DB.prepare('DELETE FROM sync_items WHERE sub = ? AND deleted = 1 AND updated_at < ?')
+      .bind(sub, Date.now() - TOMBSTONE_KEEP_MS)
+      .run()
+    const held = await env.DB.prepare('SELECT COUNT(*) AS n FROM sync_items WHERE sub = ?')
+      .bind(sub)
+      .first<{ n: number }>()
+    if ((held?.n ?? 0) + items.length > SYNC_MAX_ITEMS_PER_ACCOUNT) {
+      return json({ error: 'quota_exceeded' }, 413)
+    }
 
     // Last write wins: a stale push never overwrites a newer row.
     const statements = items.map((item) =>
@@ -300,7 +418,9 @@ async function desktopSync(request: Request, env: Env): Promise<Response> {
 const routes: Record<string, Handler> = {
   '/api/desktop/sync': (request, env) => desktopSync(request, env),
   '/desktop/authorize': (request, env, auth) => {
-    if (request.method !== 'GET') return Promise.resolve(json({ error: 'method_not_allowed' }, 405))
+    if (request.method !== 'GET' && request.method !== 'POST') {
+      return Promise.resolve(json({ error: 'method_not_allowed' }, 405))
+    }
     return desktopAuthorize(request, env, auth)
   },
   '/api/desktop/token': (request, env) => desktopToken(request, env),

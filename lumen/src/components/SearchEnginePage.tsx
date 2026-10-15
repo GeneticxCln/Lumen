@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "./Icon";
 import { MediaShelf } from "./MediaShelf";
-import { errorMessage, getSearchProviders, getSettings, isTauriRuntime, searchEngine, setSearchProviders, setSetting } from "../lib/tauri";
+import { errorMessage, getSearchProviders, getSettings, searchEngine, setSearchProviders, setSetting } from "../lib/tauri";
 import { matchesLanguage } from "../lib/language";
 import type { Channel, SearchProviderConfig, SearchResponse } from "../lib/types";
 
@@ -77,18 +77,17 @@ export function SearchEnginePage({ query, favorites, compact, onPlay, onPlayExte
     const term = query.trim();
     if (term.length < 2) { setResponse(null); return; }
     let active = true;
-    const controller = new AbortController();
     const sequence = ++lastSearch.current;
     const timer = window.setTimeout(() => {
       setBusy(true);
       setError(null);
-      searchEngine(term, controller.signal, language || undefined).then((result) => {
+      searchEngine(term, language || undefined).then((result) => {
         if (active && sequence === lastSearch.current) setResponse(result);
       }).catch((failure) => {
-        if (active && sequence === lastSearch.current && !controller.signal.aborted) setError(errorMessage(failure));
+        if (active && sequence === lastSearch.current) setError(errorMessage(failure));
       }).finally(() => { if (active && sequence === lastSearch.current) setBusy(false); });
     }, 280);
-    return () => { active = false; window.clearTimeout(timer); controller.abort(); };
+    return () => { active = false; window.clearTimeout(timer); };
   }, [query, language]);
 
   const saveProviders = async () => {
@@ -136,7 +135,7 @@ export function SearchEnginePage({ query, favorites, compact, onPlay, onPlayExte
       <div className="form-group">
         <label htmlFor="search-providers">External providers · one JSON object per block</label>
         <textarea id="search-providers" rows={12} spellCheck={false} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={'{\n  "id": "catalog",\n  "name": "My catalog",\n  "endpoint": "https://example.org/search",\n  "token": "optional bearer token",\n  "results_path": "results",\n  "title_field": "title",\n  "url_field": "url",\n  "aliases_field": "aliases",\n  "year_field": "year",\n  "quality_field": "quality",\n  "language_field": "language"\n}'} />
-        <small>{isTauriRuntime() ? "Provider settings are saved on this device. Tokens are kept in the OS credential store, masked here, and preserved when omitted; enter an empty token string to clear one." : "Provider settings are saved locally. Tokens are kept only in memory by the preview backend and are lost when it restarts; enter an empty token string to clear one."} Tokens are sent only to the provider endpoint, never returned in the provider list. JSON data must have an array at results_path; each item must have a title and playable HTTP(S) URL.</small>
+        <small>Provider settings are saved on this device. Tokens are kept in the OS credential store, masked here, and preserved when omitted; enter an empty token string to clear one. Tokens are sent only to the provider endpoint, never returned in the provider list. JSON data must have an array at results_path; each item must have a title and playable HTTP(S) URL.</small>
       </div>
       {error && <div className="dialog-error" role="alert">{error}</div>}
       {notice && <p className="saved-badge" role="status">{notice}</p>}

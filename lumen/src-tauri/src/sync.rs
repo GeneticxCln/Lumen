@@ -6,7 +6,7 @@
 //! not echo each other's changes back and forth. Only http(s) streams sync: a local file path
 //! means nothing on another device.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -43,6 +43,12 @@ const SEEDED_SETTING: &str = "sync_seeded";
 
 static SYNC_LOCK: Mutex<()> = Mutex::const_new(());
 static SCHEDULED: AtomicBool = AtomicBool::new(false);
+
+/// How often playback progress, saved every few seconds while something plays, may start a
+/// sync. Every save is still written to the local queue at once; only the network round trip is
+/// spaced out. Stopping playback and every other kind of change sync immediately.
+const PROGRESS_SYNC_INTERVAL_MS: i64 = 90_000;
+static LAST_PROGRESS_SYNC_MS: AtomicI64 = AtomicI64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncItem {
@@ -389,7 +395,7 @@ async fn queue_all(pool: &Pool<Sqlite>) -> Result<()> {
         .await
         .map_err(sql_err)?;
     for id in profile_ids {
-        queue_profile(&mut *tx, id).await?;
+        queue_profile(&mut tx, id).await?;
     }
 
     let favorites = sqlx::query("SELECT profile_id, channel_url, active, updated_at FROM favorites")
@@ -401,7 +407,7 @@ async fn queue_all(pool: &Pool<Sqlite>) -> Result<()> {
         let url: String = row.get("channel_url");
         let active = row.get::<i64, _>("active") != 0;
         let updated_at: i64 = row.get("updated_at");
-        queue_favorite(&mut *tx, profile_id, &url, active, updated_at).await?;
+        queue_favorite(&mut tx, profile_id, &url, active, updated_at).await?;
     }
 
     let history = sqlx::query(
@@ -414,7 +420,7 @@ async fn queue_all(pool: &Pool<Sqlite>) -> Result<()> {
         let profile_id: i64 = row.get("profile_id");
         let path: String = row.get("path");
         queue_progress(
-            &mut *tx,
+            &mut tx,
             profile_id,
             &path,
             row.get("position"),
@@ -493,13 +499,36 @@ async fn push_pending(pool: &Pool<Sqlite>, client: &reqwest::Client, origin: &st
     }
 }
 
-async fn pull_page(client: &reqwest::Client, origin: &str, token: &str, since: i64) -> Result<PullPage> {
-    let response = client
+/// Where the next pull page starts. The server pages in `(updated_at, kind, key)` order, so the
+/// last row received names the boundary exactly. Using the timestamp alone would skip every row
+/// that shares the boundary's `updated_at`, and a bulk migration gives many rows one timestamp.
+#[derive(Debug, Clone, PartialEq)]
+struct PullCursor {
+    since: i64,
+    after: Option<(String, String)>,
+}
+
+/// The cursor after `items`, or an error if a page claims more rows but carries none (the pull
+/// would never advance).
+fn next_cursor(items: &[SyncItem]) -> Result<PullCursor> {
+    let last = items
+        .last()
+        .ok_or_else(|| PlayerError::Io("Sync page reported more rows but returned none".into()))?;
+    Ok(PullCursor {
+        since: last.updated_at,
+        after: Some((last.kind.clone(), last.key.clone())),
+    })
+}
+
+async fn pull_page(client: &reqwest::Client, origin: &str, token: &str, cursor: &PullCursor) -> Result<PullPage> {
+    let mut request = client
         .get(format!("{origin}/api/desktop/sync"))
-        .query(&[("since", since)])
-        .bearer_auth(token)
-        .send()
-        .await?;
+        .query(&[("since", cursor.since)])
+        .bearer_auth(token);
+    if let Some((kind, key)) = &cursor.after {
+        request = request.query(&[("after_kind", kind.as_str()), ("after_key", key.as_str())]);
+    }
+    let response = request.send().await?;
     check_status(response.status())?;
     Ok(response.json::<PullPage>().await?)
 }
@@ -510,30 +539,24 @@ async fn pull_remote(pool: &Pool<Sqlite>, client: &reqwest::Client, origin: &str
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
     let mut newest = saved;
-    let mut since = saved.saturating_sub(PULL_OVERLAP_MS);
+    let mut cursor = PullCursor { since: saved.saturating_sub(PULL_OVERLAP_MS), after: None };
 
     loop {
-        let page = pull_page(client, origin, token, since).await?;
+        let page = pull_page(client, origin, token, &cursor).await?;
 
         let mut tx = pool.begin().await.map_err(sql_err)?;
         for item in &page.items {
-            apply_remote(&mut *tx, item).await?;
+            apply_remote(&mut tx, item).await?;
         }
         tx.commit().await.map_err(sql_err)?;
 
-        let page_newest = page.items.iter().map(|item| item.updated_at).max();
-        if let Some(value) = page_newest {
+        if let Some(value) = page.items.iter().map(|item| item.updated_at).max() {
             newest = newest.max(value);
         }
         if !page.has_more {
             break;
         }
-        // The server pages in updated_at order. A page that cannot advance would loop forever.
-        let next = page_newest.unwrap_or(since);
-        if next <= since {
-            return Err(PlayerError::Io("Sync page could not advance".into()));
-        }
-        since = next;
+        cursor = next_cursor(&page.items)?;
     }
 
     set_setting(pool, CURSOR_SETTING, &newest.to_string()).await
@@ -585,6 +608,26 @@ pub fn schedule(pool: &'static Pool<Sqlite>) {
     });
 }
 
+/// True when enough time has passed since `last` for a progress save to start a sync.
+fn progress_sync_due(last: i64, now: i64) -> bool {
+    // A clock that moved backwards (`now < last`) must not hold syncing off until it catches up.
+    now < last || now - last >= PROGRESS_SYNC_INTERVAL_MS
+}
+
+/// Like `schedule`, for the steady stream of progress saves during playback: at most one sync
+/// per `PROGRESS_SYNC_INTERVAL_MS`, instead of a push and a pull every few seconds.
+pub fn schedule_progress(pool: &'static Pool<Sqlite>) {
+    let now = now_ms();
+    let last = LAST_PROGRESS_SYNC_MS.load(Ordering::SeqCst);
+    if progress_sync_due(last, now)
+        && LAST_PROGRESS_SYNC_MS
+            .compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    {
+        schedule(pool);
+    }
+}
+
 /// Syncs at startup and then every few minutes, so changes from another device arrive even
 /// while this one is idle. Does nothing while signed out.
 pub fn start(pool: &'static Pool<Sqlite>) {
@@ -621,4 +664,37 @@ pub async fn sync_now_cmd(app: AppHandle) -> Result<SyncStatus> {
 pub async fn sync_status_cmd(app: AppHandle) -> Result<SyncStatus> {
     let pool = ensure_db(&app).await?;
     status(pool).await
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn item(kind: &str, key: &str, updated_at: i64) -> SyncItem {
+        SyncItem { kind: kind.into(), key: key.into(), payload: json!({}), updated_at, deleted: false }
+    }
+
+    #[test]
+    fn the_cursor_names_the_last_row_not_just_its_timestamp() {
+        // Every row shares one timestamp: a timestamp-only cursor could not tell them apart.
+        let page = vec![item("favorite", "a", 7), item("favorite", "b", 7), item("favorite", "c", 7)];
+        let cursor = next_cursor(&page).unwrap();
+        assert_eq!(cursor.since, 7);
+        assert_eq!(cursor.after, Some(("favorite".to_string(), "c".to_string())));
+    }
+
+    #[test]
+    fn progress_saves_start_a_sync_at_most_once_per_interval() {
+        assert!(progress_sync_due(0, PROGRESS_SYNC_INTERVAL_MS), "first save after startup");
+        assert!(!progress_sync_due(1_000_000, 1_000_000 + 5_000), "a save 5 s later waits");
+        assert!(!progress_sync_due(1_000_000, 1_000_000 + PROGRESS_SYNC_INTERVAL_MS - 1));
+        assert!(progress_sync_due(1_000_000, 1_000_000 + PROGRESS_SYNC_INTERVAL_MS));
+        assert!(progress_sync_due(2_000_000, 1_000_000), "a clock that moved backwards cannot wedge it");
+    }
+
+    #[test]
+    fn an_empty_page_that_claims_more_cannot_loop_forever() {
+        assert!(next_cursor(&[]).is_err());
+    }
 }

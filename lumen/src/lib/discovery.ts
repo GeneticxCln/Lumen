@@ -105,6 +105,9 @@ export function contentKind(channel: Channel): ContentKind {
   const text = `${channel.group_title || ""} ${channel.name}`.toLocaleLowerCase();
   if (/\b(series|show|shows|season|episode|episodes|sitcom|soap|anime)\b/.test(text)) return "series";
   if (/\b(movie|movies|film|films|cinema|feature|vod|demo|documentary|short)\b/.test(text)) return "movie";
+  // A positive #EXTINF duration means a fixed-length title. The reverse does not hold: many
+  // providers write -1 for everything, films included, so -1 proves nothing and stays "live".
+  if (channel.is_live === false) return "movie";
   return "live";
 }
 

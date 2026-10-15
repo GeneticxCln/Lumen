@@ -74,6 +74,12 @@ assert(genresOf(categorised[5]).names[0] === "Uncategorized", "A title without s
 
 assert(contentKind(categorised[0]) === "movie" && contentKind({ ...categorised[0], tmdb_type: "tv" }) === "series", "TMDB media type classifies enriched titles for the right browse layout");
 assert(contentKind({ ...categorised[0], tmdb_type: undefined, group_title: "Movies" }) === "movie", "Unmatched titles retain the source-name classification fallback");
+const plain: Channel = { id: 90, playlist_id: 1, name: "Channel 9", url: "https://example.org/9", group_title: "General" };
+assert(contentKind(plain) === "live", "An unlabelled entry with no duration is treated as live");
+assert(contentKind({ ...plain, is_live: true }) === "live", "-1 says nothing more than the default");
+assert(contentKind({ ...plain, is_live: false }) === "movie", "A fixed-length entry with no other hint is on-demand, not live");
+assert(contentKind({ ...plain, is_live: true, group_title: "Movies" }) === "movie", "Providers that write -1 for films keep their group-name classification");
+assert(contentKind({ ...plain, is_live: false, name: "Show S01E02" }) === "series", "Episode names still win for on-demand entries");
 assert(yearOf(categorised[0]) === 2008, "TMDB release year is used");
 assert(yearOf(categorised[2]) === null, "A live channel has no year");
 assert(yearOf({ ...categorised[0], release_year: 0 }) === null, "A zero year is treated as unknown");

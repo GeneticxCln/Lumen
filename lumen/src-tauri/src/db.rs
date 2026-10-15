@@ -1,5 +1,6 @@
 use crate::auth;
 use crate::error::{PlayerError, Result};
+use crate::pin_guard;
 use crate::playlist::import::{import_m3u_file, Channel, Playlist};
 use crate::sync;
 use chrono::Utc;
@@ -295,7 +296,7 @@ pub async fn delete_playlist(pool: &Pool<Sqlite>, playlist_id: i64) -> Result<()
         .execute(&mut *tx)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
-        sync::queue_favorite(&mut *tx, profile_id, &url, false, now).await?;
+        sync::queue_favorite(&mut tx, profile_id, &url, false, now).await?;
     }
 
     tx.commit()
@@ -316,7 +317,7 @@ async fn insert_channel_rows(
     // Batch insert up to 100 rows per statement to stay well below SQLite's 999/32766 bind parameter limits
     for chunk in channels.chunks(100) {
         let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
-            "INSERT INTO channels (playlist_id, name, url, group_title, tvg_id, tvg_logo, language, extra_headers, last_ok, last_error) ",
+            "INSERT INTO channels (playlist_id, name, url, group_title, tvg_id, tvg_logo, language, extra_headers, last_ok, last_error, is_live) ",
         );
         qb.push_values(chunk, |mut b, channel| {
             let headers_json = channel.extra_headers.as_deref().unwrap_or("{}");
@@ -329,7 +330,8 @@ async fn insert_channel_rows(
                 .push_bind(&channel.language)
                 .push_bind(headers_json)
                 .push_bind(channel.last_ok)
-                .push_bind(&channel.last_error);
+                .push_bind(&channel.last_error)
+                .push_bind(channel.is_live.map(i64::from));
         });
         qb.build()
             .execute(&mut *conn)
@@ -383,6 +385,21 @@ pub struct EnrichedChannel {
 /// The single channel-listing query, used by both the command layer and the tests.
 /// Returning the TMDB columns here keeps one implementation of the query/group
 /// filtering instead of a production copy and a test-only copy that could drift.
+/// A `LIKE` pattern matching `needle` anywhere, with `%`, `_` and `\` taken literally. Pair it
+/// with `ESCAPE '\'` in the SQL. Without this a search for "100%" or "a_b" matches far more.
+pub fn contains_pattern(needle: &str) -> String {
+    let mut pattern = String::with_capacity(needle.len() + 2);
+    pattern.push('%');
+    for ch in needle.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('%');
+    pattern
+}
+
 pub async fn list_channels(
     pool: &Pool<Sqlite>,
     playlist_id: i64,
@@ -390,13 +407,13 @@ pub async fn list_channels(
     group: Option<&str>,
 ) -> Result<Vec<EnrichedChannel>> {
     let mut sql = String::from(
-        "SELECT id, playlist_id, name, url, group_title, tvg_id, tvg_logo, language, extra_headers, last_ok, last_error, \
+        "SELECT id, playlist_id, name, url, group_title, tvg_id, tvg_logo, language, extra_headers, last_ok, last_error, is_live, \
          tmdb_id, tmdb_type, poster_path, backdrop_path, overview, release_year, rating, genre_names, enriched_at \
          FROM channels WHERE playlist_id = ?",
     );
 
     if query.is_some() {
-        sql.push_str(" AND name LIKE ?");
+        sql.push_str(" AND name LIKE ? ESCAPE '\\'");
     }
 
     if group.is_some() {
@@ -409,7 +426,7 @@ pub async fn list_channels(
     let mut q = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(playlist_id);
 
     if let Some(q_str) = query {
-        q = q.bind(format!("%{}%", q_str));
+        q = q.bind(contains_pattern(q_str));
     }
 
     if let Some(g) = group {
@@ -436,6 +453,7 @@ pub async fn list_channels(
                 extra_headers: row.get("extra_headers"),
                 last_ok: row.get("last_ok"),
                 last_error: row.get("last_error"),
+                is_live: row.get::<Option<i64>, _>("is_live").map(|value| value != 0),
             },
             tmdb_id: row.get("tmdb_id"),
             tmdb_type: row.get("tmdb_type"),
@@ -454,7 +472,7 @@ pub async fn list_channels(
 
 pub async fn get_channel(pool: &Pool<Sqlite>, channel_id: i64) -> Result<Channel> {
     let row = sqlx::query(
-        "SELECT id, playlist_id, name, url, group_title, tvg_id, tvg_logo, language, extra_headers, last_ok, last_error FROM channels WHERE id = ?",
+        "SELECT id, playlist_id, name, url, group_title, tvg_id, tvg_logo, language, extra_headers, last_ok, last_error, is_live FROM channels WHERE id = ?",
     )
     .bind(channel_id)
     .fetch_one(pool)
@@ -473,6 +491,7 @@ pub async fn get_channel(pool: &Pool<Sqlite>, channel_id: i64) -> Result<Channel
         extra_headers: row.get("extra_headers"),
         last_ok: row.get("last_ok"),
         last_error: row.get("last_error"),
+        is_live: row.get::<Option<i64>, _>("is_live").map(|value| value != 0),
     })
 }
 
@@ -557,7 +576,7 @@ pub async fn toggle_favorite(
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    sync::queue_favorite(&mut *tx, profile_id, &url, favorite, now).await?;
+    sync::queue_favorite(&mut tx, profile_id, &url, favorite, now).await?;
 
     tx.commit()
         .await
@@ -689,7 +708,7 @@ pub async fn create_profile(
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
     let id: i64 = row.get("id");
 
-    sync::queue_profile(&mut *tx, id).await?;
+    sync::queue_profile(&mut tx, id).await?;
 
     tx.commit()
         .await
@@ -718,7 +737,7 @@ pub async fn rename_profile(pool: &Pool<Sqlite>, profile_id: i64, name: &str) ->
         return Err(PlayerError::NotFound("Profile no longer exists".into()));
     }
 
-    sync::queue_profile(&mut *tx, profile_id).await?;
+    sync::queue_profile(&mut tx, profile_id).await?;
 
     tx.commit()
         .await
@@ -765,7 +784,7 @@ pub async fn delete_profile(pool: &Pool<Sqlite>, profile_id: i64) -> Result<()> 
     }
 
     if let Some(sync_key) = sync_key {
-        sync::queue_profile_deleted(&mut *tx, &sync_key, Utc::now().timestamp_millis()).await?;
+        sync::queue_profile_deleted(&mut tx, &sync_key, Utc::now().timestamp_millis()).await?;
     }
 
     tx.commit()
@@ -819,6 +838,28 @@ pub async fn verify_profile_pin(
     }
 }
 
+/// Proves the caller knows a profile's PIN before a change to that profile. A profile without a
+/// PIN is open. Wrong guesses are throttled per profile (see `pin_guard`).
+pub async fn authorize_profile(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    profile_id: i64,
+    pin: Option<&str>,
+) -> Result<()> {
+    if let Some(wait) = pin_guard::locked_out_for(profile_id) {
+        return Err(PlayerError::InvalidArg(format!(
+            "Too many wrong PINs. Try again in {} seconds.",
+            wait.as_secs().max(1)
+        )));
+    }
+    if verify_profile_pin(pool, profile_id, pin.unwrap_or_default()).await? {
+        pin_guard::record_success(profile_id);
+        Ok(())
+    } else {
+        pin_guard::record_failure(profile_id);
+        Err(PlayerError::InvalidArg("That PIN is not correct".to_string()))
+    }
+}
+
 pub async fn touch_profile(pool: &Pool<Sqlite>, profile_id: i64) -> Result<()> {
     sqlx::query("UPDATE profiles SET last_used_at = ? WHERE id = ?")
         .bind(Utc::now().timestamp())
@@ -839,13 +880,11 @@ pub async fn set_active_profile(pool: &Pool<Sqlite>, profile_id: i64) -> Result<
 }
 
 pub async fn active_profile_id(pool: &Pool<Sqlite>) -> Result<i64> {
-    if let Some(stored) = get_setting(pool, ACTIVE_PROFILE_KEY).await? {
-        if let Ok(id) = stored.parse::<i64>() {
-            if profile_exists(pool, id).await? {
+    if let Some(stored) = get_setting(pool, ACTIVE_PROFILE_KEY).await?
+        && let Ok(id) = stored.parse::<i64>()
+            && profile_exists(pool, id).await? {
                 return Ok(id);
             }
-        }
-    }
 
     let row = sqlx::query("SELECT id FROM profiles ORDER BY created_at, id LIMIT 1")
         .fetch_optional(pool)
@@ -1021,7 +1060,7 @@ pub async fn add_history(
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    sync::queue_progress(&mut *tx, profile_id, path, position, duration, now).await?;
+    sync::queue_progress(&mut tx, profile_id, path, position, duration, now).await?;
 
     prune_history_with(&mut tx, DEFAULT_HISTORY_RETENTION).await?;
 
@@ -1185,6 +1224,7 @@ mod tests {
             extra_headers: None,
             last_ok: None,
             last_error: None,
+            is_live: None,
         }
     }
 
@@ -1778,6 +1818,80 @@ mod tests {
         let cleared = set_profile_pin(&pool, profile.id, None).await.unwrap();
         assert!(!cleared.has_pin);
         assert!(verify_profile_pin(&pool, profile.id, "anything").await.unwrap());
+    }
+
+    /// Only this test calls `authorize_profile`: the attempt limiter is process-wide and keyed by
+    /// profile id, so a second test reusing an id could lock it out mid-run.
+    #[tokio::test]
+    async fn test_profile_changes_require_the_current_pin() {
+        let pool = test_pool().await;
+        let profile = create_profile(&pool, "Parent", None).await.unwrap();
+
+        authorize_profile(&pool, profile.id, None)
+            .await
+            .expect("a profile without a PIN is open");
+
+        set_profile_pin(&pool, profile.id, Some("4821")).await.unwrap();
+        assert!(authorize_profile(&pool, profile.id, None).await.is_err(), "no PIN supplied");
+        assert!(authorize_profile(&pool, profile.id, Some("0000")).await.is_err(), "wrong PIN");
+        authorize_profile(&pool, profile.id, Some("4821"))
+            .await
+            .expect("the right PIN is accepted");
+
+        // Repeated wrong guesses lock the profile, and then even the right PIN waits.
+        for _ in 0..5 {
+            let _ = authorize_profile(&pool, profile.id, Some("0000")).await;
+        }
+        let locked = authorize_profile(&pool, profile.id, Some("4821")).await.unwrap_err();
+        assert!(String::from(locked).contains("Too many wrong PINs"));
+
+        pin_guard::record_success(profile.id);
+        authorize_profile(&pool, profile.id, Some("4821")).await.unwrap();
+        pin_guard::record_success(profile.id);
+    }
+
+    #[tokio::test]
+    async fn test_live_flag_survives_import_and_reload() {
+        let pool = test_pool().await;
+        let mut live = channel(0, "Live", "http://x.example/live.m3u8");
+        live.is_live = Some(true);
+        let mut film = channel(0, "Film", "http://x.example/film.mp4");
+        film.is_live = Some(false);
+        let unknown = channel(0, "Unknown", "http://x.example/unknown.m3u8");
+        let pid = import_playlist(&pool, &playlist("Flags"), &[live, film, unknown]).await.unwrap();
+
+        let rows = list_channels(&pool, pid, None, None).await.unwrap();
+        let flag = |name: &str| rows.iter().find(|row| row.channel.name == name).unwrap().channel.is_live;
+        assert_eq!(flag("Live"), Some(true));
+        assert_eq!(flag("Film"), Some(false));
+        assert_eq!(flag("Unknown"), None);
+    }
+
+    #[tokio::test]
+    async fn test_channel_search_treats_percent_and_underscore_literally() {
+        let pool = test_pool().await;
+        let pid = import_playlist(
+            &pool,
+            &playlist("Wildcards"),
+            &[
+                channel(0, "100% Real", "http://x.example/1.m3u8"),
+                channel(0, "100 Really", "http://x.example/2.m3u8"),
+                channel(0, "a_b", "http://x.example/3.m3u8"),
+                channel(0, "axb", "http://x.example/4.m3u8"),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let names = |rows: Vec<EnrichedChannel>| -> Vec<String> {
+            let mut names: Vec<String> = rows.into_iter().map(|row| row.channel.name).collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(list_channels(&pool, pid, Some("100%"), None).await.unwrap()), vec!["100% Real"]);
+        assert_eq!(names(list_channels(&pool, pid, Some("a_b"), None).await.unwrap()), vec!["a_b"]);
+        assert_eq!(names(list_channels(&pool, pid, Some("real"), None).await.unwrap()), vec!["100 Really", "100% Real"]);
+        assert_eq!(contains_pattern(r"50%_\"), r"%50\%\_\\%");
     }
 
     #[tokio::test]

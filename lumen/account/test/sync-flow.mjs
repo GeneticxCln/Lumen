@@ -61,7 +61,10 @@ async function sync(token, { method = 'GET', query = '', body, origin } = {}) {
 }
 
 const push = (token, items) => sync(token, { method: 'POST', body: { items } })
-const pull = (token, since = 0) => sync(token, { query: `?since=${since}` })
+const pull = (token, since = 0, after) =>
+  sync(token, {
+    query: `?since=${since}${after ? `&after_kind=${encodeURIComponent(after.kind)}&after_key=${encodeURIComponent(after.key)}` : ''}`,
+  })
 
 const suffix = rand()
 const subA = `sync-a-${suffix}`
@@ -130,6 +133,37 @@ check(
   after.json.items.every((i) => i.updated_at > 1000) && after.json.items.length === 2,
   String(after.json.items.length),
 )
+
+// 7b. Paging across rows that share one timestamp. A bulk migration stamps many records alike;
+// the page boundary must not drop the rest of them.
+const bulk = await signIn(`sync-bulk-${suffix}`)
+const SAME = 7_000_000
+for (let start = 0; start < 1200; start += 500) {
+  const items = Array.from({ length: Math.min(500, 1200 - start) }, (_, n) => ({
+    kind: 'favorite',
+    key: `http://bulk.example/${String(start + n).padStart(5, '0')}.m3u8`,
+    payload: { n: start + n },
+    updated_at: SAME,
+    deleted: false,
+  }))
+  await push(bulk, items)
+}
+const seen = new Set()
+let cursor = { since: 0, after: undefined }
+let pages = 0
+for (;;) {
+  const page = await pull(bulk, cursor.since, cursor.after)
+  if (page.status !== 200) break
+  pages++
+  for (const item of page.json.items) seen.add(item.key)
+  if (!page.json.has_more || page.json.items.length === 0) break
+  const last = page.json.items[page.json.items.length - 1]
+  cursor = { since: last.updated_at, after: { kind: last.kind, key: last.key } }
+  if (pages > 10) break
+}
+check('1200 rows sharing one timestamp all arrive across pages', seen.size === 1200, `${seen.size} in ${pages} pages`)
+const oneSided = await sync(bulk, { query: '?since=0&after_kind=favorite' })
+check('rejects after_kind without after_key', oneSided.status === 400, String(oneSided.status))
 
 // 8. Input validation.
 const bad = [

@@ -3,6 +3,7 @@ use crate::error::{PlayerError, Result};
 use crate::playback::mpv_ipc::MpvIpcBackend;
 use crate::playback::{PlaybackBackend, PlayerStateEvent};
 use crate::playlist::import::{import_m3u_file, import_m3u_url, Channel, Playlist};
+use crate::media_tools::{cache_name, prune_cache, run_with_timeout};
 use crate::secrets;
 use std::collections::HashSet;
 use crate::sidecar::*;
@@ -11,20 +12,21 @@ use base64::Engine;
 use sqlx::Row;
 use chrono::Utc;
 use serde::Serialize;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 
 // Global playback backend
-static PLAYBACK_BACKEND: OnceLock<Arc<Mutex<Option<MpvIpcBackend>>>> = OnceLock::new();
+//
+// The cell is locked only long enough to read or replace the handle. Handlers clone the `Arc`
+// and release the lock before talking to mpv, so a slow `load` can never block Stop or Pause.
+static PLAYBACK_BACKEND: OnceLock<Arc<Mutex<Option<Arc<MpvIpcBackend>>>>> = OnceLock::new();
 
-pub async fn get_playback_backend() -> Result<Arc<Mutex<Option<MpvIpcBackend>>>> {
+pub async fn get_playback_backend() -> Result<Arc<Mutex<Option<Arc<MpvIpcBackend>>>>> {
     let backend = PLAYBACK_BACKEND.get_or_init(|| Arc::new(Mutex::new(None)));
     Ok(backend.clone())
 }
@@ -55,11 +57,22 @@ async fn ensure_sidecar_handle(app: &AppHandle) -> Result<Arc<Mutex<SidecarManag
     get_sidecar().ok_or_else(|| PlayerError::Sidecar("Sidecar not initialized".into()))
 }
 
+/// The running backend, or an error when nothing is playing. Holds the lock only to clone.
+async fn current_backend() -> Result<Arc<MpvIpcBackend>> {
+    let cell = get_playback_backend().await?;
+    let guard = cell.lock().await;
+    guard
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| PlayerError::Mpv("No active playback".into()))
+}
+
 #[tauri::command]
 pub async fn play_url(
     url: String,
     headers: Option<serde_json::Value>,
     channel_id: Option<i64>,
+    volume: Option<i64>,
     app: AppHandle,
 ) -> Result<()> {
     let pool = ensure_db(&app).await?;
@@ -74,21 +87,21 @@ pub async fn play_url(
         .await?
         .unwrap_or_default();
 
-    let backend_cell = get_playback_backend().await?;
-    let mut backend_guard = backend_cell.lock().await;
-
-    let need_spawn = match backend_guard.as_mut() {
-        Some(b) => !b.is_alive().await,
-        None => true,
+    let backend = {
+        let backend_cell = get_playback_backend().await?;
+        let mut guard = backend_cell.lock().await;
+        let running = guard.as_ref().is_some_and(|backend| backend.is_alive());
+        if !running {
+            *guard = Some(Arc::new(
+                MpvIpcBackend::new(Some(app.clone()), &hwdec, &cache, &extra_args).await?,
+            ));
+        }
+        guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| PlayerError::Mpv("mpv did not start".into()))?
     };
 
-    if need_spawn {
-        *backend_guard = Some(
-            MpvIpcBackend::new(Some(app.clone()), &hwdec, &cache, &extra_args).await?,
-        );
-    }
-
-    let backend = backend_guard.as_mut().unwrap();
     let hdrs = headers.as_ref().and_then(|v| {
         v.as_object().map(|obj| {
             obj.iter()
@@ -97,14 +110,17 @@ pub async fn play_url(
         })
     });
 
+    // Volume goes in before the file does, so playback never starts at mpv's default level.
+    if let Some(volume) = volume {
+        let _ = backend.set_volume(volume).await;
+    }
     backend.load(&url, hdrs.as_deref()).await?;
 
     // Check if there is a saved resume position for local files
-    if let Ok(Some(resume_pos)) = get_resume_position(pool, profile_id, &url).await {
-        if resume_pos > 1.0 {
+    if let Ok(Some(resume_pos)) = get_resume_position(pool, profile_id, &url).await
+        && resume_pos > 1.0 {
             let _ = backend.seek(resume_pos).await;
         }
-    }
 
     // Record history entry for the active profile
     let _ = add_history(pool, profile_id, channel_id, &url, 0.0, 0.0).await;
@@ -117,84 +133,61 @@ pub async fn play_url(
 
 #[tauri::command]
 pub async fn pause() -> Result<()> {
-    let backend_cell = get_playback_backend().await?;
-    let backend_guard = backend_cell.lock().await;
-
-    if let Some(backend) = backend_guard.as_ref() {
-        backend.pause().await
-    } else {
-        Err(PlayerError::Mpv("No active playback".into()))
-    }
+    let backend = current_backend().await?;
+    backend.pause().await
 }
 
 #[tauri::command]
 pub async fn seek(seconds: f64) -> Result<()> {
-    let backend_cell = get_playback_backend().await?;
-    let backend_guard = backend_cell.lock().await;
-
-    if let Some(backend) = backend_guard.as_ref() {
-        backend.seek(seconds).await
-    } else {
-        Err(PlayerError::Mpv("No active playback".into()))
-    }
+    let backend = current_backend().await?;
+    backend.seek(seconds).await
 }
 
 #[tauri::command]
 pub async fn set_volume(vol: i64) -> Result<()> {
-    let backend_cell = get_playback_backend().await?;
-    let backend_guard = backend_cell.lock().await;
-
-    if let Some(backend) = backend_guard.as_ref() {
-        backend.set_volume(vol).await
-    } else {
-        Err(PlayerError::Mpv("No active playback".into()))
-    }
+    let backend = current_backend().await?;
+    backend.set_volume(vol).await
 }
 
 #[tauri::command]
 pub async fn set_fullscreen(enabled: bool) -> Result<()> {
-    let backend_cell = get_playback_backend().await?;
-    let backend_guard = backend_cell.lock().await;
-
-    if let Some(backend) = backend_guard.as_ref() {
-        backend.set_property("fullscreen", serde_json::json!(enabled)).await
-    } else {
-        Err(PlayerError::Mpv("No active playback".into()))
-    }
+    let backend = current_backend().await?;
+    backend.set_property("fullscreen", serde_json::json!(enabled)).await
 }
 
 #[tauri::command]
 pub async fn set_player_track(kind: String, id: String) -> Result<()> {
-    let backend_cell = get_playback_backend().await?;
-    let backend_guard = backend_cell.lock().await;
-    if let Some(backend) = backend_guard.as_ref() {
-        backend.set_track(&kind, &id).await
-    } else {
-        Err(PlayerError::Mpv("No active playback".into()))
-    }
+    let backend = current_backend().await?;
+    backend.set_track(&kind, &id).await
 }
 
 #[tauri::command]
 pub async fn set_player_quality(id: String) -> Result<()> {
-    let backend_cell = get_playback_backend().await?;
-    let backend_guard = backend_cell.lock().await;
-    if let Some(backend) = backend_guard.as_ref() {
-        backend.set_quality(&id).await
-    } else {
-        Err(PlayerError::Mpv("No active playback".into()))
-    }
+    let backend = current_backend().await?;
+    backend.set_quality(&id).await
 }
 
 #[tauri::command]
 pub async fn stop(app: AppHandle) -> Result<()> {
-    let backend_cell = get_playback_backend().await?;
-    let mut backend_guard = backend_cell.lock().await;
-
-    if let Some(backend) = backend_guard.take() {
+    // Take the handle and release the lock first: Stop must never wait behind a load.
+    let taken = {
+        let backend_cell = get_playback_backend().await?;
+        let mut guard = backend_cell.lock().await;
+        guard.take()
+    };
+    if let Some(backend) = taken {
+        // `stop` cancels any load still waiting on this backend before telling mpv to quit.
         let _ = backend.stop().await;
     }
     let _ = app.emit("player://state", PlayerStateEvent::default());
     Ok(())
+}
+
+/// The user's opt-in to fetch from their own network (a NAS, Jellyfin on this machine).
+const ALLOW_LAN_SETTING: &str = "allow_lan_sources";
+
+async fn allow_lan_sources(pool: &sqlx::Pool<sqlx::Sqlite>) -> bool {
+    matches!(get_setting(pool, ALLOW_LAN_SETTING).await, Ok(Some(value)) if value == "true")
 }
 
 #[tauri::command]
@@ -207,9 +200,9 @@ pub async fn import_playlist_file(path: String, app: AppHandle) -> Result<i64> {
 
 #[tauri::command]
 pub async fn import_playlist_url(url: String, name: Option<String>, app: AppHandle) -> Result<i64> {
-    let (playlist, channels) = import_m3u_url(&url, name).await?;
-
     let pool = ensure_db(&app).await?;
+    let allow_lan = allow_lan_sources(pool).await;
+    let (playlist, channels) = import_m3u_url(&url, name, allow_lan).await?;
     import_playlist(pool, &playlist, &channels).await
 }
 
@@ -246,10 +239,10 @@ pub async fn search_engine(
     app: AppHandle,
 ) -> Result<SearchResponse> {
     let pool = ensure_db(&app).await?;
-    let term = format!("%{}%", query.trim());
+    let term = contains_pattern(query.trim());
     let rows = sqlx::query(
         "SELECT id, playlist_id, name, url, group_title, tvg_id, language, extra_headers, tmdb_type, release_year \
-         FROM channels WHERE name LIKE ? OR group_title LIKE ? OR tvg_id LIKE ? \
+         FROM channels WHERE name LIKE ? ESCAPE '\\' OR group_title LIKE ? ESCAPE '\\' OR tvg_id LIKE ? ESCAPE '\\' \
          ORDER BY name LIMIT 5000",
     )
     .bind(&term)
@@ -333,11 +326,10 @@ async fn load_stored_providers(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<Vec<se
 fn with_keychain_tokens(mut providers: Vec<serde_json::Value>) -> Result<Vec<serde_json::Value>> {
     for provider in &mut providers {
         let id = secrets::provider_id(provider)?;
-        if let Some(token) = secrets::load_token(&id)? {
-            if let Some(object) = provider.as_object_mut() {
+        if let Some(token) = secrets::load_token(&id)?
+            && let Some(object) = provider.as_object_mut() {
                 object.insert("token".into(), serde_json::Value::String(token));
             }
-        }
     }
     Ok(providers)
 }
@@ -415,15 +407,14 @@ pub async fn extract_url(url: String, app: AppHandle) -> Result<ExtractResponse>
         extra_headers,
         last_ok: Some(now),
         last_error: None,
+        is_live: None,
     };
 
     // Source and entry are created together; a failed insert leaves no empty source behind.
     import_playlist(pool, &playlist, &[ch]).await?;
 
-    // Immediately start playback
-    let hdr_val = serde_json::to_value(&extracted.headers).ok();
-    let _ = play_url(extracted.url.clone(), hdr_val, None, app).await;
-
+    // Playback is the caller's job: the UI plays the result right after this returns, so a
+    // failure to play reaches the user instead of being dropped here.
     Ok(extracted)
 }
 
@@ -437,6 +428,7 @@ pub async fn harvest_page(url: String, app: AppHandle) -> Result<HarvestResponse
 
     if !harvested.urls.is_empty() {
         let pool = ensure_db(&app).await?;
+        let allow_lan = allow_lan_sources(pool).await;
         let now = Utc::now().timestamp();
         let host_label = url
             .split('/')
@@ -455,12 +447,11 @@ pub async fn harvest_page(url: String, app: AppHandle) -> Result<HarvestResponse
         for (idx, found_url) in harvested.urls.iter().enumerate() {
             // If it's a playlist (.m3u), try importing its channels; otherwise add as direct stream.
             // An HLS manifest found on the page comes back as the single stream it describes.
-            if found_url.to_lowercase().ends_with(".m3u") {
-                if let Ok((_, parsed_chans)) = import_m3u_url(found_url, None).await {
+            if found_url.to_lowercase().ends_with(".m3u")
+                && let Ok((_, parsed_chans)) = import_m3u_url(found_url, None, allow_lan).await {
                     all_channels.extend(parsed_chans);
                     continue;
                 }
-            }
             let stream_name = found_url
                 .split('/')
                 .next_back()
@@ -481,6 +472,7 @@ pub async fn harvest_page(url: String, app: AppHandle) -> Result<HarvestResponse
                 extra_headers: None,
                 last_ok: None,
                 last_error: None,
+                is_live: None,
             });
         }
 
@@ -570,12 +562,19 @@ pub async fn save_progress_cmd(
     path: String,
     position: f64,
     duration: f64,
+    flush: Option<bool>,
     app: AppHandle,
 ) -> Result<()> {
     let pool = ensure_db(&app).await?;
     let profile_id = active_profile_id(pool).await?;
     let result = add_history(pool, profile_id, channel_id, &path, position, duration).await;
-    crate::sync::schedule(pool);
+    // The periodic save during playback is spaced out; the final one (`flush`, when playback
+    // stops) goes out at once so the other devices see where you stopped.
+    if flush.unwrap_or(false) {
+        crate::sync::schedule(pool);
+    } else {
+        crate::sync::schedule_progress(pool);
+    }
     result
 }
 
@@ -608,17 +607,24 @@ pub async fn create_profile_cmd(
 pub async fn rename_profile_cmd(
     profile_id: i64,
     name: String,
+    current_pin: Option<String>,
     app: AppHandle,
 ) -> Result<Profile> {
     let pool = ensure_db(&app).await?;
+    authorize_profile(pool, profile_id, current_pin.as_deref()).await?;
     let profile = rename_profile(pool, profile_id, &name).await?;
     crate::sync::schedule(pool);
     Ok(profile)
 }
 
 #[tauri::command]
-pub async fn delete_profile_cmd(profile_id: i64, app: AppHandle) -> Result<Vec<Profile>> {
+pub async fn delete_profile_cmd(
+    profile_id: i64,
+    current_pin: Option<String>,
+    app: AppHandle,
+) -> Result<Vec<Profile>> {
     let pool = ensure_db(&app).await?;
+    authorize_profile(pool, profile_id, current_pin.as_deref()).await?;
     delete_profile(pool, profile_id).await?;
     crate::sync::schedule(pool);
 
@@ -631,9 +637,12 @@ pub async fn delete_profile_cmd(profile_id: i64, app: AppHandle) -> Result<Vec<P
 pub async fn set_profile_pin_cmd(
     profile_id: i64,
     pin: Option<String>,
+    current_pin: Option<String>,
     app: AppHandle,
 ) -> Result<Profile> {
     let pool = ensure_db(&app).await?;
+    // Setting a PIN on an open profile needs nothing; changing or removing one needs the old PIN.
+    authorize_profile(pool, profile_id, current_pin.as_deref()).await?;
     set_profile_pin(pool, profile_id, pin.as_deref()).await
 }
 
@@ -649,11 +658,7 @@ pub async fn activate_profile_cmd(
 ) -> Result<Profile> {
     let pool = ensure_db(&app).await?;
 
-    if !verify_profile_pin(pool, profile_id, pin.as_deref().unwrap_or_default()).await? {
-        return Err(PlayerError::InvalidArg(
-            "That PIN is not correct".to_string(),
-        ));
-    }
+    authorize_profile(pool, profile_id, pin.as_deref()).await?;
 
     set_active_profile(pool, profile_id).await?;
     touch_profile(pool, profile_id).await?;
@@ -681,6 +686,26 @@ fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(trimmed)
 }
 
+/// Longest an ffprobe/ffmpeg run on one file may take before it is stopped.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const FRAME_TIMEOUT: Duration = Duration::from_secs(20);
+const FILMSTRIP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Cached posters beyond this size are deleted, oldest first.
+const THUMBNAIL_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
+/// Pruning scans the cache directory, so it runs every few writes rather than on each one.
+const PRUNE_EVERY_WRITES: usize = 25;
+static CACHE_WRITES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A page of local videos asks for dozens of posters at once. Only a few ffmpeg processes run at a
+/// time; the rest wait here instead of starting a process (and a blocking thread) each.
+static FFMPEG_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> = std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(3));
+
+fn note_cache_write(cache_dir: &Path) {
+    if CACHE_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % PRUNE_EVERY_WRITES == PRUNE_EVERY_WRITES - 1 {
+        prune_cache(cache_dir, THUMBNAIL_CACHE_MAX_BYTES);
+    }
+}
+
 fn generate_local_filmstrip(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<u8>> {
     let source = path
         .canonicalize()
@@ -691,51 +716,46 @@ fn generate_local_filmstrip(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<u8>
 
     let metadata = std::fs::metadata(&source)?;
     let modified = metadata.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default();
-    let fingerprint = (source.to_string_lossy().to_string(), metadata.len(), modified.as_nanos(), "filmstrip");
-    let mut hasher = DefaultHasher::new();
-    fingerprint.hash(&mut hasher);
-    let key = hasher.finish();
-    let cached = cache_dir.join(format!("{key:016x}.jpg"));
-    if let Ok(bytes) = std::fs::read(&cached) {
-        if bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) {
+    let key = cache_name(&[&source.to_string_lossy(), &metadata.len().to_string(), &modified.as_nanos().to_string(), "filmstrip"]);
+    let cached = cache_dir.join(format!("{key}.jpg"));
+    if let Ok(bytes) = std::fs::read(&cached)
+        && bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) {
             return Ok(bytes);
         }
-    }
 
-    let probe = Command::new("ffprobe")
-        .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"])
-        .arg(&source)
-        .output()
-        .map_err(|error| PlayerError::Io(format!("Could not start ffprobe: {error}")))?;
+    let mut probe_command = Command::new("ffprobe");
+    probe_command
+        // Local files only: a crafted "video" must not make ffprobe open other files or URLs.
+        .args(["-protocol_whitelist", "file", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"])
+        .arg(&source);
+    let probe = run_with_timeout(probe_command, PROBE_TIMEOUT)?;
     let duration = String::from_utf8_lossy(&probe.stdout).trim().parse::<f64>()
         .ok().filter(|value| value.is_finite() && *value > 0.0)
         .ok_or_else(|| PlayerError::InvalidArg("Could not determine video duration for preview".into()))?;
 
     std::fs::create_dir_all(&cache_dir)?;
-    let temporary = cache_dir.join(format!(".{key:016x}-{}.jpg", std::process::id()));
+    let temporary = cache_dir.join(format!(".{key}-{}.jpg", std::process::id()));
     let mut command = Command::new("ffmpeg");
     command.args(["-nostdin", "-hide_banner", "-loglevel", "error"]);
     for fraction in [0.12, 0.36, 0.62, 0.88] {
-        command.args(["-ss", &format!("{:.3}", duration * fraction), "-i"]);
+        command.args(["-protocol_whitelist", "file", "-ss", &format!("{:.3}", duration * fraction), "-i"]);
         command.arg(&source);
     }
     let mut filters: Vec<String> = (0..4)
         .map(|index| format!("[{index}:v:0]scale=240:136:force_original_aspect_ratio=increase,crop=240:136,setsar=1[v{index}]"))
         .collect();
     filters.push("[v0][v1][v2][v3]hstack=inputs=4[out]".into());
-    let output = command
+    command
         .args(["-filter_complex", &filters.join(";"), "-map", "[out]", "-frames:v", "1", "-q:v", "6", "-threads", "1", "-an", "-sn", "-dn", "-y"])
-        .arg(&temporary)
-        .output()
-        .map_err(|error| PlayerError::Io(format!("Could not start ffmpeg: {error}")))?;
-    if output.status.success() {
-        if let Ok(bytes) = std::fs::read(&temporary) {
-            if bytes.len() > 4 && bytes.len() <= 2_000_000 && bytes.starts_with(&[0xff, 0xd8]) {
+        .arg(&temporary);
+    let output = run_with_timeout(command, FILMSTRIP_TIMEOUT)?;
+    if output.status.success()
+        && let Ok(bytes) = std::fs::read(&temporary)
+            && bytes.len() > 4 && bytes.len() <= 2_000_000 && bytes.starts_with(&[0xff, 0xd8]) {
                 std::fs::rename(&temporary, &cached)?;
+                note_cache_write(&cache_dir);
                 return Ok(bytes);
             }
-        }
-    }
     let _ = std::fs::remove_file(&temporary);
     Err(PlayerError::InvalidArg("Could not extract preview frames from this video".into()))
 }
@@ -743,6 +763,7 @@ fn generate_local_filmstrip(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<u8>
 #[tauri::command]
 pub async fn local_filmstrip(path: String, app: AppHandle) -> Result<String> {
     let cache_dir = app.path().app_cache_dir().map_err(|error| PlayerError::Io(error.to_string()))?.join("thumbnails");
+    let _slot = FFMPEG_SLOTS.acquire().await.map_err(|error| PlayerError::Io(error.to_string()))?;
     let bytes = tokio::task::spawn_blocking(move || generate_local_filmstrip(PathBuf::from(path), cache_dir))
         .await
         .map_err(|error| PlayerError::Io(format!("Filmstrip task failed: {error}")))??;
@@ -848,18 +869,15 @@ fn generate_local_thumbnail(path: PathBuf, cache_dir: PathBuf, frame_seconds: u3
 
     let metadata = std::fs::metadata(&source)?;
     let modified = metadata.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default();
-    let fingerprint = (source.to_string_lossy().to_string(), metadata.len(), modified.as_nanos(), frame_seconds);
-    let mut hasher = DefaultHasher::new();
-    fingerprint.hash(&mut hasher);
-    let cached = cache_dir.join(format!("{:016x}.jpg", hasher.finish()));
-    if let Ok(bytes) = std::fs::read(&cached) {
-        if bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) {
+    let key = cache_name(&[&source.to_string_lossy(), &metadata.len().to_string(), &modified.as_nanos().to_string(), &frame_seconds.to_string()]);
+    let cached = cache_dir.join(format!("{key}.jpg"));
+    if let Ok(bytes) = std::fs::read(&cached)
+        && bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) {
             return Ok(bytes);
         }
-    }
 
     std::fs::create_dir_all(&cache_dir)?;
-    let temporary = cache_dir.join(format!(".{:016x}-{}.jpg", hasher.finish(), std::process::id()));
+    let temporary = cache_dir.join(format!(".{key}-{}.jpg", std::process::id()));
     let mut last_error = None;
     // The requested frame skips intros; for saved posters, retry at the first frame for clips shorter than that.
     let requested = frame_seconds.to_string();
@@ -868,20 +886,21 @@ fn generate_local_thumbnail(path: PathBuf, cache_dir: PathBuf, frame_seconds: u3
         seeks.push("0");
     }
     for seek in seeks {
-        let output = Command::new("ffmpeg")
-            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-ss", seek, "-i"])
+        let mut command = Command::new("ffmpeg");
+        command
+            // `-protocol_whitelist file`: a crafted "video" must not make ffmpeg open other files or URLs.
+            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file", "-ss", seek, "-i"])
             .arg(&source)
             .args(["-map", "0:v:0", "-frames:v", "1", "-vf", "scale=480:-2:force_original_aspect_ratio=decrease", "-q:v", "5", "-threads", "1", "-an", "-sn", "-dn", "-y"])
-            .arg(&temporary)
-            .output()
-            .map_err(|error| PlayerError::Io(format!("Could not start ffmpeg: {error}")))?;
+            .arg(&temporary);
+        let output = run_with_timeout(command, FRAME_TIMEOUT)?;
         if output.status.success() {
-            if let Ok(bytes) = std::fs::read(&temporary) {
-                if bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) && bytes.len() <= 2_000_000 {
+            if let Ok(bytes) = std::fs::read(&temporary)
+                && bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) && bytes.len() <= 2_000_000 {
                     std::fs::rename(&temporary, &cached)?;
+                    note_cache_write(&cache_dir);
                     return Ok(bytes);
                 }
-            }
         } else {
             last_error = Some(String::from_utf8_lossy(&output.stderr).trim().to_string());
         }
@@ -897,6 +916,7 @@ pub async fn local_thumbnail(path: String, app: AppHandle) -> Result<String> {
     let file_choice = get_file_poster_frame(pool, Path::new(&path)).await?;
     let frame_seconds = resolve_poster_frame(file_choice, get_setting(pool, POSTER_FRAME_SETTING).await?);
     let cache_dir = app.path().app_cache_dir().map_err(|error| PlayerError::Io(error.to_string()))?.join("thumbnails");
+    let _slot = FFMPEG_SLOTS.acquire().await.map_err(|error| PlayerError::Io(error.to_string()))?;
     let bytes = tokio::task::spawn_blocking(move || generate_local_thumbnail(PathBuf::from(path), cache_dir, frame_seconds, true))
         .await
         .map_err(|error| PlayerError::Io(format!("Thumbnail task failed: {error}")))??;
@@ -930,6 +950,7 @@ fn render_poster_candidates(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<Pos
 #[tauri::command]
 pub async fn local_poster_candidates(path: String, app: AppHandle) -> Result<Vec<PosterCandidate>> {
     let cache_dir = thumbnail_cache_dir(&app)?;
+    let _slot = FFMPEG_SLOTS.acquire().await.map_err(|error| PlayerError::Io(error.to_string()))?;
     tokio::task::spawn_blocking(move || render_poster_candidates(expand_home(&path), cache_dir))
         .await
         .map_err(|error| PlayerError::Io(format!("Frame preview task failed: {error}")))?
@@ -952,7 +973,7 @@ pub async fn set_local_poster_frame(path: String, seconds: Option<u32>, app: App
 #[tauri::command]
 pub async fn list_local_dir(path: String, _app: AppHandle) -> Result<Vec<LocalFile>> {
     let target_path = if path.trim().is_empty() {
-        PathBuf::from(home_dir())
+        home_dir()
     } else {
         expand_home(&path)
     };
@@ -1044,11 +1065,32 @@ pub async fn get_settings(app: AppHandle) -> Result<serde_json::Value> {
         "poster_frame_seconds": poster_frame.to_string(),
         "search_preferred_language": search_language,
         "search_hide_other_languages": hide_other_languages,
+        "allow_lan_sources": get_setting(pool, ALLOW_LAN_SETTING).await?.unwrap_or_default(),
     }))
+}
+
+/// Settings the UI may write. The settings table also holds internal state (the active profile,
+/// sync cursors); a generic writer must not be able to reach those, or it could switch to a
+/// locked profile without its PIN.
+const USER_SETTING_KEYS: &[&str] = &[
+    "hwdec",
+    "cache",
+    "extra_mpv_args",
+    ALLOW_LAN_SETTING,
+    POSTER_FRAME_SETTING,
+    SEARCH_LANGUAGE_SETTING,
+    SEARCH_HIDE_OTHER_LANGUAGES_SETTING,
+];
+
+fn is_user_setting(key: &str) -> bool {
+    USER_SETTING_KEYS.contains(&key)
 }
 
 #[tauri::command]
 pub async fn set_setting_cmd(key: String, value: String, app: AppHandle) -> Result<()> {
+    if !is_user_setting(&key) {
+        return Err(PlayerError::InvalidArg(format!("\"{key}\" is not a user setting")));
+    }
     if key == "search_providers" {
         return Err(PlayerError::InvalidArg("Use set_search_providers to change search providers".into()));
     }
@@ -1410,4 +1452,20 @@ pub struct LocalFile {
     pub path: String,
     pub is_dir: bool,
     pub size: Option<u64>,
+}
+
+#[cfg(test)]
+mod setting_allowlist_tests {
+    use super::is_user_setting;
+
+    #[test]
+    fn only_user_facing_settings_are_writable() {
+        for key in ["hwdec", "cache", "extra_mpv_args", "allow_lan_sources", "poster_frame_seconds", "search_preferred_language", "search_hide_other_languages"] {
+            assert!(is_user_setting(key), "{key} is a user setting");
+        }
+        // Internal state shares the table: writing these would bypass a PIN or corrupt sync.
+        for key in ["active_profile_id", "sync_pull_cursor", "sync_seeded", "sync_last_synced_at", "search_providers", "tmdb_api_key", ""] {
+            assert!(!is_user_setting(key), "{key:?} must not be writable from the UI");
+        }
+    }
 }
