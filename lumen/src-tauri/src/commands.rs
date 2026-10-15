@@ -410,6 +410,7 @@ pub async fn extract_url(url: String, app: AppHandle) -> Result<ExtractResponse>
         extra_headers,
         last_ok: Some(now),
         last_error: None,
+        is_live: None,
     };
 
     // Source and entry are created together; a failed insert leaves no empty source behind.
@@ -475,6 +476,7 @@ pub async fn harvest_page(url: String, app: AppHandle) -> Result<HarvestResponse
                 extra_headers: None,
                 last_ok: None,
                 last_error: None,
+                is_live: None,
             });
         }
 

@@ -22,6 +22,8 @@ export interface Channel {
   extra_headers?: string;
   last_ok?: number;
   last_error?: string;
+  /** From the playlist's #EXTINF duration: false for a fixed-length title, true for -1, absent if unknown. */
+  is_live?: boolean;
   // TMDB enrichment. Absent until the title has been matched against TMDB, which
   // only ever succeeds for movies and series — live channels stay unmatched.
   tmdb_id?: number;

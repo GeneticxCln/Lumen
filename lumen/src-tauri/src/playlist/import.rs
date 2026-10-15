@@ -52,6 +52,7 @@ fn parse_into_channels(
                 extra_headers: None,
                 last_ok: None,
                 last_error: None,
+                is_live: None,
             }])
         }
     }

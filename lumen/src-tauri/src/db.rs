@@ -317,7 +317,7 @@ async fn insert_channel_rows(
     // Batch insert up to 100 rows per statement to stay well below SQLite's 999/32766 bind parameter limits
     for chunk in channels.chunks(100) {
         let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
-            "INSERT INTO channels (playlist_id, name, url, group_title, tvg_id, tvg_logo, language, extra_headers, last_ok, last_error) ",
+            "INSERT INTO channels (playlist_id, name, url, group_title, tvg_id, tvg_logo, language, extra_headers, last_ok, last_error, is_live) ",
         );
         qb.push_values(chunk, |mut b, channel| {
             let headers_json = channel.extra_headers.as_deref().unwrap_or("{}");
@@ -330,7 +330,8 @@ async fn insert_channel_rows(
                 .push_bind(&channel.language)
                 .push_bind(headers_json)
                 .push_bind(channel.last_ok)
-                .push_bind(&channel.last_error);
+                .push_bind(&channel.last_error)
+                .push_bind(channel.is_live.map(i64::from));
         });
         qb.build()
             .execute(&mut *conn)
@@ -406,7 +407,7 @@ pub async fn list_channels(
     group: Option<&str>,
 ) -> Result<Vec<EnrichedChannel>> {
     let mut sql = String::from(
-        "SELECT id, playlist_id, name, url, group_title, tvg_id, tvg_logo, language, extra_headers, last_ok, last_error, \
+        "SELECT id, playlist_id, name, url, group_title, tvg_id, tvg_logo, language, extra_headers, last_ok, last_error, is_live, \
          tmdb_id, tmdb_type, poster_path, backdrop_path, overview, release_year, rating, genre_names, enriched_at \
          FROM channels WHERE playlist_id = ?",
     );
@@ -452,6 +453,7 @@ pub async fn list_channels(
                 extra_headers: row.get("extra_headers"),
                 last_ok: row.get("last_ok"),
                 last_error: row.get("last_error"),
+                is_live: row.get::<Option<i64>, _>("is_live").map(|value| value != 0),
             },
             tmdb_id: row.get("tmdb_id"),
             tmdb_type: row.get("tmdb_type"),
@@ -470,7 +472,7 @@ pub async fn list_channels(
 
 pub async fn get_channel(pool: &Pool<Sqlite>, channel_id: i64) -> Result<Channel> {
     let row = sqlx::query(
-        "SELECT id, playlist_id, name, url, group_title, tvg_id, tvg_logo, language, extra_headers, last_ok, last_error FROM channels WHERE id = ?",
+        "SELECT id, playlist_id, name, url, group_title, tvg_id, tvg_logo, language, extra_headers, last_ok, last_error, is_live FROM channels WHERE id = ?",
     )
     .bind(channel_id)
     .fetch_one(pool)
@@ -489,6 +491,7 @@ pub async fn get_channel(pool: &Pool<Sqlite>, channel_id: i64) -> Result<Channel
         extra_headers: row.get("extra_headers"),
         last_ok: row.get("last_ok"),
         last_error: row.get("last_error"),
+        is_live: row.get::<Option<i64>, _>("is_live").map(|value| value != 0),
     })
 }
 
@@ -1223,6 +1226,7 @@ mod tests {
             extra_headers: None,
             last_ok: None,
             last_error: None,
+            is_live: None,
         }
     }
 
@@ -1846,6 +1850,23 @@ mod tests {
         pin_guard::record_success(profile.id);
         authorize_profile(&pool, profile.id, Some("4821")).await.unwrap();
         pin_guard::record_success(profile.id);
+    }
+
+    #[tokio::test]
+    async fn test_live_flag_survives_import_and_reload() {
+        let pool = test_pool().await;
+        let mut live = channel(0, "Live", "http://x.example/live.m3u8");
+        live.is_live = Some(true);
+        let mut film = channel(0, "Film", "http://x.example/film.mp4");
+        film.is_live = Some(false);
+        let unknown = channel(0, "Unknown", "http://x.example/unknown.m3u8");
+        let pid = import_playlist(&pool, &playlist("Flags"), &[live, film, unknown]).await.unwrap();
+
+        let rows = list_channels(&pool, pid, None, None).await.unwrap();
+        let flag = |name: &str| rows.iter().find(|row| row.channel.name == name).unwrap().channel.is_live;
+        assert_eq!(flag("Live"), Some(true));
+        assert_eq!(flag("Film"), Some(false));
+        assert_eq!(flag("Unknown"), None);
     }
 
     #[tokio::test]

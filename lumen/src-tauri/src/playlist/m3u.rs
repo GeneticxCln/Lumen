@@ -17,6 +17,10 @@ pub struct Channel {
     pub extra_headers: Option<String>, // JSON string
     pub last_ok: Option<i64>,
     pub last_error: Option<String>,
+    /// From the `#EXTINF` duration: `-1` is a live stream, a positive length is on-demand, and `0`
+    /// (which lists use for both) is unknown. `None` when the list gave no usable duration.
+    #[serde(default)]
+    pub is_live: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +83,24 @@ fn split_extinf_header_and_name(body: &str) -> (&str, &str) {
         }
     }
     (body, "")
+}
+
+/// A header value from a playlist, or `None` if it holds a control character. A stray `\r` would
+/// let a playlist end one header and start another when the value is sent to a server.
+fn clean_header_value(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn live_flag(duration: i64) -> Option<bool> {
+    match duration {
+        d if d < 0 => Some(true),
+        0 => None,
+        _ => Some(false),
+    }
 }
 
 pub fn parse_extinf(line: &str) -> Option<Extinf> {
@@ -242,23 +264,18 @@ pub fn parse_m3u(content: &str, playlist_id: i64, base_url: Option<&str>) -> Res
             let opt_trimmed = opt.trim();
             if let Some((k, v)) = opt_trimmed.split_once('=') {
                 let key_lower = k.trim().to_lowercase();
-                let val = v.trim().to_string();
-                match key_lower.as_str() {
-                    "http-user-agent" => {
-                        pending_headers.insert("User-Agent".to_string(), val);
-                    }
-                    "http-referrer" | "http-referer" => {
-                        pending_headers.insert("Referer".to_string(), val);
-                    }
-                    "http-origin" => {
-                        pending_headers.insert("Origin".to_string(), val);
-                    }
-                    "http-cookie" => {
-                        pending_headers.insert("Cookie".to_string(), val);
-                    }
-                    _ => {
-                        pending_headers.insert(k.trim().to_string(), val);
-                    }
+                // Only the HTTP options map to request headers. VLC has many other options
+                // (`network-caching`, `start-time`, ...) that are not headers and must not be sent
+                // to a stream server as if they were.
+                let header = match key_lower.as_str() {
+                    "http-user-agent" => Some("User-Agent"),
+                    "http-referrer" | "http-referer" => Some("Referer"),
+                    "http-origin" => Some("Origin"),
+                    "http-cookie" => Some("Cookie"),
+                    _ => None,
+                };
+                if let (Some(header), Some(value)) = (header, clean_header_value(v)) {
+                    pending_headers.insert(header.to_string(), value);
                 }
             }
         } else if line.starts_with('#') {
@@ -266,7 +283,7 @@ pub fn parse_m3u(content: &str, playlist_id: i64, base_url: Option<&str>) -> Res
         } else {
             // Stream URL line, resolved against the playlist it came from when relative.
             let url = resolve_url(line, base_url).unwrap_or_else(|| line.to_string());
-            let (name, group_title, tvg_id, tvg_logo, language) = if let Some(ext) = current_extinf.take() {
+            let (name, group_title, tvg_id, tvg_logo, language, is_live) = if let Some(ext) = current_extinf.take() {
                 let resolved_name = if ext.name.is_empty() {
                     ext.attrs
                         .get("tvg-name")
@@ -283,7 +300,7 @@ pub fn parse_m3u(content: &str, playlist_id: i64, base_url: Option<&str>) -> Res
                 let tid = ext.attrs.get("tvg-id").cloned();
                 let tlogo = ext.attrs.get("tvg-logo").cloned();
                 let tlang = ext.attrs.get("tvg-language").cloned().filter(|value| !value.trim().is_empty());
-                (resolved_name, group, tid, tlogo, tlang)
+                (resolved_name, group, tid, tlogo, tlang, live_flag(ext.duration))
             } else {
                 let fallback_name = url
                     .split('/')
@@ -292,7 +309,7 @@ pub fn parse_m3u(content: &str, playlist_id: i64, base_url: Option<&str>) -> Res
                     .filter(|s| !s.is_empty())
                     .unwrap_or(&url)
                     .to_string();
-                (fallback_name, current_extgrp.clone(), None, None, None)
+                (fallback_name, current_extgrp.clone(), None, None, None, None)
             };
 
             let extra_headers = if pending_headers.is_empty() {
@@ -315,6 +332,7 @@ pub fn parse_m3u(content: &str, playlist_id: i64, base_url: Option<&str>) -> Res
                 extra_headers,
                 last_ok: None,
                 last_error: None,
+                is_live,
             });
         }
     }
@@ -493,5 +511,64 @@ https://stream.example.com/six.m3u8
         let channels = channels_of(sample, None);
         assert_eq!(channels.len(), 1);
         assert_eq!(channels[0].name, "Channel Six");
+    }
+
+    fn headers_of(channel: &Channel) -> HashMap<String, String> {
+        channel
+            .extra_headers
+            .as_deref()
+            .map(|json| serde_json::from_str(json).expect("headers are stored as JSON"))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn only_http_options_become_request_headers() {
+        let sample = "#EXTM3U
+#EXTINF:-1,One
+#EXTVLCOPT:network-caching=1000
+#EXTVLCOPT:start-time=30
+#EXTVLCOPT:http-user-agent=Agent/2
+#EXTVLCOPT:http-origin=https://origin.example
+https://stream.example.com/one.m3u8
+#EXTINF:-1,Two
+#EXTVLCOPT:no-audio=1
+https://stream.example.com/two.m3u8
+";
+        let channels = channels_of(sample, None);
+        let one = headers_of(&channels[0]);
+        assert_eq!(one.len(), 2, "VLC-only options are not headers: {one:?}");
+        assert_eq!(one.get("User-Agent").map(String::as_str), Some("Agent/2"));
+        assert_eq!(one.get("Origin").map(String::as_str), Some("https://origin.example"));
+        assert!(channels[1].extra_headers.is_none(), "a non-HTTP option leaves no headers at all");
+    }
+
+    #[test]
+    fn header_values_with_control_characters_are_dropped() {
+        // A bare carriage return would let one header value end the line and start another.
+        let sample = "#EXTM3U
+#EXTINF:-1,One
+#EXTVLCOPT:http-referrer=https://a.example/\rX-Injected: yes
+https://stream.example.com/one.m3u8
+";
+        let channels = channels_of(sample, None);
+        assert!(channels[0].extra_headers.is_none(), "{:?}", channels[0].extra_headers);
+    }
+
+    #[test]
+    fn extinf_duration_says_whether_an_entry_is_live() {
+        let sample = "#EXTM3U
+#EXTINF:-1,Live news
+https://stream.example.com/live.m3u8
+#EXTINF:5400,A film
+https://stream.example.com/film.mp4
+#EXTINF:0,Unknown
+https://stream.example.com/unknown.m3u8
+https://stream.example.com/bare.m3u8
+";
+        let channels = channels_of(sample, None);
+        assert_eq!(channels[0].is_live, Some(true));
+        assert_eq!(channels[1].is_live, Some(false));
+        assert_eq!(channels[2].is_live, None, "0 is used for both, so it says nothing");
+        assert_eq!(channels[3].is_live, None, "no #EXTINF at all");
     }
 }
