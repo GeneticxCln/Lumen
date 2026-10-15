@@ -1,8 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef, lazy, Suspense } from "react";
 import { Transport } from "./components/Transport";
-import { PlayerOverlay } from "./components/PlayerOverlay";
-import { PLAYER_SEEK_STEP_SECONDS, PLAYER_VOLUME_STEP, playerShortcutFor } from "./lib/playerKeys";
-import type { PlayerShortcut } from "./lib/playerKeys";
 import { SourceDialog } from "./components/SourceDialog";
 import { SettingsPage } from "./components/SettingsPage";
 import { ProfileGate } from "./components/ProfileGate";
@@ -17,7 +14,7 @@ import { SearchEnginePage } from "./components/SearchEnginePage";
 const VideoStage = lazy(() => import("./components/VideoStage").then((module) => ({ default: module.VideoStage })));
 import { usePlayer } from "./hooks/usePlayer";
 import { useChannels } from "./hooks/useChannels";
-import { activeProfile, errorMessage, getHistory, isTauriRuntime, listProfiles, setPlayerFullscreen } from "./lib/tauri";
+import { activeProfile, errorMessage, getHistory, isTauriRuntime, listProfiles } from "./lib/tauri";
 import type { Channel, HistoryEntry, Profile } from "./lib/types";
 import { readPreferences, recommendChannels, contentKind, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
 import type { FacetSelection, Preferences } from "./lib/discovery";
@@ -143,57 +140,29 @@ function App() {
     }
   }
 
-  // Desktop fullscreen drives the mpv window; the browser preview uses the Fullscreen API.
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(() => document.fullscreenElement !== null);
   useEffect(() => {
-    if (isTauriRuntime()) return;
     const syncFullscreen = () => setIsFullscreen(document.fullscreenElement !== null);
     document.addEventListener("fullscreenchange", syncFullscreen);
     return () => document.removeEventListener("fullscreenchange", syncFullscreen);
   }, []);
-  const toggleFullscreen = useCallback(async () => {
-    const next = !isFullscreen;
-    if (isTauriRuntime()) {
-      await setPlayerFullscreen(next);
-    } else if (next) {
-      await document.documentElement.requestFullscreen();
-    } else if (document.fullscreenElement) {
-      await document.exitFullscreen();
-    }
-    setIsFullscreen(next);
-  }, [isFullscreen]);
-  const closePlayer = useCallback(() => {
-    setPlayerOpen(false);
-    if (isFullscreen) void run(toggleFullscreen);
-  }, [isFullscreen, toggleFullscreen]);
+  const toggleFullscreen = useCallback(() => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(), []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (!preferences.keyboardShortcuts || !player.currentUrl || event.ctrlKey || event.metaKey || event.altKey) return;
       const target = event.target as HTMLElement | null;
-      // Text fields keep their keys. Sliders are excluded from that rule so the arrows seek instead of nudging the slider.
-      if (target?.closest("input:not([type=range]), textarea, select, [contenteditable=true]")) return;
-      // Space on a focused button already activates that button; handling it here would toggle twice.
-      if (event.key === " " && target?.closest("button, a")) return;
-      if (!playerOpen && document.querySelector("dialog[open]")) return;
-      const shortcut = playerShortcutFor(event.key);
-      if (!shortcut || (shortcut === "close" && !playerOpen)) return;
-      event.preventDefault();
-      const actions: Record<PlayerShortcut, () => Promise<unknown>> = {
-        "toggle-pause": player.togglePause,
-        "seek-back": () => player.seekRelative(-PLAYER_SEEK_STEP_SECONDS),
-        "seek-forward": () => player.seekRelative(PLAYER_SEEK_STEP_SECONDS),
-        "volume-down": () => player.changeVolume(player.volume - PLAYER_VOLUME_STEP),
-        "volume-up": () => player.changeVolume(player.volume + PLAYER_VOLUME_STEP),
-        "toggle-mute": player.toggleMute,
-        "toggle-fullscreen": toggleFullscreen,
-        close: async () => closePlayer(),
+      if (!preferences.keyboardShortcuts || !player.currentUrl || document.querySelector("dialog[open]") || target?.closest("input, textarea, select, button, [contenteditable=true]") || event.ctrlKey || event.metaKey || event.altKey) return;
+      const actions: Record<string, () => Promise<unknown>> = {
+        " ": player.togglePause, ArrowLeft: () => player.seekRelative(-10), ArrowRight: () => player.seekRelative(10),
+        m: player.toggleMute, M: player.toggleMute, "9": () => player.changeVolume(player.volume - 5), "0": () => player.changeVolume(player.volume + 5),
+        f: toggleFullscreen,
       };
-      void run(actions[shortcut]);
+      const action = actions[event.key];
+      if (action) { event.preventDefault(); void run(action); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [preferences.keyboardShortcuts, player, playerOpen, toggleFullscreen, closePlayer]);
+  }, [preferences.keyboardShortcuts, player, toggleFullscreen]);
 
   const available = useMemo(() => library.channels.filter((channel) => !preferences.hideUnavailable || !channel.last_error), [library.channels, preferences.hideUnavailable]);
   const byKind = useMemo(() => ({
