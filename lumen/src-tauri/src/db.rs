@@ -1,6 +1,7 @@
 use crate::auth;
 use crate::error::{PlayerError, Result};
 use crate::playlist::import::{import_m3u_file, Channel, Playlist};
+use crate::sync;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, QueryBuilder, Row, Sqlite, SqliteConnection};
@@ -61,11 +62,6 @@ pub async fn init_db(app_dir: &Path) -> Result<Pool<Sqlite>> {
     .execute(&pool)
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
-
-    sqlx::query("DELETE FROM favorites WHERE channel_id NOT IN (SELECT id FROM channels)")
-        .execute(&pool)
-        .await
-        .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
     // Earlier builds appended one history row per progress save; compact anything a
     // previous version left behind.
@@ -261,9 +257,48 @@ pub async fn import_playlist_if_nonempty(
 }
 
 pub async fn delete_playlist(pool: &Pool<Sqlite>, playlist_id: i64) -> Result<()> {
+    let now = Utc::now().timestamp_millis();
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    // Favorites are keyed by URL and outlive channel rows. A favorite whose stream only this
+    // playlist carried can no longer be reached, so it is tombstoned and the removal syncs.
+    let orphaned: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT f.profile_id, f.channel_url FROM favorites f
+         WHERE f.active = 1
+           AND f.channel_url IN (SELECT url FROM channels WHERE playlist_id = ?)
+           AND NOT EXISTS (
+             SELECT 1 FROM channels c WHERE c.url = f.channel_url AND c.playlist_id <> ?
+           )",
+    )
+    .bind(playlist_id)
+    .bind(playlist_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
     sqlx::query("DELETE FROM playlists WHERE id = ?")
         .bind(playlist_id)
-        .execute(pool)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    for (profile_id, url) in orphaned {
+        sqlx::query(
+            "UPDATE favorites SET active = 0, updated_at = ? WHERE profile_id = ? AND channel_url = ?",
+        )
+        .bind(now)
+        .bind(profile_id)
+        .bind(&url)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        sync::queue_favorite(&mut *tx, profile_id, &url, false, now).await?;
+    }
+
+    tx.commit()
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
     Ok(())
@@ -475,48 +510,73 @@ pub async fn channel_exists(pool: &Pool<Sqlite>, channel_id: i64) -> Result<bool
     Ok(row.is_some())
 }
 
+/// Toggles a favorite and returns whether the stream is now a favorite. Favorites are keyed
+/// by stream URL, not channel id, so they survive a playlist re-import, which gives channels
+/// new ids. A removed favorite stays as a tombstone (`active = 0`) so a sync can carry it.
 pub async fn toggle_favorite(
     pool: &Pool<Sqlite>,
     profile_id: i64,
     channel_id: i64,
 ) -> Result<bool> {
-    if !channel_exists(pool, channel_id).await? {
-        return Err(PlayerError::NotFound("Channel no longer exists".into()));
-    }
-
-    let exists = sqlx::query("SELECT channel_id FROM favorites WHERE profile_id = ? AND channel_id = ?")
-        .bind(profile_id)
+    let url: Option<String> = sqlx::query_scalar("SELECT url FROM channels WHERE id = ?")
         .bind(channel_id)
         .fetch_optional(pool)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let Some(url) = url else {
+        return Err(PlayerError::NotFound("Channel no longer exists".into()));
+    };
 
-    if exists.is_some() {
-        sqlx::query("DELETE FROM favorites WHERE profile_id = ? AND channel_id = ?")
-            .bind(profile_id)
-            .bind(channel_id)
-            .execute(pool)
-            .await
-            .map_err(|e| PlayerError::Sql(e.to_string()))?;
-        Ok(false)
-    } else {
-        sqlx::query("INSERT INTO favorites (profile_id, channel_id) VALUES (?, ?)")
-            .bind(profile_id)
-            .bind(channel_id)
-            .execute(pool)
-            .await
-            .map_err(|e| PlayerError::Sql(e.to_string()))?;
-        Ok(true)
-    }
-}
-
-pub async fn list_favorites(pool: &Pool<Sqlite>, profile_id: i64) -> Result<Vec<i64>> {
-    let rows = sqlx::query("SELECT channel_id FROM favorites WHERE profile_id = ?")
-        .bind(profile_id)
-        .fetch_all(pool)
+    let mut tx = pool
+        .begin()
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
-    Ok(rows.into_iter().map(|r| r.get("channel_id")).collect())
+
+    let active: Option<i64> = sqlx::query_scalar(
+        "SELECT active FROM favorites WHERE profile_id = ? AND channel_url = ?",
+    )
+    .bind(profile_id)
+    .bind(&url)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    let favorite = active.unwrap_or(0) == 0;
+    let now = Utc::now().timestamp_millis();
+    sqlx::query(
+        "INSERT INTO favorites (profile_id, channel_url, active, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (profile_id, channel_url) DO UPDATE SET
+           active = excluded.active,
+           updated_at = excluded.updated_at",
+    )
+    .bind(profile_id)
+    .bind(&url)
+    .bind(i64::from(favorite))
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    sync::queue_favorite(&mut *tx, profile_id, &url, favorite, now).await?;
+
+    tx.commit()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    Ok(favorite)
+}
+
+/// Channel ids of the profile's active favorites. A stream carried by more than one playlist
+/// lists each of its channel rows.
+pub async fn list_favorites(pool: &Pool<Sqlite>, profile_id: i64) -> Result<Vec<i64>> {
+    let rows = sqlx::query(
+        "SELECT c.id FROM favorites f JOIN channels c ON c.url = f.channel_url
+         WHERE f.profile_id = ? AND f.active = 1 ORDER BY c.id",
+    )
+    .bind(profile_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    Ok(rows.into_iter().map(|r| r.get("id")).collect())
 }
 
 /// A local identity. `pin_hash` is never sent to the frontend; `has_pin` says whether one is
@@ -537,7 +597,7 @@ pub const DEFAULT_PROFILE_ID: i64 = 1;
 const ACTIVE_PROFILE_KEY: &str = "active_profile_id";
 const MAX_PROFILE_NAME_CHARS: usize = 40;
 
-fn clean_profile_name(name: &str) -> Result<String> {
+pub(crate) fn clean_profile_name(name: &str) -> Result<String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err(PlayerError::InvalidArg("A profile needs a name".into()));
@@ -607,28 +667,50 @@ pub async fn create_profile(
 ) -> Result<Profile> {
     let name = clean_profile_name(name)?;
     let now = Utc::now().timestamp();
+    let now_ms = Utc::now().timestamp_millis();
 
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    // The sync key is random, so each device that creates a profile gets its own identity.
     let row = sqlx::query(
-        "INSERT INTO profiles (name, color, pin_hash, created_at, last_used_at) VALUES (?, ?, NULL, ?, ?) RETURNING id",
+        "INSERT INTO profiles (name, color, pin_hash, created_at, last_used_at, sync_key, updated_at)
+         VALUES (?, ?, NULL, ?, ?, lower(hex(randomblob(16))), ?) RETURNING id",
     )
     .bind(&name)
     .bind(color)
     .bind(now)
     .bind(now)
-    .fetch_one(pool)
+    .bind(now_ms)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let id: i64 = row.get("id");
 
-    get_profile(pool, row.get("id")).await
+    sync::queue_profile(&mut *tx, id).await?;
+
+    tx.commit()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    get_profile(pool, id).await
 }
 
 pub async fn rename_profile(pool: &Pool<Sqlite>, profile_id: i64, name: &str) -> Result<Profile> {
     let name = clean_profile_name(name)?;
+    let now_ms = Utc::now().timestamp_millis();
 
-    let result = sqlx::query("UPDATE profiles SET name = ? WHERE id = ?")
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    let result = sqlx::query("UPDATE profiles SET name = ?, updated_at = ? WHERE id = ?")
         .bind(&name)
+        .bind(now_ms)
         .bind(profile_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
@@ -636,6 +718,11 @@ pub async fn rename_profile(pool: &Pool<Sqlite>, profile_id: i64, name: &str) ->
         return Err(PlayerError::NotFound("Profile no longer exists".into()));
     }
 
+    sync::queue_profile(&mut *tx, profile_id).await?;
+
+    tx.commit()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
     get_profile(pool, profile_id).await
 }
 
@@ -654,9 +741,22 @@ pub async fn delete_profile(pool: &Pool<Sqlite>, profile_id: i64) -> Result<()> 
         ));
     }
 
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    let sync_key: Option<String> =
+        sqlx::query_scalar("SELECT sync_key FROM profiles WHERE id = ?")
+            .bind(profile_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?
+            .flatten();
+
     let result = sqlx::query("DELETE FROM profiles WHERE id = ?")
         .bind(profile_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
@@ -664,6 +764,13 @@ pub async fn delete_profile(pool: &Pool<Sqlite>, profile_id: i64) -> Result<()> 
         return Err(PlayerError::NotFound("Profile no longer exists".into()));
     }
 
+    if let Some(sync_key) = sync_key {
+        sync::queue_profile_deleted(&mut *tx, &sync_key, Utc::now().timestamp_millis()).await?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
     Ok(())
 }
 
@@ -913,6 +1020,8 @@ pub async fn add_history(
     .execute(&mut *tx)
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    sync::queue_progress(&mut *tx, profile_id, path, position, duration, now).await?;
 
     prune_history_with(&mut tx, DEFAULT_HISTORY_RETENTION).await?;
 
@@ -1522,6 +1631,11 @@ mod tests {
         .unwrap();
 
         sqlx::raw_sql(include_str!("../migrations/003_profiles.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Favorites move from channel ids to channel URLs; the favorite must survive that.
+        sqlx::raw_sql(include_str!("../migrations/006_sync.sql"))
             .execute(&pool)
             .await
             .unwrap();

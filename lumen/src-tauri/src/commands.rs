@@ -29,7 +29,7 @@ pub async fn get_playback_backend() -> Result<Arc<Mutex<Option<MpvIpcBackend>>>>
     Ok(backend.clone())
 }
 
-async fn ensure_db(app: &AppHandle) -> Result<&'static sqlx::Pool<sqlx::Sqlite>> {
+pub(crate) async fn ensure_db(app: &AppHandle) -> Result<&'static sqlx::Pool<sqlx::Sqlite>> {
     if let Some(pool) = get_pool() {
         return Ok(pool);
     }
@@ -216,7 +216,9 @@ pub async fn import_playlist_url(url: String, name: Option<String>, app: AppHand
 #[tauri::command]
 pub async fn delete_playlist_cmd(playlist_id: i64, app: AppHandle) -> Result<()> {
     let pool = ensure_db(&app).await?;
-    delete_playlist(pool, playlist_id).await
+    delete_playlist(pool, playlist_id).await?;
+    crate::sync::schedule(pool);
+    Ok(())
 }
 
 #[tauri::command]
@@ -543,7 +545,9 @@ pub async fn probe_urls(ids: Vec<i64>, app: AppHandle) -> Result<ProbeResponse> 
 pub async fn toggle_favorite_cmd(channel_id: i64, app: AppHandle) -> Result<bool> {
     let pool = ensure_db(&app).await?;
     let profile_id = active_profile_id(pool).await?;
-    toggle_favorite(pool, profile_id, channel_id).await
+    let favorite = toggle_favorite(pool, profile_id, channel_id).await?;
+    crate::sync::schedule(pool);
+    Ok(favorite)
 }
 
 #[tauri::command]
@@ -570,7 +574,9 @@ pub async fn save_progress_cmd(
 ) -> Result<()> {
     let pool = ensure_db(&app).await?;
     let profile_id = active_profile_id(pool).await?;
-    add_history(pool, profile_id, channel_id, &path, position, duration).await
+    let result = add_history(pool, profile_id, channel_id, &path, position, duration).await;
+    crate::sync::schedule(pool);
+    result
 }
 
 #[tauri::command]
@@ -593,7 +599,9 @@ pub async fn create_profile_cmd(
     app: AppHandle,
 ) -> Result<Profile> {
     let pool = ensure_db(&app).await?;
-    create_profile(pool, &name, color.as_deref()).await
+    let profile = create_profile(pool, &name, color.as_deref()).await?;
+    crate::sync::schedule(pool);
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -603,13 +611,16 @@ pub async fn rename_profile_cmd(
     app: AppHandle,
 ) -> Result<Profile> {
     let pool = ensure_db(&app).await?;
-    rename_profile(pool, profile_id, &name).await
+    let profile = rename_profile(pool, profile_id, &name).await?;
+    crate::sync::schedule(pool);
+    Ok(profile)
 }
 
 #[tauri::command]
 pub async fn delete_profile_cmd(profile_id: i64, app: AppHandle) -> Result<Vec<Profile>> {
     let pool = ensure_db(&app).await?;
     delete_profile(pool, profile_id).await?;
+    crate::sync::schedule(pool);
 
     // The deleted profile may have been the active one; the next read falls back on its own,
     // so this just reports the surviving profiles.
@@ -671,12 +682,10 @@ fn expand_home(path: &str) -> PathBuf {
 }
 
 fn generate_local_filmstrip(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<u8>> {
-    const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "webm", "ts", "m2ts"];
     let source = path
         .canonicalize()
         .map_err(|error| PlayerError::Io(format!("Local video not found: {error}")))?;
-    let extension = source.extension().and_then(|value| value.to_str()).unwrap_or("").to_lowercase();
-    if !source.is_file() || !VIDEO_EXTENSIONS.contains(&extension.as_str()) {
+    if !source.is_file() || !is_video_path(&source) {
         return Err(PlayerError::InvalidArg("No video preview for this file".into()));
     }
 
@@ -755,6 +764,67 @@ fn poster_frame_seconds_from(stored: Option<String>) -> u32 {
     stored.and_then(|raw| parse_poster_frame_seconds(&raw)).unwrap_or(DEFAULT_POSTER_FRAME_SECONDS)
 }
 
+const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "webm", "ts", "m2ts"];
+
+fn is_video_path(path: &Path) -> bool {
+    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("").to_lowercase();
+    VIDEO_EXTENSIONS.contains(&extension.as_str())
+}
+
+/// The frame chosen for one file, or None when it follows the global setting.
+async fn get_file_poster_frame(pool: &sqlx::Pool<sqlx::Sqlite>, path: &Path) -> Result<Option<u32>> {
+    let source = match path.canonicalize() {
+        Ok(source) => source,
+        Err(_) => return Ok(None),
+    };
+    let row = sqlx::query("SELECT seconds FROM poster_frames WHERE path = ?")
+        .bind(source.to_string_lossy().to_string())
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    Ok(row
+        .map(|row| row.get::<i64, _>("seconds"))
+        .and_then(|seconds| u32::try_from(seconds).ok())
+        .filter(|seconds| POSTER_FRAME_CHOICES.contains(seconds)))
+}
+
+/// Saves the frame for one file. `None` removes the file's choice so it follows the global setting again.
+async fn save_file_poster_frame(pool: &sqlx::Pool<sqlx::Sqlite>, path: &Path, seconds: Option<u32>) -> Result<()> {
+    let source = path
+        .canonicalize()
+        .map_err(|error| PlayerError::Io(format!("Local video not found: {error}")))?;
+    if !source.is_file() || !is_video_path(&source) {
+        return Err(PlayerError::InvalidArg("No video poster for this file".into()));
+    }
+    let key = source.to_string_lossy().to_string();
+    match seconds {
+        None => {
+            sqlx::query("DELETE FROM poster_frames WHERE path = ?")
+                .bind(key)
+                .execute(pool)
+                .await
+                .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        }
+        Some(seconds) => {
+            if !POSTER_FRAME_CHOICES.contains(&seconds) {
+                return Err(PlayerError::InvalidArg("Poster frame must be one of the offered times".into()));
+            }
+            sqlx::query("INSERT INTO poster_frames (path, seconds) VALUES (?, ?) ON CONFLICT(path) DO UPDATE SET seconds = excluded.seconds")
+                .bind(key)
+                .bind(i64::from(seconds))
+                .execute(pool)
+                .await
+                .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+/// A file's own frame wins; otherwise the global setting applies.
+fn resolve_poster_frame(file_choice: Option<u32>, global_setting: Option<String>) -> u32 {
+    file_choice.unwrap_or_else(|| poster_frame_seconds_from(global_setting))
+}
+
 fn thumbnail_cache_dir(app: &AppHandle) -> Result<PathBuf> {
     Ok(app.path().app_cache_dir().map_err(|error| PlayerError::Io(error.to_string()))?.join("thumbnails"))
 }
@@ -769,12 +839,10 @@ fn clear_thumbnail_cache(cache_dir: &Path) -> Result<()> {
 }
 
 fn generate_local_thumbnail(path: PathBuf, cache_dir: PathBuf, frame_seconds: u32, fall_back_to_start: bool) -> Result<Vec<u8>> {
-    const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "webm", "ts", "m2ts"];
     let source = path
         .canonicalize()
         .map_err(|error| PlayerError::Io(format!("Local video not found: {error}")))?;
-    let extension = source.extension().and_then(|value| value.to_str()).unwrap_or("").to_lowercase();
-    if !source.is_file() || !VIDEO_EXTENSIONS.contains(&extension.as_str()) {
+    if !source.is_file() || !is_video_path(&source) {
         return Err(PlayerError::InvalidArg("No video poster for this file".into()));
     }
 
@@ -826,7 +894,8 @@ fn generate_local_thumbnail(path: PathBuf, cache_dir: PathBuf, frame_seconds: u3
 #[tauri::command]
 pub async fn local_thumbnail(path: String, app: AppHandle) -> Result<String> {
     let pool = ensure_db(&app).await?;
-    let frame_seconds = poster_frame_seconds_from(get_setting(pool, POSTER_FRAME_SETTING).await?);
+    let file_choice = get_file_poster_frame(pool, Path::new(&path)).await?;
+    let frame_seconds = resolve_poster_frame(file_choice, get_setting(pool, POSTER_FRAME_SETTING).await?);
     let cache_dir = app.path().app_cache_dir().map_err(|error| PlayerError::Io(error.to_string()))?.join("thumbnails");
     let bytes = tokio::task::spawn_blocking(move || generate_local_thumbnail(PathBuf::from(path), cache_dir, frame_seconds, true))
         .await
@@ -864,6 +933,20 @@ pub async fn local_poster_candidates(path: String, app: AppHandle) -> Result<Vec
     tokio::task::spawn_blocking(move || render_poster_candidates(expand_home(&path), cache_dir))
         .await
         .map_err(|error| PlayerError::Io(format!("Frame preview task failed: {error}")))?
+}
+
+/// Returns the frame a file was given, or null when it follows the global setting.
+#[tauri::command]
+pub async fn get_local_poster_frame(path: String, app: AppHandle) -> Result<Option<u32>> {
+    let pool = ensure_db(&app).await?;
+    get_file_poster_frame(pool, &expand_home(&path)).await
+}
+
+/// Chooses the poster frame for one file. A null frame clears the choice so the file follows the global setting.
+#[tauri::command]
+pub async fn set_local_poster_frame(path: String, seconds: Option<u32>, app: AppHandle) -> Result<()> {
+    let pool = ensure_db(&app).await?;
+    save_file_poster_frame(pool, &expand_home(&path), seconds).await
 }
 
 #[tauri::command]
@@ -1054,8 +1137,8 @@ pub async fn tmdb_clear_enrichment(app: AppHandle) -> Result<serde_json::Value> 
 
 #[cfg(test)]
 mod local_path_tests {
-    use super::{expand_home, generate_local_filmstrip, generate_local_thumbnail, home_dir, parse_poster_frame_seconds, poster_frame_seconds_from, render_poster_candidates, set_poster_frame_seconds, POSTER_FRAME_CHOICES, POSTER_FRAME_SETTING};
-    use crate::db::get_setting;
+    use super::{expand_home, generate_local_filmstrip, generate_local_thumbnail, get_file_poster_frame, home_dir, parse_poster_frame_seconds, poster_frame_seconds_from, render_poster_candidates, resolve_poster_frame, save_file_poster_frame, set_poster_frame_seconds, POSTER_FRAME_CHOICES, POSTER_FRAME_SETTING};
+    use crate::db::{get_setting, set_setting};
     use std::path::{Path, PathBuf};
     use std::{fs, thread};
     use std::time::Duration;
@@ -1222,6 +1305,91 @@ mod local_path_tests {
         set_poster_frame_seconds(&pool, &cache, "10").await.expect("changing the frame saves");
         assert!(!cache.exists(), "changing the frame again clears cached posters");
         fs::remove_dir_all(temp).expect("remove test fixture");
+    }
+
+    #[tokio::test]
+    async fn per_file_poster_frame_overrides_the_global_setting() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        // Apply only the schema this feature needs, so the test does not depend on the full migration set.
+        sqlx::raw_sql(include_str!("../migrations/001_initial.sql")).execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!("../migrations/005_poster_frames.sql")).execute(&pool).await.unwrap();
+
+        let temp = std::env::temp_dir().join(format!("lumen-file-poster-{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(&temp).expect("fixture directory");
+        let clip = temp.join("clip.mp4");
+        let other = temp.join("other.mkv");
+        write_test_video(&clip).expect("fixture video");
+        write_test_video(&other).expect("fixture video");
+        let notes = temp.join("notes.txt");
+        fs::write(&notes, b"not a video").expect("fixture text");
+
+        set_setting(&pool, POSTER_FRAME_SETTING, "5").await.unwrap();
+
+        // Without a per-file choice, the file follows the global frame.
+        assert_eq!(get_file_poster_frame(&pool, &clip).await.unwrap(), None);
+        assert_eq!(
+            resolve_poster_frame(None, get_setting(&pool, POSTER_FRAME_SETTING).await.unwrap()),
+            5
+        );
+
+        // A per-file choice wins for that file only; the global setting stays unchanged.
+        save_file_poster_frame(&pool, &clip, Some(30)).await.expect("per-file frame saves");
+        assert_eq!(get_file_poster_frame(&pool, &clip).await.unwrap(), Some(30));
+        assert_eq!(
+            resolve_poster_frame(get_file_poster_frame(&pool, &clip).await.unwrap(), get_setting(&pool, POSTER_FRAME_SETTING).await.unwrap()),
+            30
+        );
+        assert_eq!(get_file_poster_frame(&pool, &other).await.unwrap(), None);
+        assert_eq!(get_setting(&pool, POSTER_FRAME_SETTING).await.unwrap().as_deref(), Some("5"));
+
+        // Rejected frames and non-video files leave the stored choice alone.
+        assert!(save_file_poster_frame(&pool, &clip, Some(7)).await.is_err());
+        assert!(save_file_poster_frame(&pool, &notes, Some(30)).await.is_err());
+        assert_eq!(get_file_poster_frame(&pool, &clip).await.unwrap(), Some(30));
+
+        // Clearing the choice returns the file to the global frame.
+        save_file_poster_frame(&pool, &clip, None).await.expect("clearing saves");
+        assert_eq!(get_file_poster_frame(&pool, &clip).await.unwrap(), None);
+
+        fs::remove_dir_all(temp).expect("remove test fixture");
+    }
+
+    /// A per-file choice must change the pixels ffmpeg extracts, not just the stored number, so this
+    /// renders real frames and compares them. `testsrc` changes every frame, making the frames distinct.
+    #[test]
+    fn per_file_poster_frame_changes_the_rendered_image() {
+        let temp = std::env::temp_dir().join(format!("lumen-file-render-{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(&temp).expect("fixture directory");
+        let clip = temp.join("clip.mp4");
+        write_test_video(&clip).expect("fixture video");
+        let cache = temp.join("cache");
+
+        // The global frame renders the start of the video.
+        let global = generate_local_thumbnail(clip.clone(), cache.clone(), 0, true).expect("global frame renders");
+        assert!(global.starts_with(&[0xff, 0xd8]), "global frame is a JPEG");
+
+        // The per-file choice renders its own frame, and the two cached files differ.
+        let per_file = generate_local_thumbnail(clip.clone(), cache.clone(), 5, true).expect("per-file frame renders");
+        assert!(per_file.starts_with(&[0xff, 0xd8]), "per-file frame is a JPEG");
+        assert_ne!(global, per_file, "the chosen frame time extracts different pixels than the global one");
+        assert_eq!(fs::read_dir(&cache).expect("cache directory").count(), 2, "each frame time keeps its own cached poster");
+
+        fs::remove_dir_all(temp).expect("remove test fixture");
+    }
+
+    /// Builds a short video whose contents change over time, so seeking to different frame times
+    /// yields genuinely different frames.
+    fn write_test_video(path: &Path) -> std::io::Result<()> {
+        let generated = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=2:duration=8", "-c:v", "mpeg4", "-y"])
+            .arg(path)
+            .output()?;
+        assert!(generated.status.success(), "could not create test video: {}", String::from_utf8_lossy(&generated.stderr));
+        Ok(())
     }
 }
 

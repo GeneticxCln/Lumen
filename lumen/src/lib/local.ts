@@ -14,6 +14,16 @@ export const MEDIA_ROOT_HINT = /^(videos?|movies?|films?|downloads?|media|music|
 export const MAX_ROOTS = 6;
 export const MAX_SUBDIRS = 8;
 
+/** Poster frame times the backends accept. Settings and the per-file picker both read this list. */
+export const POSTER_FRAME_OPTIONS: { seconds: number; label: string }[] = [
+  { seconds: 0, label: "Start of video" },
+  { seconds: 2, label: "2 seconds (default)" },
+  { seconds: 5, label: "5 seconds" },
+  { seconds: 10, label: "10 seconds" },
+  { seconds: 30, label: "30 seconds" },
+  { seconds: 60, label: "1 minute" },
+];
+
 export function extensionOf(name: string): string {
   const dot = name.lastIndexOf(".");
   return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";

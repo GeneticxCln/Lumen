@@ -1,3 +1,4 @@
+mod account;
 mod auth;
 mod commands;
 mod db;
@@ -6,6 +7,7 @@ mod playback;
 mod playlist;
 mod secrets;
 mod sidecar;
+mod sync;
 mod tmdb;
 
 use crate::commands::*;
@@ -25,6 +27,8 @@ pub fn run() {
                     let _ = std::fs::create_dir_all(&app_dir);
                     if let Err(e) = init_db(&app_dir).await {
                         eprintln!("Failed to init database: {}", e);
+                    } else if let Ok(pool) = ensure_db(&app_handle).await {
+                        sync::start(pool);
                     }
 
                     // Initialize sidecar
@@ -37,6 +41,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            account::account_status,
+            account::account_sign_in,
+            account::account_sign_out,
+            sync::sync_now_cmd,
+            sync::sync_status_cmd,
             play_url,
             pause,
             seek,
@@ -71,6 +80,8 @@ pub fn run() {
             local_thumbnail,
             local_filmstrip,
             local_poster_candidates,
+            get_local_poster_frame,
+            set_local_poster_frame,
             get_settings,
             set_setting_cmd,
             set_tmdb_api_key,

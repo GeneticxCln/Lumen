@@ -18,6 +18,8 @@ import type {
   EnrichResult,
   SearchProviderConfig,
   SearchResponse,
+  AccountStatus,
+  SyncStatus,
 } from "./types";
 import type { PosterCandidate } from "./types";
 
@@ -283,11 +285,26 @@ export async function localPosterCandidates(path: string): Promise<PosterCandida
   }));
 }
 
+// The frame one file uses, or null when it follows the Settings frame.
+export async function getLocalPosterFrame(path: string): Promise<number | null> {
+  return callBackend<number | null>("get_local_poster_frame", { path });
+}
+
+// Sets one file's frame, or clears it with null so the file follows the Settings frame again.
+export async function setLocalPosterFrame(path: string, seconds: number | null): Promise<void> {
+  await callBackend<void>("set_local_poster_frame", { path, seconds });
+}
+
 // Posters depend on the saved frame time, so a change must drop the posters already held in memory.
 export function clearLocalThumbnailCache() {
   for (const key of [...localThumbnailCache.keys()]) {
     if (key.startsWith("thumbnail:")) localThumbnailCache.delete(key);
   }
+}
+
+// Drops one file's cached poster after its frame changes, leaving other posters cached.
+export function clearLocalPoster(path: string) {
+  localThumbnailCache.delete(`thumbnail:${path}`);
 }
 
 function localImage(path: string, kind: "thumbnail" | "filmstrip"): Promise<string> {
@@ -346,6 +363,27 @@ export async function setSetting(key: string, value: string) {
 // preview) through its own command. It is never written to the settings table.
 export async function setTmdbApiKey(key: string) {
   return callBackend("set_tmdb_api_key", { key });
+}
+
+// Cross-device sign-in. The app token is kept in the OS keychain by the backend.
+export async function accountStatus() {
+  return callBackend<AccountStatus>("account_status");
+}
+
+export async function accountSignIn() {
+  return callBackend<AccountStatus>("account_sign_in");
+}
+
+export async function accountSignOut() {
+  return callBackend<AccountStatus>("account_sign_out");
+}
+
+export async function syncStatus() {
+  return callBackend<SyncStatus>("sync_status_cmd");
+}
+
+export async function syncNow() {
+  return callBackend<SyncStatus>("sync_now_cmd");
 }
 
 export async function tmdbStatus() {

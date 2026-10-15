@@ -170,6 +170,12 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Per-file poster frame choices, keyed by canonical path. A file without a row follows the global setting.
+CREATE TABLE IF NOT EXISTS poster_frames (
+    path TEXT PRIMARY KEY,
+    seconds INTEGER NOT NULL
+);
 """
 
 STARTER_CHANNELS = [
@@ -477,6 +483,34 @@ def _current_poster_frame_seconds() -> int:
     return parsed if parsed is not None else DEFAULT_POSTER_FRAME_SECONDS
 
 
+def _file_poster_frame_seconds(source: Path) -> int | None:
+    """The frame chosen for this one file, or None when it follows the global setting."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT seconds FROM poster_frames WHERE path = ?", (str(source),)).fetchone()
+    if row is None or int(row["seconds"]) not in POSTER_FRAME_CHOICES:
+        return None
+    return int(row["seconds"])
+
+
+def _set_file_poster_frame(raw_path: str, raw_seconds: Any) -> None:
+    """Save a frame for one file. A missing or empty value removes the file's choice."""
+    source = _authorized_local_file(raw_path, LOCAL_VIDEO_EXTENSIONS, "Local video not found")
+    if raw_seconds is None or str(raw_seconds).strip() == "":
+        with get_conn() as conn:
+            conn.execute("DELETE FROM poster_frames WHERE path = ?", (str(source),))
+            conn.commit()
+        return
+    seconds = _parse_poster_frame_seconds(str(raw_seconds))
+    if seconds is None:
+        raise HTTPException(status_code=400, detail="Poster frame must be one of the offered times")
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO poster_frames (path, seconds) VALUES (?, ?) ON CONFLICT(path) DO UPDATE SET seconds = excluded.seconds",
+            (str(source), seconds),
+        )
+        conn.commit()
+
+
 def _clear_thumbnail_cache() -> None:
     """Remove cached posters and filmstrips so they regenerate with the current settings."""
     cache_dir = DB_DIR / "thumbnails"
@@ -485,8 +519,12 @@ def _clear_thumbnail_cache() -> None:
 
 
 def local_thumbnail_file(raw_path: str) -> Path:
-    """Return a cached poster frame at the saved frame time, generating it on first request."""
-    return local_frame_file(raw_path, _current_poster_frame_seconds(), fall_back_to_start=True, not_found_detail="No video poster for this file")
+    """Return a cached poster frame at the file's own frame time, or the global one when it has none."""
+    source = _authorized_local_file(raw_path, LOCAL_VIDEO_EXTENSIONS, "No video poster for this file")
+    frame_seconds = _file_poster_frame_seconds(source)
+    if frame_seconds is None:
+        frame_seconds = _current_poster_frame_seconds()
+    return local_frame_file(str(source), frame_seconds, fall_back_to_start=True, not_found_detail="No video poster for this file")
 
 
 def local_frame_file(raw_path: str, frame_seconds: int, fall_back_to_start: bool, not_found_detail: str = "No video poster for this file") -> Path:
@@ -1236,6 +1274,14 @@ async def invoke_bridge(cmd: str, request: Request) -> Any:
 
     elif cmd == "local_poster_candidates":
         return await asyncio.to_thread(_poster_candidates, str(body.get("path", "")))
+
+    elif cmd == "get_local_poster_frame":
+        source = _authorized_local_file(str(body.get("path", "")), LOCAL_VIDEO_EXTENSIONS, "Local video not found")
+        return _file_poster_frame_seconds(source)
+
+    elif cmd == "set_local_poster_frame":
+        _set_file_poster_frame(str(body.get("path", "")), body.get("seconds"))
+        return None
 
     elif cmd == "set_setting_cmd":
         k = body.get("key", "")

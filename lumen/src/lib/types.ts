@@ -1,3 +1,16 @@
+/** Cross-device account state. `sub` is the Freebuff user ID; `verified` is false when the server could not be reached. */
+export interface AccountStatus {
+  signedIn: boolean;
+  sub: string | null;
+  verified: boolean;
+}
+
+/** Sync state on this device. `pending` counts local changes the server has not accepted yet. */
+export interface SyncStatus {
+  pending: number;
+  lastSyncedAt: number | null;
+}
+
 export interface Channel {
   id: number;
   playlist_id: number;

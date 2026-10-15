@@ -133,6 +133,49 @@ class ThumbnailTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(same.status_code, 200)
         self.assertEqual(len(list((self.data / "thumbnails").glob("*.jpg"))), 1, "saving an unchanged frame time keeps the cache")
 
+    async def test_per_file_poster_frame_overrides_global_and_falls_back(self):
+        other = self.media / "other.mp4"
+        other.write_bytes(self.video.read_bytes())
+        self.assertEqual((await self.client.post("/api/invoke/set_setting_cmd", json={"key": "poster_frame_seconds", "value": "0"})).status_code, 200)
+        path = f"/api/local-thumbnail?path={self.video}&client=local-preview"
+        self.assertEqual((await self.client.get(path)).status_code, 200)
+        cached_before = {file.name for file in (self.data / "thumbnails").glob("*.jpg")}
+        self.assertEqual(len(cached_before), 1)
+
+        chosen = await self.client.post("/api/invoke/set_local_poster_frame", json={"path": str(self.video), "seconds": 5})
+        self.assertEqual(chosen.status_code, 200, chosen.text)
+        self.assertEqual(len(list((self.data / "thumbnails").glob("*.jpg"))), 1, "a per-file change keeps other cached posters")
+        read_back = await self.client.post("/api/invoke/get_local_poster_frame", json={"path": str(self.video)})
+        self.assertEqual(read_back.json(), 5)
+        unchosen = await self.client.post("/api/invoke/get_local_poster_frame", json={"path": str(other)})
+        self.assertIsNone(unchosen.json(), "other files keep following the global setting")
+
+        with patch.object(self.bridge, "local_frame_file", wraps=self.bridge.local_frame_file) as spy:
+            self.assertEqual((await self.client.get(path)).status_code, 200)
+            self.assertEqual(spy.call_args.args[1], 5, "the chosen file renders at its own frame time")
+            other_path = f"/api/local-thumbnail?path={other}&client=local-preview"
+            self.assertEqual((await self.client.get(other_path)).status_code, 200)
+            self.assertEqual(spy.call_args.args[1], 0, "the unchosen file uses the global frame time")
+        self.assertEqual(len(list((self.data / "thumbnails").glob("*.jpg"))), 3, "each frame time gets its own cached poster")
+
+        invalid = await self.client.post("/api/invoke/set_local_poster_frame", json={"path": str(self.video), "seconds": 7})
+        self.assertEqual(invalid.status_code, 400, "only offered frame times are stored")
+        text_file = self.media / "notes.txt"
+        text_file.write_text("not a video")
+        not_video = await self.client.post("/api/invoke/set_local_poster_frame", json={"path": str(text_file), "seconds": 5})
+        self.assertEqual(not_video.status_code, 404, "only video files can get a frame choice")
+        outside = Path(tempfile.mkdtemp(prefix="lumen-outside-"))
+        self.addCleanup(shutil.rmtree, outside, True)
+        blocked = await self.client.post("/api/invoke/set_local_poster_frame", json={"path": str(outside / "x.mp4"), "seconds": 5})
+        self.assertEqual(blocked.status_code, 404, "frame choices honour the local media roots")
+
+        cleared = await self.client.post("/api/invoke/set_local_poster_frame", json={"path": str(self.video), "seconds": None})
+        self.assertEqual(cleared.status_code, 200, cleared.text)
+        self.assertIsNone((await self.client.post("/api/invoke/get_local_poster_frame", json={"path": str(self.video)})).json())
+        with patch.object(self.bridge, "local_frame_file", wraps=self.bridge.local_frame_file) as spy:
+            self.assertEqual((await self.client.get(path)).status_code, 200)
+            self.assertEqual(spy.call_args.args[1], 0, "clearing the choice returns the file to the global setting")
+
     async def test_poster_candidates_render_offered_frames_and_mark_missing_ones(self):
         response = await self.client.post("/api/invoke/local_poster_candidates", json={"path": str(self.video)})
         self.assertEqual(response.status_code, 200, response.text)
