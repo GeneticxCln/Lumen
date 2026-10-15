@@ -3,6 +3,7 @@ use crate::error::{PlayerError, Result};
 use crate::playback::mpv_ipc::MpvIpcBackend;
 use crate::playback::{PlaybackBackend, PlayerStateEvent};
 use crate::playlist::import::{import_m3u_file, import_m3u_url, Channel, Playlist};
+use crate::media_tools::{cache_name, prune_cache, run_with_timeout};
 use crate::secrets;
 use std::collections::HashSet;
 use crate::sidecar::*;
@@ -11,13 +12,11 @@ use base64::Engine;
 use sqlx::Row;
 use chrono::Utc;
 use serde::Serialize;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 
@@ -690,6 +689,26 @@ fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(trimmed)
 }
 
+/// Longest an ffprobe/ffmpeg run on one file may take before it is stopped.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const FRAME_TIMEOUT: Duration = Duration::from_secs(20);
+const FILMSTRIP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Cached posters beyond this size are deleted, oldest first.
+const THUMBNAIL_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
+/// Pruning scans the cache directory, so it runs every few writes rather than on each one.
+const PRUNE_EVERY_WRITES: usize = 25;
+static CACHE_WRITES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A page of local videos asks for dozens of posters at once. Only a few ffmpeg processes run at a
+/// time; the rest wait here instead of starting a process (and a blocking thread) each.
+static FFMPEG_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> = std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(3));
+
+fn note_cache_write(cache_dir: &Path) {
+    if CACHE_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % PRUNE_EVERY_WRITES == PRUNE_EVERY_WRITES - 1 {
+        prune_cache(cache_dir, THUMBNAIL_CACHE_MAX_BYTES);
+    }
+}
+
 fn generate_local_filmstrip(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<u8>> {
     let source = path
         .canonicalize()
@@ -700,47 +719,45 @@ fn generate_local_filmstrip(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<u8>
 
     let metadata = std::fs::metadata(&source)?;
     let modified = metadata.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default();
-    let fingerprint = (source.to_string_lossy().to_string(), metadata.len(), modified.as_nanos(), "filmstrip");
-    let mut hasher = DefaultHasher::new();
-    fingerprint.hash(&mut hasher);
-    let key = hasher.finish();
-    let cached = cache_dir.join(format!("{key:016x}.jpg"));
+    let key = cache_name(&[&source.to_string_lossy(), &metadata.len().to_string(), &modified.as_nanos().to_string(), "filmstrip"]);
+    let cached = cache_dir.join(format!("{key}.jpg"));
     if let Ok(bytes) = std::fs::read(&cached) {
         if bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) {
             return Ok(bytes);
         }
     }
 
-    let probe = Command::new("ffprobe")
-        .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"])
-        .arg(&source)
-        .output()
-        .map_err(|error| PlayerError::Io(format!("Could not start ffprobe: {error}")))?;
+    let mut probe_command = Command::new("ffprobe");
+    probe_command
+        // Local files only: a crafted "video" must not make ffprobe open other files or URLs.
+        .args(["-protocol_whitelist", "file", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"])
+        .arg(&source);
+    let probe = run_with_timeout(probe_command, PROBE_TIMEOUT)?;
     let duration = String::from_utf8_lossy(&probe.stdout).trim().parse::<f64>()
         .ok().filter(|value| value.is_finite() && *value > 0.0)
         .ok_or_else(|| PlayerError::InvalidArg("Could not determine video duration for preview".into()))?;
 
     std::fs::create_dir_all(&cache_dir)?;
-    let temporary = cache_dir.join(format!(".{key:016x}-{}.jpg", std::process::id()));
+    let temporary = cache_dir.join(format!(".{key}-{}.jpg", std::process::id()));
     let mut command = Command::new("ffmpeg");
     command.args(["-nostdin", "-hide_banner", "-loglevel", "error"]);
     for fraction in [0.12, 0.36, 0.62, 0.88] {
-        command.args(["-ss", &format!("{:.3}", duration * fraction), "-i"]);
+        command.args(["-protocol_whitelist", "file", "-ss", &format!("{:.3}", duration * fraction), "-i"]);
         command.arg(&source);
     }
     let mut filters: Vec<String> = (0..4)
         .map(|index| format!("[{index}:v:0]scale=240:136:force_original_aspect_ratio=increase,crop=240:136,setsar=1[v{index}]"))
         .collect();
     filters.push("[v0][v1][v2][v3]hstack=inputs=4[out]".into());
-    let output = command
+    command
         .args(["-filter_complex", &filters.join(";"), "-map", "[out]", "-frames:v", "1", "-q:v", "6", "-threads", "1", "-an", "-sn", "-dn", "-y"])
-        .arg(&temporary)
-        .output()
-        .map_err(|error| PlayerError::Io(format!("Could not start ffmpeg: {error}")))?;
+        .arg(&temporary);
+    let output = run_with_timeout(command, FILMSTRIP_TIMEOUT)?;
     if output.status.success() {
         if let Ok(bytes) = std::fs::read(&temporary) {
             if bytes.len() > 4 && bytes.len() <= 2_000_000 && bytes.starts_with(&[0xff, 0xd8]) {
                 std::fs::rename(&temporary, &cached)?;
+                note_cache_write(&cache_dir);
                 return Ok(bytes);
             }
         }
@@ -752,6 +769,7 @@ fn generate_local_filmstrip(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<u8>
 #[tauri::command]
 pub async fn local_filmstrip(path: String, app: AppHandle) -> Result<String> {
     let cache_dir = app.path().app_cache_dir().map_err(|error| PlayerError::Io(error.to_string()))?.join("thumbnails");
+    let _slot = FFMPEG_SLOTS.acquire().await.map_err(|error| PlayerError::Io(error.to_string()))?;
     let bytes = tokio::task::spawn_blocking(move || generate_local_filmstrip(PathBuf::from(path), cache_dir))
         .await
         .map_err(|error| PlayerError::Io(format!("Filmstrip task failed: {error}")))??;
@@ -857,10 +875,8 @@ fn generate_local_thumbnail(path: PathBuf, cache_dir: PathBuf, frame_seconds: u3
 
     let metadata = std::fs::metadata(&source)?;
     let modified = metadata.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default();
-    let fingerprint = (source.to_string_lossy().to_string(), metadata.len(), modified.as_nanos(), frame_seconds);
-    let mut hasher = DefaultHasher::new();
-    fingerprint.hash(&mut hasher);
-    let cached = cache_dir.join(format!("{:016x}.jpg", hasher.finish()));
+    let key = cache_name(&[&source.to_string_lossy(), &metadata.len().to_string(), &modified.as_nanos().to_string(), &frame_seconds.to_string()]);
+    let cached = cache_dir.join(format!("{key}.jpg"));
     if let Ok(bytes) = std::fs::read(&cached) {
         if bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) {
             return Ok(bytes);
@@ -868,7 +884,7 @@ fn generate_local_thumbnail(path: PathBuf, cache_dir: PathBuf, frame_seconds: u3
     }
 
     std::fs::create_dir_all(&cache_dir)?;
-    let temporary = cache_dir.join(format!(".{:016x}-{}.jpg", hasher.finish(), std::process::id()));
+    let temporary = cache_dir.join(format!(".{key}-{}.jpg", std::process::id()));
     let mut last_error = None;
     // The requested frame skips intros; for saved posters, retry at the first frame for clips shorter than that.
     let requested = frame_seconds.to_string();
@@ -877,17 +893,19 @@ fn generate_local_thumbnail(path: PathBuf, cache_dir: PathBuf, frame_seconds: u3
         seeks.push("0");
     }
     for seek in seeks {
-        let output = Command::new("ffmpeg")
-            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-ss", seek, "-i"])
+        let mut command = Command::new("ffmpeg");
+        command
+            // `-protocol_whitelist file`: a crafted "video" must not make ffmpeg open other files or URLs.
+            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file", "-ss", seek, "-i"])
             .arg(&source)
             .args(["-map", "0:v:0", "-frames:v", "1", "-vf", "scale=480:-2:force_original_aspect_ratio=decrease", "-q:v", "5", "-threads", "1", "-an", "-sn", "-dn", "-y"])
-            .arg(&temporary)
-            .output()
-            .map_err(|error| PlayerError::Io(format!("Could not start ffmpeg: {error}")))?;
+            .arg(&temporary);
+        let output = run_with_timeout(command, FRAME_TIMEOUT)?;
         if output.status.success() {
             if let Ok(bytes) = std::fs::read(&temporary) {
                 if bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) && bytes.len() <= 2_000_000 {
                     std::fs::rename(&temporary, &cached)?;
+                    note_cache_write(&cache_dir);
                     return Ok(bytes);
                 }
             }
@@ -906,6 +924,7 @@ pub async fn local_thumbnail(path: String, app: AppHandle) -> Result<String> {
     let file_choice = get_file_poster_frame(pool, Path::new(&path)).await?;
     let frame_seconds = resolve_poster_frame(file_choice, get_setting(pool, POSTER_FRAME_SETTING).await?);
     let cache_dir = app.path().app_cache_dir().map_err(|error| PlayerError::Io(error.to_string()))?.join("thumbnails");
+    let _slot = FFMPEG_SLOTS.acquire().await.map_err(|error| PlayerError::Io(error.to_string()))?;
     let bytes = tokio::task::spawn_blocking(move || generate_local_thumbnail(PathBuf::from(path), cache_dir, frame_seconds, true))
         .await
         .map_err(|error| PlayerError::Io(format!("Thumbnail task failed: {error}")))??;
@@ -939,6 +958,7 @@ fn render_poster_candidates(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<Pos
 #[tauri::command]
 pub async fn local_poster_candidates(path: String, app: AppHandle) -> Result<Vec<PosterCandidate>> {
     let cache_dir = thumbnail_cache_dir(&app)?;
+    let _slot = FFMPEG_SLOTS.acquire().await.map_err(|error| PlayerError::Io(error.to_string()))?;
     tokio::task::spawn_blocking(move || render_poster_candidates(expand_home(&path), cache_dir))
         .await
         .map_err(|error| PlayerError::Io(format!("Frame preview task failed: {error}")))?
