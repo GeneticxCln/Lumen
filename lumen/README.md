@@ -54,4 +54,13 @@ cd src-tauri && cargo test --lib
 cd ../sidecar && .venv/bin/python -m pytest
 ```
 
+`cargo test --lib` needs the Tauri build dependencies (on Debian/Ubuntu: `libwebkit2gtk-4.1-dev`,
+`libgtk-3-dev`, `libsoup-3.0-dev`, `libjavascriptcoregtk-4.1-dev`), plus `ffmpeg` for the poster tests
+and `mpv` for the playback tests (those skip with a message when `mpv` is missing). The sidecar test
+starts `sidecar/.venv`, so create it first: `cd sidecar && python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'`.
+
+The account Worker has its own checks. With `npx wrangler dev --port 8787` running (and
+`--var FREEBUFF_CLIENT_ID:test --var APP_ORIGIN:http://127.0.0.1:8787`), run `node test/desktop-flow.mjs`
+and `node test/sync-flow.mjs` from `account/` after making one request to create the schema.
+
 See [AUDIT.md](AUDIT.md) for verified behavior, audit findings, security boundaries, and release blockers.

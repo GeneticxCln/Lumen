@@ -296,7 +296,7 @@ pub async fn delete_playlist(pool: &Pool<Sqlite>, playlist_id: i64) -> Result<()
         .execute(&mut *tx)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
-        sync::queue_favorite(&mut *tx, profile_id, &url, false, now).await?;
+        sync::queue_favorite(&mut tx, profile_id, &url, false, now).await?;
     }
 
     tx.commit()
@@ -576,7 +576,7 @@ pub async fn toggle_favorite(
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    sync::queue_favorite(&mut *tx, profile_id, &url, favorite, now).await?;
+    sync::queue_favorite(&mut tx, profile_id, &url, favorite, now).await?;
 
     tx.commit()
         .await
@@ -708,7 +708,7 @@ pub async fn create_profile(
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
     let id: i64 = row.get("id");
 
-    sync::queue_profile(&mut *tx, id).await?;
+    sync::queue_profile(&mut tx, id).await?;
 
     tx.commit()
         .await
@@ -737,7 +737,7 @@ pub async fn rename_profile(pool: &Pool<Sqlite>, profile_id: i64, name: &str) ->
         return Err(PlayerError::NotFound("Profile no longer exists".into()));
     }
 
-    sync::queue_profile(&mut *tx, profile_id).await?;
+    sync::queue_profile(&mut tx, profile_id).await?;
 
     tx.commit()
         .await
@@ -784,7 +784,7 @@ pub async fn delete_profile(pool: &Pool<Sqlite>, profile_id: i64) -> Result<()> 
     }
 
     if let Some(sync_key) = sync_key {
-        sync::queue_profile_deleted(&mut *tx, &sync_key, Utc::now().timestamp_millis()).await?;
+        sync::queue_profile_deleted(&mut tx, &sync_key, Utc::now().timestamp_millis()).await?;
     }
 
     tx.commit()
@@ -880,13 +880,11 @@ pub async fn set_active_profile(pool: &Pool<Sqlite>, profile_id: i64) -> Result<
 }
 
 pub async fn active_profile_id(pool: &Pool<Sqlite>) -> Result<i64> {
-    if let Some(stored) = get_setting(pool, ACTIVE_PROFILE_KEY).await? {
-        if let Ok(id) = stored.parse::<i64>() {
-            if profile_exists(pool, id).await? {
+    if let Some(stored) = get_setting(pool, ACTIVE_PROFILE_KEY).await?
+        && let Ok(id) = stored.parse::<i64>()
+            && profile_exists(pool, id).await? {
                 return Ok(id);
             }
-        }
-    }
 
     let row = sqlx::query("SELECT id FROM profiles ORDER BY created_at, id LIMIT 1")
         .fetch_optional(pool)
@@ -1062,7 +1060,7 @@ pub async fn add_history(
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    sync::queue_progress(&mut *tx, profile_id, path, position, duration, now).await?;
+    sync::queue_progress(&mut tx, profile_id, path, position, duration, now).await?;
 
     prune_history_with(&mut tx, DEFAULT_HISTORY_RETENTION).await?;
 

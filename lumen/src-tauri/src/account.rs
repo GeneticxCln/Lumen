@@ -61,11 +61,10 @@ enum TokenCheck {
 /// The Freebuff-hosted account site. A debug build may point at a local Worker through
 /// LUMEN_ACCOUNT_URL; release builds always use the built-in origin.
 pub(crate) fn account_origin() -> String {
-    if cfg!(debug_assertions) {
-        if let Ok(origin) = std::env::var("LUMEN_ACCOUNT_URL") {
+    if cfg!(debug_assertions)
+        && let Ok(origin) = std::env::var("LUMEN_ACCOUNT_URL") {
             return origin.trim_end_matches('/').to_string();
         }
-    }
     DEFAULT_ACCOUNT_ORIGIN.to_string()
 }
 

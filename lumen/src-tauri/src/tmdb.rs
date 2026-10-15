@@ -260,13 +260,12 @@ async fn read_capped_json(
     mut response: reqwest::Response,
     limit: usize,
 ) -> std::result::Result<serde_json::Value, TmdbFailure> {
-    if let Some(len) = response.content_length() {
-        if len > limit as u64 {
+    if let Some(len) = response.content_length()
+        && len > limit as u64 {
             return Err(TmdbFailure::Other(format!(
                 "TMDB response is {len} bytes, over the {limit} byte limit"
             )));
         }
-    }
     let mut buffer: Vec<u8> = Vec::new();
     while let Some(chunk) = response
         .chunk()

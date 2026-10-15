@@ -68,11 +68,10 @@ pub struct MpvIpcBackend {
 fn private_socket_dir() -> Result<std::path::PathBuf> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
-    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from) {
-        if runtime.is_dir() {
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)
+        && runtime.is_dir() {
             return Ok(runtime);
         }
-    }
     let dir = std::env::temp_dir().join("lumen-ipc");
     match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
         Ok(()) => {}
@@ -167,12 +166,11 @@ impl MpvIpcBackend {
         // Wait for socket to appear and accept connections
         let mut connected_stream = None;
         for _ in 0..60 {
-            if Path::new(&socket_path).exists() {
-                if let Ok(s) = UnixStream::connect(&socket_path).await {
+            if Path::new(&socket_path).exists()
+                && let Ok(s) = UnixStream::connect(&socket_path).await {
                     connected_stream = Some(s);
                     break;
                 }
-            }
             tokio::time::sleep(Duration::from_millis(75)).await;
         }
 
@@ -210,8 +208,8 @@ impl MpvIpcBackend {
                     Ok(_) => {
                         if let Ok(msg) = serde_json::from_str::<MpvMessage>(&line) {
                             // 1. Handle command response if request_id matches
-                            if let Some(req_id) = msg.request_id {
-                                if req_id > 0 {
+                            if let Some(req_id) = msg.request_id
+                                && req_id > 0 {
                                     let mut map = pending_reader.lock().await;
                                     if let Some(responder) = map.remove(&req_id) {
                                         let err_str = msg.error.unwrap_or_else(|| "success".into());
@@ -224,7 +222,6 @@ impl MpvIpcBackend {
                                         continue;
                                     }
                                 }
-                            }
 
                             // 2. Handle mpv events & property-change notifications
                             if let Some(ev) = msg.event.as_deref() {
@@ -263,8 +260,8 @@ impl MpvIpcBackend {
                                                     }
                                                 }
                                                 "paused-for-cache" | "core-idle" => {
-                                                    if prop_name == "paused-for-cache" {
-                                                        if let Some(b) = msg
+                                                    if prop_name == "paused-for-cache"
+                                                        && let Some(b) = msg
                                                             .data
                                                             .as_ref()
                                                             .and_then(|v| v.as_bool())
@@ -272,7 +269,6 @@ impl MpvIpcBackend {
                                                             st.buffering = b;
                                                             changed = true;
                                                         }
-                                                    }
                                                 }
                                                 "media-title" => {
                                                     if let Some(title) =
@@ -339,11 +335,10 @@ impl MpvIpcBackend {
                                     _ => {}
                                 }
 
-                                if changed {
-                                    if let Some(ref handle) = app_reader {
+                                if changed
+                                    && let Some(ref handle) = app_reader {
                                         let _ = handle.emit("player://state", st.clone());
                                     }
-                                }
                             }
                         }
                     }
@@ -555,8 +550,8 @@ impl PlaybackBackend for MpvIpcBackend {
             value,
         ])
         .await?;
-        if name == "hls-bitrate" {
-            if let Some(app) = self.app.as_ref() {
+        if name == "hls-bitrate"
+            && let Some(app) = self.app.as_ref() {
                 let snapshot = {
                     let mut st = self.state.lock().await;
                     st.quality = quality;
@@ -564,7 +559,6 @@ impl PlaybackBackend for MpvIpcBackend {
                 };
                 let _ = app.emit("player://state", snapshot);
             }
-        }
         Ok(())
     }
 

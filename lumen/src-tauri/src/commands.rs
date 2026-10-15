@@ -117,11 +117,10 @@ pub async fn play_url(
     backend.load(&url, hdrs.as_deref()).await?;
 
     // Check if there is a saved resume position for local files
-    if let Ok(Some(resume_pos)) = get_resume_position(pool, profile_id, &url).await {
-        if resume_pos > 1.0 {
+    if let Ok(Some(resume_pos)) = get_resume_position(pool, profile_id, &url).await
+        && resume_pos > 1.0 {
             let _ = backend.seek(resume_pos).await;
         }
-    }
 
     // Record history entry for the active profile
     let _ = add_history(pool, profile_id, channel_id, &url, 0.0, 0.0).await;
@@ -327,11 +326,10 @@ async fn load_stored_providers(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<Vec<se
 fn with_keychain_tokens(mut providers: Vec<serde_json::Value>) -> Result<Vec<serde_json::Value>> {
     for provider in &mut providers {
         let id = secrets::provider_id(provider)?;
-        if let Some(token) = secrets::load_token(&id)? {
-            if let Some(object) = provider.as_object_mut() {
+        if let Some(token) = secrets::load_token(&id)?
+            && let Some(object) = provider.as_object_mut() {
                 object.insert("token".into(), serde_json::Value::String(token));
             }
-        }
     }
     Ok(providers)
 }
@@ -449,12 +447,11 @@ pub async fn harvest_page(url: String, app: AppHandle) -> Result<HarvestResponse
         for (idx, found_url) in harvested.urls.iter().enumerate() {
             // If it's a playlist (.m3u), try importing its channels; otherwise add as direct stream.
             // An HLS manifest found on the page comes back as the single stream it describes.
-            if found_url.to_lowercase().ends_with(".m3u") {
-                if let Ok((_, parsed_chans)) = import_m3u_url(found_url, None, allow_lan).await {
+            if found_url.to_lowercase().ends_with(".m3u")
+                && let Ok((_, parsed_chans)) = import_m3u_url(found_url, None, allow_lan).await {
                     all_channels.extend(parsed_chans);
                     continue;
                 }
-            }
             let stream_name = found_url
                 .split('/')
                 .next_back()
@@ -721,11 +718,10 @@ fn generate_local_filmstrip(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<u8>
     let modified = metadata.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default();
     let key = cache_name(&[&source.to_string_lossy(), &metadata.len().to_string(), &modified.as_nanos().to_string(), "filmstrip"]);
     let cached = cache_dir.join(format!("{key}.jpg"));
-    if let Ok(bytes) = std::fs::read(&cached) {
-        if bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) {
+    if let Ok(bytes) = std::fs::read(&cached)
+        && bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) {
             return Ok(bytes);
         }
-    }
 
     let mut probe_command = Command::new("ffprobe");
     probe_command
@@ -753,15 +749,13 @@ fn generate_local_filmstrip(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<u8>
         .args(["-filter_complex", &filters.join(";"), "-map", "[out]", "-frames:v", "1", "-q:v", "6", "-threads", "1", "-an", "-sn", "-dn", "-y"])
         .arg(&temporary);
     let output = run_with_timeout(command, FILMSTRIP_TIMEOUT)?;
-    if output.status.success() {
-        if let Ok(bytes) = std::fs::read(&temporary) {
-            if bytes.len() > 4 && bytes.len() <= 2_000_000 && bytes.starts_with(&[0xff, 0xd8]) {
+    if output.status.success()
+        && let Ok(bytes) = std::fs::read(&temporary)
+            && bytes.len() > 4 && bytes.len() <= 2_000_000 && bytes.starts_with(&[0xff, 0xd8]) {
                 std::fs::rename(&temporary, &cached)?;
                 note_cache_write(&cache_dir);
                 return Ok(bytes);
             }
-        }
-    }
     let _ = std::fs::remove_file(&temporary);
     Err(PlayerError::InvalidArg("Could not extract preview frames from this video".into()))
 }
@@ -877,11 +871,10 @@ fn generate_local_thumbnail(path: PathBuf, cache_dir: PathBuf, frame_seconds: u3
     let modified = metadata.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default();
     let key = cache_name(&[&source.to_string_lossy(), &metadata.len().to_string(), &modified.as_nanos().to_string(), &frame_seconds.to_string()]);
     let cached = cache_dir.join(format!("{key}.jpg"));
-    if let Ok(bytes) = std::fs::read(&cached) {
-        if bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) {
+    if let Ok(bytes) = std::fs::read(&cached)
+        && bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) {
             return Ok(bytes);
         }
-    }
 
     std::fs::create_dir_all(&cache_dir)?;
     let temporary = cache_dir.join(format!(".{key}-{}.jpg", std::process::id()));
@@ -902,13 +895,12 @@ fn generate_local_thumbnail(path: PathBuf, cache_dir: PathBuf, frame_seconds: u3
             .arg(&temporary);
         let output = run_with_timeout(command, FRAME_TIMEOUT)?;
         if output.status.success() {
-            if let Ok(bytes) = std::fs::read(&temporary) {
-                if bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) && bytes.len() <= 2_000_000 {
+            if let Ok(bytes) = std::fs::read(&temporary)
+                && bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) && bytes.len() <= 2_000_000 {
                     std::fs::rename(&temporary, &cached)?;
                     note_cache_write(&cache_dir);
                     return Ok(bytes);
                 }
-            }
         } else {
             last_error = Some(String::from_utf8_lossy(&output.stderr).trim().to_string());
         }
@@ -981,7 +973,7 @@ pub async fn set_local_poster_frame(path: String, seconds: Option<u32>, app: App
 #[tauri::command]
 pub async fn list_local_dir(path: String, _app: AppHandle) -> Result<Vec<LocalFile>> {
     let target_path = if path.trim().is_empty() {
-        PathBuf::from(home_dir())
+        home_dir()
     } else {
         expand_home(&path)
     };

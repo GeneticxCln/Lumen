@@ -112,12 +112,11 @@ fn locate_sidecar_executable(preferred_dir: &Path) -> Option<PathBuf> {
             .join("extractor-x86_64-unknown-linux-gnu"),
     );
 
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent() {
             candidates.push(parent.join("extractor"));
             candidates.push(parent.join("binaries").join("extractor"));
         }
-    }
 
     candidates.into_iter().find(|p| p.exists() && p.is_file())
 }

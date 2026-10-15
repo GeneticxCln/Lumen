@@ -395,7 +395,7 @@ async fn queue_all(pool: &Pool<Sqlite>) -> Result<()> {
         .await
         .map_err(sql_err)?;
     for id in profile_ids {
-        queue_profile(&mut *tx, id).await?;
+        queue_profile(&mut tx, id).await?;
     }
 
     let favorites = sqlx::query("SELECT profile_id, channel_url, active, updated_at FROM favorites")
@@ -407,7 +407,7 @@ async fn queue_all(pool: &Pool<Sqlite>) -> Result<()> {
         let url: String = row.get("channel_url");
         let active = row.get::<i64, _>("active") != 0;
         let updated_at: i64 = row.get("updated_at");
-        queue_favorite(&mut *tx, profile_id, &url, active, updated_at).await?;
+        queue_favorite(&mut tx, profile_id, &url, active, updated_at).await?;
     }
 
     let history = sqlx::query(
@@ -420,7 +420,7 @@ async fn queue_all(pool: &Pool<Sqlite>) -> Result<()> {
         let profile_id: i64 = row.get("profile_id");
         let path: String = row.get("path");
         queue_progress(
-            &mut *tx,
+            &mut tx,
             profile_id,
             &path,
             row.get("position"),
@@ -546,7 +546,7 @@ async fn pull_remote(pool: &Pool<Sqlite>, client: &reqwest::Client, origin: &str
 
         let mut tx = pool.begin().await.map_err(sql_err)?;
         for item in &page.items {
-            apply_remote(&mut *tx, item).await?;
+            apply_remote(&mut tx, item).await?;
         }
         tx.commit().await.map_err(sql_err)?;
 
