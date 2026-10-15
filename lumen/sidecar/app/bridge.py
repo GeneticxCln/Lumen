@@ -296,7 +296,7 @@ def repair_orphan_rows(conn: sqlite3.Connection) -> None:
         "AND channel_id NOT IN (SELECT id FROM channels)"
     )
     conn.execute(
-        "DELETE FROM favorites WHERE channel_id NOT IN (SELECT id FROM channels)"
+        "DELETE FROM favorites WHERE channel_url NOT IN (SELECT url FROM channels)"
     )
 
 
