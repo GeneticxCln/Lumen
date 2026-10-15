@@ -566,12 +566,19 @@ pub async fn save_progress_cmd(
     path: String,
     position: f64,
     duration: f64,
+    flush: Option<bool>,
     app: AppHandle,
 ) -> Result<()> {
     let pool = ensure_db(&app).await?;
     let profile_id = active_profile_id(pool).await?;
     let result = add_history(pool, profile_id, channel_id, &path, position, duration).await;
-    crate::sync::schedule(pool);
+    // The periodic save during playback is spaced out; the final one (`flush`, when playback
+    // stops) goes out at once so the other devices see where you stopped.
+    if flush.unwrap_or(false) {
+        crate::sync::schedule(pool);
+    } else {
+        crate::sync::schedule_progress(pool);
+    }
     result
 }
 

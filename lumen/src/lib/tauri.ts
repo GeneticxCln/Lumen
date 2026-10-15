@@ -214,9 +214,12 @@ export async function saveProgress(
   path: string,
   position: number,
   duration: number,
-  channelId?: number
+  channelId?: number,
+  // True for the final save when playback stops: it syncs at once instead of waiting for the
+  // spacing applied to the periodic saves during playback.
+  flush = false
 ) {
-  return callBackend("save_progress_cmd", { channelId, path, position, duration });
+  return callBackend("save_progress_cmd", { channelId, path, position, duration, flush });
 }
 
 // Local files

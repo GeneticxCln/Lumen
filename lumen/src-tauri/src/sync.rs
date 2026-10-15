@@ -6,7 +6,7 @@
 //! not echo each other's changes back and forth. Only http(s) streams sync: a local file path
 //! means nothing on another device.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -43,6 +43,12 @@ const SEEDED_SETTING: &str = "sync_seeded";
 
 static SYNC_LOCK: Mutex<()> = Mutex::const_new(());
 static SCHEDULED: AtomicBool = AtomicBool::new(false);
+
+/// How often playback progress, saved every few seconds while something plays, may start a
+/// sync. Every save is still written to the local queue at once; only the network round trip is
+/// spaced out. Stopping playback and every other kind of change sync immediately.
+const PROGRESS_SYNC_INTERVAL_MS: i64 = 90_000;
+static LAST_PROGRESS_SYNC_MS: AtomicI64 = AtomicI64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncItem {
@@ -602,6 +608,26 @@ pub fn schedule(pool: &'static Pool<Sqlite>) {
     });
 }
 
+/// True when enough time has passed since `last` for a progress save to start a sync.
+fn progress_sync_due(last: i64, now: i64) -> bool {
+    // A clock that moved backwards (`now < last`) must not hold syncing off until it catches up.
+    now < last || now - last >= PROGRESS_SYNC_INTERVAL_MS
+}
+
+/// Like `schedule`, for the steady stream of progress saves during playback: at most one sync
+/// per `PROGRESS_SYNC_INTERVAL_MS`, instead of a push and a pull every few seconds.
+pub fn schedule_progress(pool: &'static Pool<Sqlite>) {
+    let now = now_ms();
+    let last = LAST_PROGRESS_SYNC_MS.load(Ordering::SeqCst);
+    if progress_sync_due(last, now)
+        && LAST_PROGRESS_SYNC_MS
+            .compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    {
+        schedule(pool);
+    }
+}
+
 /// Syncs at startup and then every few minutes, so changes from another device arrive even
 /// while this one is idle. Does nothing while signed out.
 pub fn start(pool: &'static Pool<Sqlite>) {
@@ -656,6 +682,15 @@ mod cursor_tests {
         let cursor = next_cursor(&page).unwrap();
         assert_eq!(cursor.since, 7);
         assert_eq!(cursor.after, Some(("favorite".to_string(), "c".to_string())));
+    }
+
+    #[test]
+    fn progress_saves_start_a_sync_at_most_once_per_interval() {
+        assert!(progress_sync_due(0, PROGRESS_SYNC_INTERVAL_MS), "first save after startup");
+        assert!(!progress_sync_due(1_000_000, 1_000_000 + 5_000), "a save 5 s later waits");
+        assert!(!progress_sync_due(1_000_000, 1_000_000 + PROGRESS_SYNC_INTERVAL_MS - 1));
+        assert!(progress_sync_due(1_000_000, 1_000_000 + PROGRESS_SYNC_INTERVAL_MS));
+        assert!(progress_sync_due(2_000_000, 1_000_000), "a clock that moved backwards cannot wedge it");
     }
 
     #[test]

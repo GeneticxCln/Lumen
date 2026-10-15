@@ -34,6 +34,9 @@ struct MpvMessage {
 /// How long `load` waits for mpv to report the file it was handed. Bounded so an unreachable
 /// stream cannot hold the command open indefinitely; network streams get a reasonable startup
 /// window, and a timeout is surfaced instead of pretending the file is ready for resume-seek.
+/// Shortest gap between `player://state` events caused only by the playback clock moving.
+const TIME_EMIT_INTERVAL: Duration = Duration::from_millis(250);
+
 const LOAD_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Shown when Stop interrupts a load that had not finished.
@@ -196,6 +199,10 @@ impl MpvIpcBackend {
         // Spawn reader loop for both command responses and property-change events
         tokio::spawn(async move {
             let mut line = String::new();
+            // mpv reports `time-pos` on every frame. The UI needs a clock tick, not a frame rate,
+            // so those events are forwarded a few times a second. The state still holds the latest
+            // time, and any other event (pause, tracks, ...) carries it along.
+            let mut last_time_emit = std::time::Instant::now() - TIME_EMIT_INTERVAL;
             loop {
                 line.clear();
                 match reader.read_line(&mut line).await {
@@ -241,7 +248,10 @@ impl MpvIpcBackend {
                                                         msg.data.as_ref().and_then(|v| v.as_f64())
                                                     {
                                                         st.time = t;
-                                                        changed = true;
+                                                        if last_time_emit.elapsed() >= TIME_EMIT_INTERVAL {
+                                                            last_time_emit = std::time::Instant::now();
+                                                            changed = true;
+                                                        }
                                                     }
                                                 }
                                                 "duration" => {

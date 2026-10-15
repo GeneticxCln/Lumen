@@ -166,7 +166,8 @@ export function usePlayer() {
         currentUrl,
         playerState.time,
         playerState.duration,
-        currentChannelId
+        currentChannelId,
+        true
       ).catch(reportError);
     }
     await stopCmd();
