@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import type { CSSProperties } from "react";
-import { getSettings, setSetting, tmdbStatus, enrichTmdb, clearTmdbEnrichment, TMDB_API_KEY_SETTING, errorMessage } from "../lib/tauri";
-import type { Channel, Playlist, Profile, TmdbStatus } from "../lib/types";
+import { getSettings, setSetting, setTmdbApiKey, tmdbStatus, enrichTmdb, clearTmdbEnrichment, clearLocalThumbnailCache, localPosterCandidates, errorMessage } from "../lib/tauri";
+import type { Channel, Playlist, PosterCandidate, Profile, TmdbStatus } from "../lib/types";
 import { defaultPreferences, themes, applyTheme } from "../lib/discovery";
 import type { Preferences } from "../lib/discovery";
 import { LocalBrowser } from "./LocalBrowser";
@@ -32,6 +32,16 @@ interface SettingsPageProps {
   activeProfileId: number | null;
   onProfilesChanged: () => void | Promise<void>;
 }
+
+// Must match the frame times the backends accept when saving.
+const posterFrameChoices = [
+  { seconds: "0", label: "Start of video" },
+  { seconds: "2", label: "2 seconds (default)" },
+  { seconds: "5", label: "5 seconds" },
+  { seconds: "10", label: "10 seconds" },
+  { seconds: "30", label: "30 seconds" },
+  { seconds: "60", label: "1 minute" },
+];
 
 const sections: { id: SettingsSection; label: string; description: string; icon: IconName; group: string }[] = [
   { id: "account", label: "Account", description: "Profiles on this device", icon: "profile", group: "ACCOUNT" },
@@ -88,6 +98,10 @@ export function SettingsPage({
   const [tmdb, setTmdb] = useState<TmdbStatus | null>(null);
   const [tmdbBusy, setTmdbBusy] = useState(false);
   const [tmdbNotice, setTmdbNotice] = useState<string | null>(null);
+  const [posterFrame, setPosterFrame] = useState("2");
+  const [framePath, setFramePath] = useState("");
+  const [frameCandidates, setFrameCandidates] = useState<PosterCandidate[] | null>(null);
+  const [frameCandidatesBusy, setFrameCandidatesBusy] = useState(false);
 
   useEffect(() => {
     if (section !== "metadata") return;
@@ -95,15 +109,46 @@ export function SettingsPage({
     tmdbStatus()
       .then((status) => { if (active) setTmdb(status); })
       .catch((failure) => { if (active) setError(errorMessage(failure)); });
+    getSettings()
+      .then((settings) => { if (active) setPosterFrame(settings.poster_frame_seconds); })
+      .catch((failure) => { if (active) setError(errorMessage(failure)); });
     return () => { active = false; };
   }, [section]);
+
+  const loadFrameCandidates = async () => {
+    const path = framePath.trim();
+    if (!path) return;
+    setFrameCandidatesBusy(true);
+    setError(null);
+    try {
+      setFrameCandidates(await localPosterCandidates(path));
+    } catch (failure) {
+      setFrameCandidates(null);
+      setError(errorMessage(failure));
+    } finally {
+      setFrameCandidatesBusy(false);
+    }
+  };
+
+  const savePosterFrame = async (seconds: string) => {
+    const previous = posterFrame;
+    setPosterFrame(seconds);
+    setError(null);
+    try {
+      await setSetting("poster_frame_seconds", seconds);
+      clearLocalThumbnailCache();
+    } catch (failure) {
+      setPosterFrame(previous);
+      setError(errorMessage(failure));
+    }
+  };
 
   const saveTmdbKey = async () => {
     setTmdbBusy(true);
     setError(null);
     setTmdbNotice(null);
     try {
-      await setSetting(TMDB_API_KEY_SETTING, tmdbKey.trim());
+      await setTmdbApiKey(tmdbKey.trim());
       setTmdbKey("");
       const status = await tmdbStatus();
       setTmdb(status);
@@ -406,6 +451,56 @@ export function SettingsPage({
             </p>
 
             <div className="form-group">
+              <label htmlFor="poster-frame">Local video poster frame</label>
+              <select id="poster-frame" value={posterFrame} onChange={(event) => void savePosterFrame(event.target.value)}>
+                {posterFrameChoices.map((choice) => <option key={choice.seconds} value={choice.seconds}>{choice.label}</option>)}
+              </select>
+              <small>
+                The frame shown as the poster for local video files. Posters are regenerated from the new frame the next time they are shown.
+              </small>
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="poster-frame-path">Preview frames from a video</label>
+              <div className="poster-frame-lookup">
+                <input
+                  id="poster-frame-path"
+                  type="text"
+                  spellCheck={false}
+                  placeholder="Full path to a local video file"
+                  value={framePath}
+                  onChange={(event) => setFramePath(event.target.value)}
+                  onKeyDown={(event) => { if (event.key === "Enter") void loadFrameCandidates(); }}
+                />
+                <button type="button" className="secondary-button" disabled={frameCandidatesBusy || !framePath.trim()} onClick={() => void loadFrameCandidates()}>
+                  {frameCandidatesBusy ? "Loading…" : "Show frames"}
+                </button>
+              </div>
+              {frameCandidates && (
+                <div className="poster-frame-grid" role="group" aria-label="Poster frame options">
+                  {frameCandidates.map((candidate) => {
+                    const choice = posterFrameChoices.find((item) => Number(item.seconds) === candidate.seconds);
+                    const selected = String(candidate.seconds) === posterFrame;
+                    return (
+                      <button
+                        key={candidate.seconds}
+                        type="button"
+                        className={`poster-frame-option${selected ? " is-selected" : ""}`}
+                        aria-pressed={selected}
+                        disabled={!candidate.image}
+                        onClick={() => void savePosterFrame(String(candidate.seconds))}
+                      >
+                        {candidate.image ? <img src={candidate.image} alt="" /> : <span className="poster-frame-empty">Past end of video</span>}
+                        <span>{choice?.label ?? `${candidate.seconds} seconds`}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              <small>Pick a frame to save it as the poster. Frames past the end of a short video are unavailable.</small>
+            </div>
+
+            <div className="form-group">
               <label htmlFor="tmdb-key">TMDB API key</label>
               <input
                 id="tmdb-key"
@@ -419,10 +514,12 @@ export function SettingsPage({
               <small>
                 {tmdb?.key_source === "env"
                   ? "Currently supplied by the LUMEN_TMDB_API_KEY environment variable, which takes precedence over anything saved here."
-                  : tmdb?.configured
-                    ? "A key is stored in your library database on this device."
-                    : "Required before any title can be enriched."}{" "}
-                Create one free at developer.themoviedb.org → Settings → API. The key is written straight to your local
+                  : tmdb?.key_source === "keychain"
+                    ? "A key is saved in this device's OS keychain."
+                    : tmdb?.key_source === "memory"
+                      ? "A key is held in memory for this browser preview only. It is lost when the sidecar restarts."
+                      : "Required before any title can be enriched."}{" "}
+                Create one free at developer.themoviedb.org → Settings → API. The key is never written to the library
                 database and is never sent anywhere but TMDB.
               </small>
             </div>

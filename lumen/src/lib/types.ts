@@ -25,7 +25,7 @@ export interface Channel {
 /** Whether a TMDB credential is available, and where the backend found it. */
 export interface TmdbStatus {
   configured: boolean;
-  key_source: "env" | "settings" | "none";
+  key_source: "env" | "keychain" | "memory" | "none";
   enriched: number;
   total: number;
   image_base: string;
@@ -58,7 +58,31 @@ export interface LocalFile {
   size?: number;
 }
 
-export interface PlayerState {
+export type PlayerTrackKind = "audio" | "subtitle";
+
+export interface PlayerTrack {
+  id: string;
+  kind: PlayerTrackKind;
+  label: string;
+  language?: string;
+  selected: boolean;
+}
+
+export interface PlayerQuality {
+  id: string;
+  label: string;
+}
+
+export interface PlayerOptions {
+  tracks: PlayerTrack[];
+  audioTrack: string;
+  subtitleTrack: string;
+  qualityLevels: PlayerQuality[];
+  quality: string;
+  qualityHelp: string;
+}
+
+export interface PlayerState extends PlayerOptions {
   paused: boolean;
   time: number;
   duration: number;
@@ -67,10 +91,36 @@ export interface PlayerState {
   error?: string;
 }
 
+export const DEFAULT_PLAYER_OPTIONS: PlayerOptions = {
+  tracks: [],
+  audioTrack: "auto",
+  subtitleTrack: "off",
+  qualityLevels: [],
+  quality: "auto",
+  qualityHelp: "Quality options appear when the stream exposes them.",
+};
+
+export const DEFAULT_PLAYER_STATE: PlayerState = {
+  ...DEFAULT_PLAYER_OPTIONS,
+  paused: true,
+  time: 0,
+  duration: 0,
+  buffering: false,
+};
+
+// One offered poster frame. `image` is a data URL, or null when the video ends before that frame.
+export interface PosterCandidate {
+  seconds: number;
+  image: string | null;
+}
+
 export interface Settings {
   hwdec: string;
   extra_mpv_args: string;
   cache: string;
+  poster_frame_seconds: string;
+  search_preferred_language: string;
+  search_hide_other_languages: string;
 }
 
 export interface ExtractResponse {

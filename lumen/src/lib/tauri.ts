@@ -6,6 +6,7 @@ import type {
   Playlist,
   LocalFile,
   PlayerState,
+  PlayerTrackKind,
   Settings,
   ExtractResponse,
   HarvestResponse,
@@ -18,12 +19,14 @@ import type {
   SearchProviderConfig,
   SearchResponse,
 } from "./types";
+import type { PosterCandidate } from "./types";
 
 export type {
   Channel,
   Playlist,
   LocalFile,
   PlayerState,
+  PlayerTrackKind,
   Settings,
   ExtractResponse,
   HarvestResponse,
@@ -115,6 +118,18 @@ export async function setVolume(vol: number) {
   return callBackend("set_volume", { vol });
 }
 
+export async function setPlayerFullscreen(enabled: boolean) {
+  return callBackend("set_fullscreen", { enabled });
+}
+
+export async function setPlayerTrack(kind: PlayerTrackKind, id: string) {
+  return callBackend("set_player_track", { kind, id });
+}
+
+export async function setPlayerQuality(id: string) {
+  return callBackend("set_player_quality", { id });
+}
+
 export async function stop() {
   return callBackend("stop");
 }
@@ -145,12 +160,13 @@ export async function listChannels(playlistId: number, query?: string, group?: s
 }
 
 // Search engine
-export async function searchEngine(query: string, providers: SearchProviderConfig[] = [], signal?: AbortSignal) {
-  if (isTauriRuntime()) return invoke<SearchResponse>("search_engine", { query, providers, checkAvailability: true });
+export async function searchEngine(query: string, signal?: AbortSignal, preferredLanguage?: string) {
+  const args = { query, checkAvailability: true, ...(preferredLanguage ? { preferredLanguage } : {}) };
+  if (isTauriRuntime()) return invoke<SearchResponse>("search_engine", args);
   const response = await fetch("/api/invoke/search_engine", {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Lumen-Client": "local-preview" },
-    body: JSON.stringify({ query, providers, checkAvailability: true }),
+    body: JSON.stringify(args),
     signal: signal || AbortSignal.timeout(60000),
   });
   if (!response.ok) {
@@ -161,26 +177,13 @@ export async function searchEngine(query: string, providers: SearchProviderConfi
 }
 
 export async function getSearchProviders() {
-  const raw = await callBackend<string>("get_setting_value", { key: "search_providers" });
-  try {
-    const providers: SearchProviderConfig[] = raw ? JSON.parse(raw) : [];
-    return { providers: providers.map(({ token: _token, ...provider }) => provider) };
-  } catch {
-    return { providers: [] };
-  }
+  const providers = await callBackend<Omit<SearchProviderConfig, "token">[]>("get_search_providers");
+  return { providers };
 }
 
 export async function setSearchProviders(providers: SearchProviderConfig[]) {
-  const saved = await callBackend("set_setting_cmd", { key: "search_providers", value: JSON.stringify(providers) });
-  return { providers: providers.map(({ token: _token, ...provider }) => provider), saved };
-}
-
-export async function getSettingValue(key: string) {
-  return callBackend<string | null>("get_setting_value", { key });
-}
-
-export async function setSettingValue(key: string, value: string) {
-  return callBackend("set_setting_cmd", { key, value });
+  const saved = await callBackend<Omit<SearchProviderConfig, "token">[]>("set_search_providers", { providers });
+  return { providers: saved };
 }
 
 // Sidecar commands
@@ -259,25 +262,52 @@ export async function listLocalDir(path: string) {
   return callBackend<LocalFile[]>("list_local_dir", { path });
 }
 
-/** Fetch a cached frame from a local video without ever exposing a filesystem URL to the page. */
+// Fetch cached local-video images without ever exposing filesystem URLs to the page.
 const localThumbnailCache = new Map<string, Promise<string>>();
 const MAX_LOCAL_THUMBNAIL_URLS = 48;
 
+export function localFilmstrip(path: string): Promise<string> {
+  return localImage(path, "filmstrip");
+}
+
 export function localThumbnail(path: string): Promise<string> {
-  const cached = localThumbnailCache.get(path);
+  return localImage(path, "thumbnail");
+}
+
+// Renders the Settings frame choices for a video so the user can pick one. Missing frames come back as null.
+export async function localPosterCandidates(path: string): Promise<PosterCandidate[]> {
+  const candidates = await callBackend<PosterCandidate[]>("local_poster_candidates", { path });
+  return candidates.map((candidate) => ({
+    seconds: candidate.seconds,
+    image: candidate.image ? `data:image/jpeg;base64,${candidate.image}` : null,
+  }));
+}
+
+// Posters depend on the saved frame time, so a change must drop the posters already held in memory.
+export function clearLocalThumbnailCache() {
+  for (const key of [...localThumbnailCache.keys()]) {
+    if (key.startsWith("thumbnail:")) localThumbnailCache.delete(key);
+  }
+}
+
+function localImage(path: string, kind: "thumbnail" | "filmstrip"): Promise<string> {
+  const cacheKey = `${kind}:${path}`;
+  const command = kind === "filmstrip" ? "local_filmstrip" : "local_thumbnail";
+  const endpoint = kind === "filmstrip" ? "local-filmstrip" : "local-thumbnail";
+  const cached = localThumbnailCache.get(cacheKey);
   if (cached) {
-    localThumbnailCache.delete(path);
-    localThumbnailCache.set(path, cached);
+    localThumbnailCache.delete(cacheKey);
+    localThumbnailCache.set(cacheKey, cached);
     return cached;
   }
 
   const request = (async () => {
     if (isTauriRuntime()) {
-      const encoded = await invoke<string>("local_thumbnail", { path });
+      const encoded = await invoke<string>(command, { path });
       return `data:image/jpeg;base64,${encoded}`;
     }
-    const response = await fetch(`/api/local-thumbnail?path=${encodeURIComponent(path)}&client=local-preview`);
-    if (!response.ok) throw new Error(`Thumbnail unavailable (${response.status})`);
+    const response = await fetch(`/api/${endpoint}?path=${encodeURIComponent(path)}&client=local-preview`);
+    if (!response.ok) throw new Error(`Video image unavailable (${response.status})`);
     const bytes = new Uint8Array(await response.arrayBuffer());
     let binary = "";
     for (let offset = 0; offset < bytes.length; offset += 0x8000) {
@@ -285,7 +315,7 @@ export function localThumbnail(path: string): Promise<string> {
     }
     return `data:image/jpeg;base64,${btoa(binary)}`;
   })();
-  localThumbnailCache.set(path, request);
+  localThumbnailCache.set(cacheKey, request);
   request.then((url) => {
     while (localThumbnailCache.size > MAX_LOCAL_THUMBNAIL_URLS) {
       const oldest = localThumbnailCache.keys().next().value;
@@ -298,7 +328,7 @@ export function localThumbnail(path: string): Promise<string> {
     }
     return url;
   }).catch(() => {
-    if (localThumbnailCache.get(path) === request) localThumbnailCache.delete(path);
+    if (localThumbnailCache.get(cacheKey) === request) localThumbnailCache.delete(cacheKey);
   });
   return request;
 }
@@ -312,9 +342,11 @@ export async function setSetting(key: string, value: string) {
   return callBackend("set_setting_cmd", { key, value });
 }
 
-// TMDB metadata enrichment. The API key is written through setSetting under the
-// `tmdb_api_key` key so the backend has a single credential path.
-export const TMDB_API_KEY_SETTING = "tmdb_api_key";
+// TMDB metadata enrichment. The API key goes to the OS keychain (or memory in browser
+// preview) through its own command. It is never written to the settings table.
+export async function setTmdbApiKey(key: string) {
+  return callBackend("set_tmdb_api_key", { key });
+}
 
 export async function tmdbStatus() {
   return callBackend<TmdbStatus>("tmdb_status");

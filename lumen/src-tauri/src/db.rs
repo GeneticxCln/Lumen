@@ -1,9 +1,10 @@
 use crate::auth;
 use crate::error::{PlayerError, Result};
-use crate::playlist::import::{Channel, Playlist};
+use crate::playlist::import::{import_m3u_file, Channel, Playlist};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, QueryBuilder, Row, Sqlite, SqliteConnection};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -78,11 +79,95 @@ pub async fn init_db(app_dir: &Path) -> Result<Pool<Sqlite>> {
 
     let _ = DB_POOL.set(pool.clone());
 
+    // Recovering language labels re-reads playlist files, so it runs after the pool is
+    // published rather than holding the init lock while those files are parsed.
+    let backfill_pool = pool.clone();
+    tokio::spawn(async move {
+        if let Err(e) = backfill_channel_languages(&backfill_pool).await {
+            eprintln!("lumen: channel language backfill failed: {}", e);
+        }
+    });
+
     Ok(pool)
 }
 
 pub fn get_pool() -> Option<&'static Pool<Sqlite>> {
     DB_POOL.get()
+}
+
+/// Settings key recording that the language labels of every local playlist were recovered.
+const CHANNEL_LANGUAGE_BACKFILL_SETTING: &str = "channel_language_backfill_v1";
+
+/// Channels imported before `language` was stored have no label, and the label exists only in
+/// the playlist file. Re-read each local playlist that still has unlabeled channels and copy its
+/// `tvg-language` onto them, matched by stream URL. Remote playlists are not fetched. The setting
+/// is written only when every such file was read, so a missing file is retried on the next start.
+pub async fn backfill_channel_languages(pool: &Pool<Sqlite>) -> Result<()> {
+    if get_setting(pool, CHANNEL_LANGUAGE_BACKFILL_SETTING).await?.as_deref() == Some("done") {
+        return Ok(());
+    }
+
+    let playlists = sqlx::query(
+        "SELECT DISTINCT p.id, p.origin FROM playlists p \
+         JOIN channels c ON c.playlist_id = p.id \
+         WHERE p.source = 'file' AND c.language IS NULL",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    let mut complete = true;
+    for row in playlists {
+        let playlist_id: i64 = row.get("id");
+        let Some(path) = row.get::<Option<String>, _>("origin") else {
+            continue;
+        };
+
+        let parsed = match import_m3u_file(&path, None).await {
+            Ok((_, channels)) => channels,
+            Err(e) => {
+                complete = false;
+                eprintln!("lumen: could not re-read {} for language labels: {}", path, e);
+                continue;
+            }
+        };
+
+        let mut labels: HashMap<String, String> = HashMap::new();
+        for channel in parsed {
+            if let Some(language) = channel.language {
+                labels.entry(channel.url).or_insert(language);
+            }
+        }
+        if labels.is_empty() {
+            continue;
+        }
+
+        // Match in memory by URL: one pass over the playlist's rows instead of a scan per channel.
+        let unlabeled = sqlx::query("SELECT id, url FROM channels WHERE playlist_id = ? AND language IS NULL")
+            .bind(playlist_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+        let mut tx = pool.begin().await.map_err(|e| PlayerError::Sql(e.to_string()))?;
+        for row in unlabeled {
+            let url: String = row.get("url");
+            if let Some(language) = labels.get(&url) {
+                sqlx::query("UPDATE channels SET language = ? WHERE id = ?")
+                    .bind(language)
+                    .bind(row.get::<i64, _>("id"))
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+            }
+        }
+        tx.commit().await.map_err(|e| PlayerError::Sql(e.to_string()))?;
+    }
+
+    if complete {
+        set_setting(pool, CHANNEL_LANGUAGE_BACKFILL_SETTING, "done").await?;
+    }
+    Ok(())
 }
 
 /// Columns added after the first release, in the order they were introduced. Each is
@@ -110,7 +195,8 @@ pub async fn migrate_tmdb_columns(pool: &Pool<Sqlite>) -> Result<()> {
 
     for (name, kind) in TMDB_COLUMNS {
         if !existing.iter().any(|column| column == name) {
-            sqlx::query(&format!("ALTER TABLE channels ADD COLUMN {} {}", name, kind))
+            // `name`/`kind` come from the fixed TMDB_COLUMNS constant, never from user input.
+            sqlx::query(sqlx::AssertSqlSafe(format!("ALTER TABLE channels ADD COLUMN {} {}", name, kind)))
                 .execute(pool)
                 .await
                 .map_err(|e| PlayerError::Sql(e.to_string()))?;
@@ -195,7 +281,7 @@ async fn insert_channel_rows(
     // Batch insert up to 100 rows per statement to stay well below SQLite's 999/32766 bind parameter limits
     for chunk in channels.chunks(100) {
         let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
-            "INSERT INTO channels (playlist_id, name, url, group_title, tvg_id, tvg_logo, extra_headers, last_ok, last_error) ",
+            "INSERT INTO channels (playlist_id, name, url, group_title, tvg_id, tvg_logo, language, extra_headers, last_ok, last_error) ",
         );
         qb.push_values(chunk, |mut b, channel| {
             let headers_json = channel.extra_headers.as_deref().unwrap_or("{}");
@@ -205,6 +291,7 @@ async fn insert_channel_rows(
                 .push_bind(&channel.group_title)
                 .push_bind(&channel.tvg_id)
                 .push_bind(&channel.tvg_logo)
+                .push_bind(&channel.language)
                 .push_bind(headers_json)
                 .push_bind(channel.last_ok)
                 .push_bind(&channel.last_error);
@@ -268,7 +355,7 @@ pub async fn list_channels(
     group: Option<&str>,
 ) -> Result<Vec<EnrichedChannel>> {
     let mut sql = String::from(
-        "SELECT id, playlist_id, name, url, group_title, tvg_id, tvg_logo, extra_headers, last_ok, last_error, \
+        "SELECT id, playlist_id, name, url, group_title, tvg_id, tvg_logo, language, extra_headers, last_ok, last_error, \
          tmdb_id, tmdb_type, poster_path, backdrop_path, overview, release_year, rating, genre_names, enriched_at \
          FROM channels WHERE playlist_id = ?",
     );
@@ -283,7 +370,8 @@ pub async fn list_channels(
 
     sql.push_str(" ORDER BY group_title, name");
 
-    let mut q = sqlx::query(&sql).bind(playlist_id);
+    // `sql` is built only from literal fragments; user values are bound below.
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(playlist_id);
 
     if let Some(q_str) = query {
         q = q.bind(format!("%{}%", q_str));
@@ -309,6 +397,7 @@ pub async fn list_channels(
                 group_title: row.get("group_title"),
                 tvg_id: row.get("tvg_id"),
                 tvg_logo: row.get("tvg_logo"),
+                language: row.get("language"),
                 extra_headers: row.get("extra_headers"),
                 last_ok: row.get("last_ok"),
                 last_error: row.get("last_error"),
@@ -330,7 +419,7 @@ pub async fn list_channels(
 
 pub async fn get_channel(pool: &Pool<Sqlite>, channel_id: i64) -> Result<Channel> {
     let row = sqlx::query(
-        "SELECT id, playlist_id, name, url, group_title, tvg_id, tvg_logo, extra_headers, last_ok, last_error FROM channels WHERE id = ?",
+        "SELECT id, playlist_id, name, url, group_title, tvg_id, tvg_logo, language, extra_headers, last_ok, last_error FROM channels WHERE id = ?",
     )
     .bind(channel_id)
     .fetch_one(pool)
@@ -345,6 +434,7 @@ pub async fn get_channel(pool: &Pool<Sqlite>, channel_id: i64) -> Result<Channel
         group_title: row.get("group_title"),
         tvg_id: row.get("tvg_id"),
         tvg_logo: row.get("tvg_logo"),
+        language: row.get("language"),
         extra_headers: row.get("extra_headers"),
         last_ok: row.get("last_ok"),
         last_error: row.get("last_error"),
@@ -476,10 +566,10 @@ const PROFILE_COLUMNS: &str =
     "id, name, color, pin_hash IS NOT NULL AS has_pin, created_at, last_used_at";
 
 pub async fn list_profiles(pool: &Pool<Sqlite>) -> Result<Vec<Profile>> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM profiles ORDER BY created_at, id",
         PROFILE_COLUMNS
-    ))
+    )))
     .fetch_all(pool)
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
@@ -488,10 +578,10 @@ pub async fn list_profiles(pool: &Pool<Sqlite>) -> Result<Vec<Profile>> {
 }
 
 pub async fn get_profile(pool: &Pool<Sqlite>, profile_id: i64) -> Result<Profile> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM profiles WHERE id = ?",
         PROFILE_COLUMNS
-    ))
+    )))
     .bind(profile_id)
     .fetch_optional(pool)
     .await
@@ -913,6 +1003,15 @@ pub async fn get_setting(pool: &Pool<Sqlite>, key: &str) -> Result<Option<String
     Ok(row.map(|r| r.get("value")))
 }
 
+pub async fn delete_setting(pool: &Pool<Sqlite>, key: &str) -> Result<()> {
+    sqlx::query("DELETE FROM settings WHERE key = ?")
+        .bind(key)
+        .execute(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    Ok(())
+}
+
 pub async fn set_setting(pool: &Pool<Sqlite>, key: &str, value: &str) -> Result<()> {
     sqlx::query(
         "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
@@ -973,10 +1072,78 @@ mod tests {
             group_title: None,
             tvg_id: None,
             tvg_logo: None,
+            language: None,
             extra_headers: None,
             last_ok: None,
             last_error: None,
         }
+    }
+
+    #[tokio::test]
+    async fn test_backfill_recovers_language_labels_from_local_playlist_files() {
+        let pool = test_pool().await;
+        let dir = std::env::temp_dir().join(format!("lumen-language-backfill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("list.m3u");
+        std::fs::write(
+            &path,
+            "#EXTM3U\n#EXTINF:-1 tvg-language=\"English\",One\nhttps://example.com/one.m3u8\n#EXTINF:-1 tvg-language=\"French\",Two\nhttps://example.com/two.m3u8\n#EXTINF:-1,Three\nhttps://example.com/three.m3u8\n",
+        )
+        .unwrap();
+
+        // Imported before `language` was stored, so every channel starts unlabeled.
+        let mut local = playlist("list");
+        local.origin = Some(path.to_string_lossy().to_string());
+        let id = import_playlist(
+            &pool,
+            &local,
+            &[
+                channel(0, "One", "https://example.com/one.m3u8"),
+                channel(0, "Two", "https://example.com/two.m3u8"),
+                channel(0, "Three", "https://example.com/three.m3u8"),
+            ],
+        )
+        .await
+        .unwrap();
+
+        backfill_channel_languages(&pool).await.unwrap();
+
+        let labels: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT url, language FROM channels WHERE playlist_id = ? ORDER BY url")
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                ("https://example.com/one.m3u8".to_string(), Some("English".to_string())),
+                ("https://example.com/three.m3u8".to_string(), None),
+                ("https://example.com/two.m3u8".to_string(), Some("French".to_string())),
+            ]
+        );
+        assert_eq!(
+            get_setting(&pool, CHANNEL_LANGUAGE_BACKFILL_SETTING).await.unwrap().as_deref(),
+            Some("done")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_backfill_retries_on_the_next_start_when_a_playlist_file_is_missing() {
+        let pool = test_pool().await;
+        let mut gone = playlist("gone");
+        gone.origin = Some("/nonexistent/lumen-missing-playlist.m3u".to_string());
+        import_playlist(&pool, &gone, &[channel(0, "One", "https://example.com/gone.m3u8")])
+            .await
+            .unwrap();
+
+        backfill_channel_languages(&pool).await.unwrap();
+
+        // Not recorded as done, so a later start tries the file again.
+        assert_eq!(get_setting(&pool, CHANNEL_LANGUAGE_BACKFILL_SETTING).await.unwrap(), None);
     }
 
     #[tokio::test]

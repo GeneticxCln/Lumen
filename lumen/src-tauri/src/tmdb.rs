@@ -8,8 +8,9 @@
 //!
 //! TMDB requires attribution: <https://www.themoviedb.org/>
 
-use crate::db::get_setting;
+use crate::db::{delete_setting, get_setting};
 use crate::error::{PlayerError, Result};
+use crate::secrets;
 use chrono::Utc;
 use regex::Regex;
 use serde::Deserialize;
@@ -167,19 +168,34 @@ pub fn titles_match(guess: &str, candidate: &str) -> bool {
     guess_norm.chars().count() >= 4 && candidate_norm.contains(&guess_norm)
 }
 
-/// Resolve the API key. `LUMEN_TMDB_API_KEY` wins over the stored setting.
+/// Trims a key and treats blank input as no key.
+pub fn normalize_key(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Resolve the API key. `LUMEN_TMDB_API_KEY` wins over the keychain copy.
+///
+/// A key saved by an older build sits in plaintext in the settings table. It is moved
+/// into the keychain and the row is deleted, but only after the keychain write succeeds,
+/// so a keychain failure leaves the original row in place.
 pub async fn api_key(pool: &Pool<Sqlite>) -> Result<Option<(String, &'static str)>> {
-    if let Ok(value) = std::env::var("LUMEN_TMDB_API_KEY") {
-        let trimmed = value.trim().to_string();
-        if !trimmed.is_empty() {
-            return Ok(Some((trimmed, "env")));
-        }
+    if let Some(key) = std::env::var("LUMEN_TMDB_API_KEY")
+        .ok()
+        .and_then(|value| normalize_key(&value))
+    {
+        return Ok(Some((key, "env")));
     }
-    if let Some(stored) = get_setting(pool, API_KEY_SETTING).await? {
-        let trimmed = stored.trim().to_string();
-        if !trimmed.is_empty() {
-            return Ok(Some((trimmed, "settings")));
+    if let Some(key) = secrets::load_tmdb_key()?.and_then(|value| normalize_key(&value)) {
+        return Ok(Some((key, "keychain")));
+    }
+    if let Some(legacy) = get_setting(pool, API_KEY_SETTING).await? {
+        let key = normalize_key(&legacy);
+        if let Some(key) = &key {
+            secrets::store_tmdb_key(key)?;
         }
+        delete_setting(pool, API_KEY_SETTING).await?;
+        return Ok(key.map(|key| (key, "keychain")));
     }
     Ok(None)
 }
@@ -230,10 +246,38 @@ async fn tmdb_get(
         )));
     }
 
-    response
-        .json::<serde_json::Value>()
+    read_capped_json(response, MAX_API_RESPONSE_BYTES).await
+}
+
+/// Largest JSON body read from TMDB. A bigger response is refused, never buffered.
+const MAX_API_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Parses a TMDB body, refusing it as soon as its size passes `limit`.
+async fn read_capped_json(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> std::result::Result<serde_json::Value, TmdbFailure> {
+    if let Some(len) = response.content_length() {
+        if len > limit as u64 {
+            return Err(TmdbFailure::Other(format!(
+                "TMDB response is {len} bytes, over the {limit} byte limit"
+            )));
+        }
+    }
+    let mut buffer: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|e| TmdbFailure::Other(e.to_string()))
+        .map_err(|e| TmdbFailure::Other(e.to_string()))?
+    {
+        if buffer.len() + chunk.len() > limit {
+            return Err(TmdbFailure::Other(format!(
+                "TMDB response is over the {limit} byte limit"
+            )));
+        }
+        buffer.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&buffer).map_err(|e| TmdbFailure::Other(e.to_string()))
 }
 
 async fn search(
@@ -491,6 +535,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn normalize_key_trims_and_rejects_blank_input() {
+        assert_eq!(normalize_key("  abc123 \n").as_deref(), Some("abc123"));
+        assert_eq!(normalize_key(""), None);
+        assert_eq!(normalize_key(" \t\n"), None);
+    }
+
+    #[test]
     fn test_guess_title_strips_qualifiers_and_resolution() {
         assert_eq!(guess_title("BFM Business (1080p)").as_deref(), Some("BFM Business"));
         assert_eq!(
@@ -523,5 +574,87 @@ mod tests {
         assert_eq!(normalize_title("The Batman"), "batman");
         assert_eq!(normalize_title("E! Latin America"), "e latin america");
         assert_eq!(normalize_title("  BBC   News  "), "bbc news");
+    }
+
+    /// Accepts one connection on loopback, reads the request, and answers with `response`.
+    async fn serve_fixed(body: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.write_all(body).await;
+        });
+        format!("http://{addr}/")
+    }
+
+    /// Accepts one connection and streams chunked data until the client disconnects.
+    async fn serve_endless() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+            if stream.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            let chunk = [b'x'; 16384];
+            loop {
+                let frame = format!("{:x}\r\n", chunk.len());
+                if stream.write_all(frame.as_bytes()).await.is_err()
+                    || stream.write_all(&chunk).await.is_err()
+                    || stream.write_all(b"\r\n").await.is_err()
+                {
+                    break;
+                }
+            }
+        });
+        format!("http://{addr}/")
+    }
+
+    fn failure_message(result: std::result::Result<serde_json::Value, TmdbFailure>) -> String {
+        match result {
+            Err(TmdbFailure::Other(message)) => message,
+            Err(TmdbFailure::Unauthorized) => "unauthorized".to_string(),
+            Ok(value) => panic!("expected a refused body, got {value}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn capped_json_parses_a_body_within_the_limit() {
+        let url = serve_fixed(br#"{"results":[{"id":7}]}"#).await;
+        let response = reqwest::Client::new().get(&url).send().await.unwrap();
+        let value = match read_capped_json(response, 1024).await {
+            Ok(value) => value,
+            Err(TmdbFailure::Other(message)) => panic!("unexpected refusal: {message}"),
+            Err(TmdbFailure::Unauthorized) => panic!("unexpected unauthorized"),
+        };
+        assert_eq!(value["results"][0]["id"], 7);
+    }
+
+    #[tokio::test]
+    async fn declared_length_over_the_limit_is_refused() {
+        let url = serve_fixed(br#"{"results":[]}"#).await;
+        let response = reqwest::Client::new().get(&url).send().await.unwrap();
+        let message = failure_message(read_capped_json(response, 10).await);
+        assert!(message.contains("over the 10 byte limit"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn endless_stream_is_cut_off_at_the_limit() {
+        let url = serve_endless().await;
+        let response = reqwest::Client::new().get(&url).send().await.unwrap();
+        let message = failure_message(read_capped_json(response, 64 * 1024).await);
+        assert!(message.contains("over the 65536 byte limit"), "{message}");
     }
 }

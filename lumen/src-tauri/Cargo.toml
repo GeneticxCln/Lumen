@@ -21,23 +21,24 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
-tauri-plugin-fs = "2"
-tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid", "macros"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls-ring", "sqlite", "chrono", "uuid", "macros"] }
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", features = ["json", "query", "rustls"] }
 url = "2"
-nix = { version = "0.28", features = ["process", "signal"] }
-argon2 = "0.5"
-base64 = "0.22"
+nix = { version = "0.31", features = ["process", "signal"] }
+argon2 = "0.6"
+base64 = "0.23"
 regex = "1"
+# Provider API tokens live in the OS keychain, never in the SQLite settings table.
+# keyring 4's default `v1` feature covers macOS, Windows and Linux (Secret Service).
+keyring = "4"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

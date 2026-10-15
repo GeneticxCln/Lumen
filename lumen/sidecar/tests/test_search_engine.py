@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from app.search_engine import LibraryProvider, ProviderManager, SearchEngine, _deduplicate, _validate_provider
+from app.search_engine import LibraryProvider, ProviderManager, SearchEngine, _deduplicate, _language, _validate_provider
 
 
 class NormalizationTests(unittest.TestCase):
@@ -41,6 +41,14 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(results[0]["quality"], "1080p")
         self.assertEqual(results[0]["language"], "en")
 
+    def test_shared_group_title_does_not_merge_unrelated_channels(self):
+        provider = LibraryProvider([
+            {"id": 1, "name": "Alpha Channel", "url": "https://a.test/1.m3u8", "group_title": "UK"},
+            {"id": 2, "name": "Beta Channel", "url": "https://b.test/2.m3u8", "group_title": "UK"},
+        ])
+        rows = asyncio.run(provider.search("channel"))
+        self.assertEqual(len(_deduplicate(rows, "channel")), 2)
+
     def test_same_title_different_year_or_media_type_is_not_merged(self):
         rows = _deduplicate([
             {"title": "Example", "url": "https://a.test/1", "provider": "A", "aliases": [], "year": 2020, "media_type": "movie"},
@@ -48,6 +56,16 @@ class NormalizationTests(unittest.TestCase):
             {"title": "Example", "url": "https://c.test/3", "provider": "C", "aliases": [], "year": 2020, "media_type": "series"},
         ], "Example")
         self.assertEqual(len(rows), 3)
+
+    def test_language_labels_normalize_to_primary_codes(self):
+        self.assertEqual(_language("English"), "en")
+        self.assertEqual(_language("en-US"), "en")
+        self.assertEqual(_language("fre"), "fr")
+        self.assertEqual(_language("English (US)"), "en")
+        self.assertEqual(_language("pt_BR"), "pt")
+        self.assertIsNone(_language(""))
+        self.assertIsNone(_language(None))
+        self.assertIsNone(_language("??? <b>junk</b>"))
 
 
 class ProviderTests(unittest.IsolatedAsyncioTestCase):
@@ -128,6 +146,74 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["results"][0]["quality"], "adaptive")
         self.assertEqual(result["results"][0]["content_type"], "application/vnd.apple.mpegurl")
         await engine._client.aclose()
+
+    async def test_preferred_language_ranks_matching_results_and_is_part_of_cache_key(self):
+        async def provider(request: httpx.Request):
+            return httpx.Response(200, json={"results": [
+                {"title": "Example One", "url": "https://cdn.example/en.m3u8", "language": "English"},
+                {"title": "Example Two", "url": "https://cdn.example/fr.m3u8", "language": "fre"},
+            ]})
+        engine = SearchEngine()
+        engine._client = httpx.AsyncClient(transport=httpx.MockTransport(provider))
+        remote = [{"id": "remote", "name": "Remote", "endpoint": "https://provider.test/search"}]
+        try:
+            french = await engine.search("Example", [], remote, check_availability=False, preferred_language="fr")
+            english = await engine.search("Example", [], remote, check_availability=False, preferred_language="English")
+        finally:
+            await engine._client.aclose()
+        self.assertEqual(french["results"][0]["language"], "fr")
+        self.assertEqual(english["results"][0]["language"], "en")
+
+    async def test_cancelling_last_waiter_cancels_shared_search_and_clears_inflight(self):
+        provider = _BlockingProvider()
+        engine = SearchEngine()
+        with patch.object(ProviderManager, "build", return_value=[provider]):
+            waiter = asyncio.create_task(engine.search("movie", [], [], check_availability=False))
+            await provider.started.wait()
+            shared = next(iter(engine._inflight.values()))
+            waiter.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await waiter
+            await asyncio.gather(shared, return_exceptions=True)
+        self.assertTrue(shared.cancelled())
+        self.assertTrue(provider.cancelled)
+        self.assertEqual(engine._inflight, {})
+
+    async def test_cancelling_one_waiter_keeps_shared_search_for_the_others(self):
+        provider = _BlockingProvider()
+        engine = SearchEngine()
+        with patch.object(ProviderManager, "build", return_value=[provider]):
+            first = asyncio.create_task(engine.search("movie", [], [], check_availability=False))
+            await provider.started.wait()
+            second = asyncio.create_task(engine.search("movie", [], [], check_availability=False))
+            await asyncio.sleep(0)
+            first.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            self.assertFalse(provider.cancelled)
+            provider.release.set()
+            result = await second
+        self.assertEqual(result["query"], "movie")
+        self.assertEqual(engine._inflight, {})
+
+
+class _BlockingProvider:
+    provider_id = "blocking"
+    name = "Blocking"
+
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancelled = False
+
+    async def search(self, query):
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return []
 
 
 if __name__ == "__main__":

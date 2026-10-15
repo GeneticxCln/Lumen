@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icon";
 import type { IconName } from "./Icon";
 import { MediaShelf } from "./MediaShelf";
-import { errorMessage, importPlaylistFile, isTauriRuntime, listLocalDir, localThumbnail } from "../lib/tauri";
+import { errorMessage, importPlaylistFile, isTauriRuntime, listLocalDir, localFilmstrip, localThumbnail } from "../lib/tauri";
 import { uniqueHistory } from "../lib/discovery";
 import { MAX_ROOTS, MAX_SUBDIRS, MEDIA_ROOT_HINT, extensionOf, fileLabel, fileNameOf, formatClock, formatSize, isLocalPath, kindOf, mapLimit, parentOf } from "../lib/local";
 import type { Channel, HistoryEntry, LocalFile } from "../lib/types";
@@ -67,6 +67,19 @@ function usePosterData(path: string, active: boolean) {
   return poster;
 }
 
+function useFilmstripData(path: string, active: boolean) {
+  const [filmstrip, setFilmstrip] = useState<string | null>(null);
+  useEffect(() => {
+    if (!active) return;
+    let current = true;
+    localFilmstrip(path).then((url) => { if (current) setFilmstrip(url); }).catch(() => {
+      // Keep the regular poster if this file cannot produce a contact strip.
+    });
+    return () => { current = false; };
+  }, [path, active]);
+  return filmstrip;
+}
+
 function LocalCard({ item, folder, onPlay }: { item: LocalItem; folder: string; onPlay: (item: LocalItem) => void }) {
   const kind = kindOf(item.name);
   const artRef = useRef<HTMLButtonElement>(null);
@@ -85,12 +98,15 @@ function LocalCard({ item, folder, onPlay }: { item: LocalItem; folder: string; 
     return () => observer.disconnect();
   }, [item.path, kind]);
   const poster = usePosterData(item.path, kind === "video" && nearViewport);
+  const [previewActive, setPreviewActive] = useState(false);
+  const filmstrip = useFilmstripData(item.path, kind === "video" && previewActive);
   const percent = item.duration && item.position ? Math.min(100, Math.round((item.position / item.duration) * 100)) : 0;
   const meta = [formatSize(item.size), percent > 0 ? `${formatClock(item.position!)} of ${formatClock(item.duration!)}` : folder].filter(Boolean).join(" · ");
   return <article className="local-card">
-    <button ref={artRef} className={`local-card-art ${poster ? "has-poster" : ""}`} aria-label={`Play ${fileLabel(item.name)}`} onClick={() => onPlay(item)}>
+    <button ref={artRef} className={`local-card-art ${poster ? "has-poster" : ""}`} aria-label={`Play ${fileLabel(item.name)}`} onClick={() => onPlay(item)} onPointerEnter={() => setPreviewActive(true)} onPointerLeave={() => setPreviewActive(artRef.current === document.activeElement)} onFocus={() => setPreviewActive(true)} onBlur={() => setPreviewActive(artRef.current?.matches(":hover") ?? false)}>
       {poster && <img className="local-card-poster" src={poster} alt="" loading="lazy" />}
-      {!poster && <span className={`local-card-glyph kind-${kind}`}><Icon name={KIND_ICON[kind]} size={22} /></span>}
+      {!poster && !filmstrip && <span className={`local-card-glyph kind-${kind}`}><Icon name={KIND_ICON[kind]} size={22} /></span>}
+      {filmstrip && previewActive && <img className="local-card-filmstrip" src={filmstrip} alt="" aria-hidden="true" />}
       <span className="local-card-ext">{extensionOf(item.name).toUpperCase() || KIND_LABEL[kind]}</span>
       <span className="card-play"><Icon name="play" size={24} /></span>
       {percent > 0 && <span className="local-card-progress"><i style={{ width: `${percent}%` }} /></span>}

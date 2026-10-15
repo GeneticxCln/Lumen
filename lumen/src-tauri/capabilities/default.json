@@ -6,14 +6,6 @@
   "permissions": [
     "core:default",
     "opener:default",
-    "dialog:default",
-    "fs:allow-read",
-    {
-      "identifier": "shell:allow-spawn",
-      "allow": [
-        { "name": "binaries/extractor", "sidecar": true },
-        { "name": "mpv", "args": true }
-      ]
-    }
+    "dialog:default"
   ]
 }

@@ -13,6 +13,7 @@ pub struct Channel {
     pub group_title: Option<String>,
     pub tvg_id: Option<String>,
     pub tvg_logo: Option<String>,
+    pub language: Option<String>,
     pub extra_headers: Option<String>, // JSON string
     pub last_ok: Option<i64>,
     pub last_error: Option<String>,
@@ -265,7 +266,7 @@ pub fn parse_m3u(content: &str, playlist_id: i64, base_url: Option<&str>) -> Res
         } else {
             // Stream URL line, resolved against the playlist it came from when relative.
             let url = resolve_url(line, base_url).unwrap_or_else(|| line.to_string());
-            let (name, group_title, tvg_id, tvg_logo) = if let Some(ext) = current_extinf.take() {
+            let (name, group_title, tvg_id, tvg_logo, language) = if let Some(ext) = current_extinf.take() {
                 let resolved_name = if ext.name.is_empty() {
                     ext.attrs
                         .get("tvg-name")
@@ -281,7 +282,8 @@ pub fn parse_m3u(content: &str, playlist_id: i64, base_url: Option<&str>) -> Res
                     .or_else(|| current_extgrp.clone());
                 let tid = ext.attrs.get("tvg-id").cloned();
                 let tlogo = ext.attrs.get("tvg-logo").cloned();
-                (resolved_name, group, tid, tlogo)
+                let tlang = ext.attrs.get("tvg-language").cloned().filter(|value| !value.trim().is_empty());
+                (resolved_name, group, tid, tlogo, tlang)
             } else {
                 let fallback_name = url
                     .split('/')
@@ -290,7 +292,7 @@ pub fn parse_m3u(content: &str, playlist_id: i64, base_url: Option<&str>) -> Res
                     .filter(|s| !s.is_empty())
                     .unwrap_or(&url)
                     .to_string();
-                (fallback_name, current_extgrp.clone(), None, None)
+                (fallback_name, current_extgrp.clone(), None, None, None)
             };
 
             let extra_headers = if pending_headers.is_empty() {
@@ -309,6 +311,7 @@ pub fn parse_m3u(content: &str, playlist_id: i64, base_url: Option<&str>) -> Res
                 group_title,
                 tvg_id,
                 tvg_logo,
+                language,
                 extra_headers,
                 last_ok: None,
                 last_error: None,

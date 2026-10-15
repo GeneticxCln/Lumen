@@ -48,6 +48,7 @@ fn parse_into_channels(
                 group_title: Some("HLS".to_string()),
                 tvg_id: None,
                 tvg_logo: None,
+                language: None,
                 extra_headers: None,
                 last_ok: None,
                 last_error: None,
@@ -95,6 +96,45 @@ pub async fn import_m3u_file(path: &str, name: Option<String>) -> Result<(Playli
     .map_err(|e| PlayerError::Parse(format!("Join error during M3U parse: {}", e)))?
 }
 
+/// Largest playlist accepted from a URL. A response over this size is refused, not buffered,
+/// so a hostile or runaway server cannot exhaust memory.
+pub const MAX_PLAYLIST_BYTES: usize = 32 * 1024 * 1024;
+
+/// Refuses a response whose declared `Content-Length` is already over the limit.
+fn check_declared_length(declared: Option<u64>, limit: usize) -> Result<()> {
+    match declared {
+        Some(len) if len > limit as u64 => Err(PlayerError::Http(format!(
+            "Playlist is {len} bytes, over the {limit} byte limit"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Appends a chunk to the buffer, failing as soon as the total passes the limit.
+fn append_capped(buffer: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<()> {
+    if buffer.len() + chunk.len() > limit {
+        return Err(PlayerError::Http(format!(
+            "Playlist is over the {limit} byte limit"
+        )));
+    }
+    buffer.extend_from_slice(chunk);
+    Ok(())
+}
+
+/// Reads the response body chunk by chunk and stops once it passes `limit`.
+async fn read_capped_body(mut response: reqwest::Response, limit: usize) -> Result<String> {
+    check_declared_length(response.content_length(), limit)?;
+    let mut buffer = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| PlayerError::Http(e.to_string()))?
+    {
+        append_capped(&mut buffer, &chunk, limit)?;
+    }
+    Ok(String::from_utf8_lossy(&buffer).into_owned())
+}
+
 pub async fn import_m3u_url(url: &str, name: Option<String>) -> Result<(Playlist, Vec<Channel>)> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -115,10 +155,7 @@ pub async fn import_m3u_url(url: &str, name: Option<String>) -> Result<(Playlist
         )));
     }
 
-    let content = response
-        .text()
-        .await
-        .map_err(|e| PlayerError::Http(e.to_string()))?;
+    let content = read_capped_body(response, MAX_PLAYLIST_BYTES).await?;
 
     let url_owned = url.to_string();
     let name_owned = name.clone();
@@ -151,6 +188,28 @@ pub async fn import_m3u_url(url: &str, name: Option<String>) -> Result<(Playlist
     })
     .await
     .map_err(|e| PlayerError::Parse(format!("Join error during M3U URL parse: {}", e)))?
+}
+
+#[cfg(test)]
+mod body_limit_tests {
+    use super::*;
+
+    #[test]
+    fn declared_length_over_limit_is_refused_before_reading() {
+        assert!(check_declared_length(Some(101), 100).is_err());
+        assert!(check_declared_length(Some(100), 100).is_ok());
+        assert!(check_declared_length(None, 100).is_ok());
+    }
+
+    #[test]
+    fn chunks_are_accepted_up_to_the_limit_and_no_further() {
+        let mut buffer = Vec::new();
+        append_capped(&mut buffer, &[1; 60], 100).unwrap();
+        append_capped(&mut buffer, &[2; 40], 100).unwrap();
+        assert_eq!(buffer.len(), 100);
+        assert!(append_capped(&mut buffer, &[3], 100).is_err());
+        assert_eq!(buffer.len(), 100, "a refused chunk must not be appended");
+    }
 }
 
 #[cfg(test)]

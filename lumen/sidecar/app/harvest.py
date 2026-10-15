@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import List
@@ -8,7 +9,10 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from .extract import validate_http_url
+from .extract import assert_public_request, ensure_public_http_url
+
+MAX_HARVEST_BYTES = 5 * 1024 * 1024
+HARVEST_TIMEOUT_SECONDS = 20.0
 
 STREAM_URL_RE = re.compile(
     r"""https?://[^\s"'<>\\]+?\.(?:m3u8|m3u)(?:\?[^\s"'<>\\]*)?""",
@@ -37,8 +41,22 @@ def _collect_from_json_ld(data: object, base_url: str, found: list[str]) -> None
             _collect_from_json_ld(item, base_url, found)
 
 
+async def _fetch_page(client: httpx.AsyncClient, url: str) -> tuple[str, str]:
+    async with client.stream("GET", url) as resp:
+        resp.raise_for_status()
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in resp.aiter_bytes():
+            total += len(chunk)
+            if total > MAX_HARVEST_BYTES:
+                raise ValueError("Page is too large to scan for streams")
+            chunks.append(chunk)
+        text = b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
+        return str(resp.url), text
+
+
 async def harvest_streams(url: str) -> List[str]:
-    validated = validate_http_url(url)
+    validated = ensure_public_http_url(url)
 
     # If the user directly pasted an .m3u/.m3u8 URL, include it immediately
     found: list[str] = []
@@ -50,11 +68,15 @@ async def harvest_streams(url: str) -> List[str]:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
 
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers=headers) as client:
-        resp = await client.get(validated)
-        resp.raise_for_status()
-        base_url = str(resp.url)
-        text = resp.text
+    async with httpx.AsyncClient(
+        timeout=15.0,
+        follow_redirects=True,
+        headers=headers,
+        event_hooks={"request": [assert_public_request]},
+    ) as client:
+        base_url, text = await asyncio.wait_for(
+            _fetch_page(client, validated), timeout=HARVEST_TIMEOUT_SECONDS
+        )
 
     # 1. Parse HTML tags (<a href>, <video src>, <source src>, data-src, etc.)
     soup = BeautifulSoup(text, "lxml")

@@ -13,11 +13,14 @@ tests can hand it an `httpx.MockTransport` instead of the real network.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import httpx
+
+from .extract import MAX_API_RESPONSE_BYTES, read_capped_body
 
 API_BASE = "https://api.themoviedb.org/3"
 IMAGE_BASE = "https://image.tmdb.org/t/p/"
@@ -162,17 +165,20 @@ class TmdbClient:
 
     async def _get(self, path: str, **params: Any) -> Dict[str, Any]:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=20.0, follow_redirects=True)
+            # Never follow redirects: the API key travels with every request.
+            self._client = httpx.AsyncClient(timeout=20.0, follow_redirects=False)
         auth = auth_request_kwargs(self.api_key)
         merged = {**auth["params"], "language": LANGUAGE, **params}
         self.requests += 1
-        response = await self._client.get(
-            f"{API_BASE}{path}", params=merged, headers=auth["headers"]
-        )
-        if response.status_code == 401:
-            raise TmdbAuthError("TMDB rejected the API key (HTTP 401)")
-        response.raise_for_status()
-        return response.json()
+        # Stream so the size cap applies before the body is buffered.
+        async with self._client.stream(
+            "GET", f"{API_BASE}{path}", params=merged, headers=auth["headers"]
+        ) as response:
+            if response.status_code == 401:
+                raise TmdbAuthError("TMDB rejected the API key (HTTP 401)")
+            response.raise_for_status()
+            body = await read_capped_body(response, MAX_API_RESPONSE_BYTES, "TMDB response")
+        return json.loads(body)
 
     async def search(self, title: str) -> Optional[Tuple[str, Dict[str, Any]]]:
         """Search movies first, then TV. Returns (media_type, hit) or None."""

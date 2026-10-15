@@ -1,5 +1,5 @@
 use crate::error::{PlayerError, Result};
-use crate::playback::{PlaybackBackend, PlayerStateEvent};
+use crate::playback::{PlaybackBackend, PlayerStateEvent, PlayerTrack};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as MpvValue;
@@ -45,6 +45,34 @@ pub struct MpvIpcBackend {
     /// 3 = failed. Keeping the intermediate state matters when replacing a file: mpv may emit
     /// end-file for the old item before start-file for the new one.
     load_state: tokio::sync::watch::Sender<u8>,
+    /// Latest player state shared with the reader loop, so UI-only changes can emit it whole.
+    state: Arc<Mutex<PlayerStateEvent>>,
+    app: Option<AppHandle>,
+}
+
+fn mpv_id(value: &MpvValue) -> Option<String> {
+    value.as_i64().map(|id| id.to_string()).or_else(|| value.as_str().map(ToOwned::to_owned))
+}
+
+fn mpv_track(track: &MpvValue) -> Option<PlayerTrack> {
+    let kind_raw = track.get("type")?.as_str()?;
+    let kind = match kind_raw {
+        "audio" => "audio",
+        "sub" => "subtitle",
+        _ => return None,
+    };
+    let id = mpv_id(track.get("id")?)?;
+    let language = track.get("lang").and_then(MpvValue::as_str).filter(|lang| !lang.is_empty()).map(ToOwned::to_owned);
+    let title = track.get("title").and_then(MpvValue::as_str).filter(|title| !title.is_empty());
+    let codec = track.get("codec").and_then(MpvValue::as_str).filter(|codec| !codec.is_empty());
+    let label = title.map(ToOwned::to_owned).or_else(|| language.clone()).or_else(|| codec.map(ToOwned::to_owned)).unwrap_or_else(|| format!("{} track {id}", if kind == "audio" { "Audio" } else { "Subtitle" }));
+    Some(PlayerTrack {
+        id,
+        kind: kind.into(),
+        label,
+        language,
+        selected: track.get("selected").and_then(MpvValue::as_bool).unwrap_or(false),
+    })
 }
 
 impl MpvIpcBackend {
@@ -201,12 +229,29 @@ impl MpvIpcBackend {
                                                         changed = true;
                                                     }
                                                 }
+                                                "track-list" => {
+                                                    if let Some(tracks) = msg.data.as_ref().and_then(|value| value.as_array()) {
+                                                        st.tracks = tracks.iter().filter_map(mpv_track).collect();
+                                                        st.audio_track = tracks.iter().find(|track| track.get("type").and_then(|kind| kind.as_str()) == Some("audio") && track.get("selected").and_then(|value| value.as_bool()) == Some(true)).and_then(|track| track.get("id")).and_then(mpv_id).unwrap_or_else(|| "auto".into());
+                                                        st.subtitle_track = tracks.iter().find(|track| track.get("type").and_then(|kind| kind.as_str()) == Some("sub") && track.get("selected").and_then(|value| value.as_bool()) == Some(true)).and_then(|track| track.get("id")).and_then(mpv_id).unwrap_or_else(|| "off".into());
+                                                        changed = true;
+                                                    }
+                                                }
+                                                "hls-bitrate" => {
+                                                    if let Some(quality) = msg.data.as_ref().and_then(|value| value.as_str()) {
+                                                        st.quality = quality.to_string();
+                                                        changed = true;
+                                                    }
+                                                }
                                                 _ => {}
                                             }
                                         }
                                     }
                                     "start-file" => {
                                         st.error = None;
+                                        st.tracks.clear();
+                                        st.audio_track = "auto".into();
+                                        st.subtitle_track = "off".into();
                                         st.buffering = true;
                                         let _ = load_state_reader.send_replace(1);
                                         changed = true;
@@ -288,6 +333,8 @@ impl MpvIpcBackend {
             writer: tx,
             request_id: AtomicU64::new(1),
             load_state: load_state_tx,
+            state,
+            app,
         };
 
         // Observe standard mpv properties per PLAN.md §3.1
@@ -298,6 +345,7 @@ impl MpvIpcBackend {
             (4_i64, "paused-for-cache"),
             (5_i64, "media-title"),
             (6_i64, "track-list"),
+            (7_i64, "hls-bitrate"),
         ] {
             let _ = backend
                 .send_command(vec![
@@ -423,13 +471,50 @@ impl PlaybackBackend for MpvIpcBackend {
     }
 
     async fn set_property(&self, name: &str, value: MpvValue) -> Result<()> {
+        let quality = value.as_str().unwrap_or("max").to_string();
         self.send_command(vec![
             MpvValue::String("set_property".to_string()),
             MpvValue::String(name.to_string()),
             value,
         ])
         .await?;
+        if name == "hls-bitrate" {
+            if let Some(app) = self.app.as_ref() {
+                let snapshot = {
+                    let mut st = self.state.lock().await;
+                    st.quality = quality;
+                    st.clone()
+                };
+                let _ = app.emit("player://state", snapshot);
+            }
+        }
         Ok(())
+    }
+
+    async fn set_track(&self, kind: &str, track_id: &str) -> Result<()> {
+        let (property, value) = match kind {
+            "audio" if track_id == "auto" => ("aid", MpvValue::String("auto".into())),
+            "subtitle" if track_id == "off" => ("sid", MpvValue::String("no".into())),
+            "audio" | "subtitle" => {
+                let id = track_id.parse::<i64>().map_err(|_| PlayerError::InvalidArg("Invalid track id".into()))?;
+                let track_list = self.send_command(vec![MpvValue::String("get_property".into()), MpvValue::String("track-list".into())]).await?;
+                let exists = track_list.as_array().is_some_and(|tracks| tracks.iter().any(|track| {
+                    track.get("id").and_then(|value| value.as_i64()) == Some(id)
+                        && track.get("type").and_then(|value| value.as_str()) == Some(if kind == "audio" { "audio" } else { "sub" })
+                }));
+                if !exists { return Err(PlayerError::InvalidArg("Track is no longer available".into())); }
+                (if kind == "audio" { "aid" } else { "sid" }, MpvValue::Number(id.into()))
+            }
+            _ => return Err(PlayerError::InvalidArg("Unknown player track kind".into())),
+        };
+        self.set_property(property, value).await
+    }
+
+    async fn set_quality(&self, quality: &str) -> Result<()> {
+        if !matches!(quality, "max" | "min") {
+            return Err(PlayerError::InvalidArg("Unsupported mpv HLS bitrate preference".into()));
+        }
+        self.set_property("hls-bitrate", MpvValue::String(quality.into())).await
     }
 
     async fn stop(&self) -> Result<()> {

@@ -43,7 +43,7 @@ async def protect_browser_bridge(request: Request, call_next):
         if origin is not None and origin not in allowed_origins:
             return JSONResponse({"detail": "Foreign origin rejected"}, status_code=403)
         # A non-simple header plus no CORS prevents drive-by browser requests.
-        media_request = request.url.path in {"/api/local-media", "/api/local-thumbnail"} and request.query_params.get("client") == "local-preview"
+        media_request = request.url.path in {"/api/local-media", "/api/local-thumbnail", "/api/local-filmstrip"} and request.query_params.get("client") == "local-preview"
         if not media_request and request.headers.get("x-lumen-client") != "local-preview":
             return JSONResponse({"detail": "Local preview header required"}, status_code=403)
     return await call_next(request)
@@ -95,6 +95,7 @@ class SearchRequest(BaseModel):
     library: List[Dict[str, Any]] = Field(default_factory=list)
     providers: List[Dict[str, Any]] = Field(default_factory=list)
     check_availability: bool = True
+    preferred_language: str | None = None
 
 
 class SearchConfigRequest(BaseModel):
@@ -136,7 +137,7 @@ async def probe_endpoint(req: ProbeRequest) -> dict:
 @app.post("/search/providers/validate", dependencies=[Depends(verify_token)])
 async def validate_search_providers_endpoint(req: SearchConfigRequest) -> dict:
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=False) as client:
             ProviderManager(client).build([], req.providers)
         return {"valid": True}
     except ValueError as error:
@@ -145,13 +146,14 @@ async def validate_search_providers_endpoint(req: SearchConfigRequest) -> dict:
 
 @app.post("/search", dependencies=[Depends(verify_token)])
 async def search_endpoint(req: SearchRequest) -> dict:
-    providers = req.providers or _configured_search_providers()
+    providers = req.providers
     try:
         return await search_engine.search(
             req.query,
             req.library,
             providers,
             check_availability=req.check_availability,
+            preferred_language=req.preferred_language,
         )
     except ValueError as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error

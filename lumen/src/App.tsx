@@ -356,10 +356,12 @@ function App() {
           onPlayStateChange={player.handleVideoPlayState}
           onBufferingChange={player.handleVideoBuffering}
           onMutedChange={player.handleVideoMutedChange}
+          onOptionsChange={player.handleVideoOptions}
+          registerBrowserControls={player.registerBrowserControls}
           onError={player.handleVideoError}
         /></Suspense>}
       </div>
-      <Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); setPlayerOpen(false); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} />
+      <Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); setPlayerOpen(false); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} onSelectTrack={(kind, id) => void run(() => player.selectTrack(kind, id))} onSelectQuality={(id) => void run(() => player.selectQuality(id))} />
     </Modal>
     </div>
     {locked && <ProfileGate profiles={profiles} initialProfileId={activeProfileId} onUnlocked={handleProfilesChanged} />}

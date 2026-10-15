@@ -1,5 +1,6 @@
 use crate::error::{PlayerError, Result};
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::phc::PasswordHash;
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::Argon2;
 
 /// Minimum and maximum PIN length, counted in characters.
@@ -36,12 +37,9 @@ pub fn validate_pin(pin: &str) -> Result<()> {
 pub fn hash_pin(pin: &str) -> Result<String> {
     validate_pin(pin)?;
 
-    // A fresh random salt per hash. UUID v4 bytes come from the OS CSPRNG, which is what
-    // `SaltString::generate` would draw from anyway; a salt only has to be unique, not secret.
-    let salt = SaltString::encode_b64(uuid::Uuid::new_v4().as_bytes())
-        .map_err(|e| PlayerError::InvalidArg(format!("Could not salt the PIN: {}", e)))?;
+    // argon2 0.6 draws a fresh random salt from the OS RNG on every call.
     Argon2::default()
-        .hash_password(pin.as_bytes(), &salt)
+        .hash_password(pin.as_bytes())
         .map(|hash| hash.to_string())
         .map_err(|e| PlayerError::InvalidArg(format!("Could not secure the PIN: {}", e)))
 }

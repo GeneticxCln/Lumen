@@ -378,7 +378,7 @@ sudo pacman -S mpv
 npm create tauri-app@latest lumen -- --template react-ts
 ```
 
-Add plugins: `dialog`, `fs`, `shell`. Python 3.12 venv under `sidecar/`.
+Add plugins: `dialog`, `opener`. Python 3.12 venv under `sidecar/`.
 
 ### Phase 1 — MVP (~2 weeks)
 
@@ -435,19 +435,12 @@ Capabilities:
 ```json
 "permissions": [
   "core:default",
-  "dialog:default",
-  "fs:allow-read",
-  {
-    "identifier": "shell:allow-spawn",
-    "allow": [
-      { "name": "binaries/extractor", "sidecar": true },
-      { "name": "mpv", "args": true }
-    ]
-  }
+  "opener:default",
+  "dialog:default"
 ]
 ```
 
-Do not grant `shell:allow-execute` on the whole PATH.
+The `fs` and `shell` plugins are not used, so they are not granted. Do not add a shell or filesystem plugin permission without a reason. Spawning the sidecar and mpv happens in Rust, not through the webview.
 
 ---
 

@@ -4,6 +4,8 @@ import {
   pause as pauseCmd,
   seek as seekCmd,
   setVolume as setVolumeCmd,
+  setPlayerTrack as setPlayerTrackCmd,
+  setPlayerQuality as setPlayerQualityCmd,
   stop as stopCmd,
   onPlayerState,
   saveProgress,
@@ -12,16 +14,13 @@ import {
   isTauriRuntime,
   errorMessage,
 } from "../lib/tauri";
+import { DEFAULT_PLAYER_STATE } from "../lib/types";
+import type { PlayerOptions, PlayerTrackKind } from "../lib/types";
 
 export function usePlayer() {
-  const [playerState, setPlayerState] = useState<PlayerState>({
-    paused: true,
-    time: 0,
-    duration: 0,
-    buffering: false,
-    title: undefined,
-    error: undefined,
-  });
+  const [playerState, setPlayerState] = useState<PlayerState>(DEFAULT_PLAYER_STATE);
+  const browserTrackHandler = useRef<((kind: PlayerTrackKind, id: string) => void) | null>(null);
+  const browserQualityHandler = useRef<((id: string) => void) | null>(null);
   const [currentTitle, setCurrentTitle] = useState<string | null>(null);
   const currentTitleRef = useRef(currentTitle);
   currentTitleRef.current = currentTitle;
@@ -170,14 +169,7 @@ export function usePlayer() {
     setCurrentTitle(null);
     setCurrentUrl(null);
     setCurrentChannelId(undefined);
-    setPlayerState({
-      paused: true,
-      time: 0,
-      duration: 0,
-      buffering: false,
-      title: undefined,
-      error: undefined,
-    });
+    setPlayerState(DEFAULT_PLAYER_STATE);
   }, [currentUrl, currentChannelId, playerState.time, playerState.duration, reportError]);
 
   const handleVideoTimeUpdate = useCallback((time: number, duration: number) => {
@@ -200,6 +192,43 @@ export function usePlayer() {
     setPlayerState((prev) => ({ ...prev, error }));
   }, []);
 
+  const handleVideoOptions = useCallback((options: PlayerOptions) => {
+    setPlayerState((previous) => ({ ...previous, ...options }));
+  }, []);
+
+  const registerBrowserControls = useCallback((
+    track: (kind: PlayerTrackKind, id: string) => void,
+    quality: (id: string) => void,
+  ) => {
+    browserTrackHandler.current = track;
+    browserQualityHandler.current = quality;
+    return () => {
+      if (browserTrackHandler.current === track) browserTrackHandler.current = null;
+      if (browserQualityHandler.current === quality) browserQualityHandler.current = null;
+    };
+  }, []);
+
+  const selectTrack = useCallback(async (kind: PlayerTrackKind, id: string) => {
+    if (isTauriRuntime()) {
+      await setPlayerTrackCmd(kind, id);
+    } else if (browserTrackHandler.current) {
+      browserTrackHandler.current(kind, id);
+    } else {
+      throw new Error("Track selection is unavailable for this playback source");
+    }
+  }, []);
+
+  const selectQuality = useCallback(async (id: string) => {
+    if (isTauriRuntime()) {
+      await setPlayerQualityCmd(id);
+      setPlayerState((previous) => ({ ...previous, quality: id }));
+    } else if (browserQualityHandler.current) {
+      browserQualityHandler.current(id);
+    } else {
+      throw new Error("Quality selection is unavailable for this playback source");
+    }
+  }, []);
+
   return {
     playerState,
     currentTitle,
@@ -220,5 +249,9 @@ export function usePlayer() {
     handleVideoBuffering,
     handleVideoMutedChange,
     handleVideoError,
+    handleVideoOptions,
+    registerBrowserControls,
+    selectTrack,
+    selectQuality,
   };
 }

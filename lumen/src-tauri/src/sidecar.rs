@@ -63,6 +63,13 @@ pub struct SearchRequest {
     #[serde(default)]
     pub providers: Vec<serde_json::Value>,
     pub check_availability: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_language: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SearchProvidersRequest {
+    pub providers: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -362,6 +369,24 @@ impl SidecarManager {
             .json()
             .await
             .map_err(|e| PlayerError::Sidecar(format!("Invalid probe response: {}", e)))
+    }
+
+    pub async fn validate_search_providers(&mut self, providers: Vec<serde_json::Value>) -> Result<()> {
+        self.ensure_running().await?;
+        let endpoint = format!("{}/search/providers/validate", self.base_url);
+        let response = self
+            .client
+            .post(&endpoint)
+            .bearer_auth(&self.token)
+            .json(&SearchProvidersRequest { providers })
+            .send()
+            .await
+            .map_err(|error| PlayerError::Sidecar(format!("Provider validation request failed: {error}")))?;
+        if !response.status().is_success() {
+            let err = response.text().await.unwrap_or_default();
+            return Err(PlayerError::InvalidArg(format!("Invalid search providers: {err}")));
+        }
+        Ok(())
     }
 
     pub async fn search(&mut self, request: &SearchRequest) -> Result<SearchResponse> {

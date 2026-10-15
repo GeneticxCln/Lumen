@@ -34,7 +34,7 @@ Terminal 1:
 ```bash
 cd sidecar
 python3 -m venv .venv
-.venv/bin/python -m pip install -e .
+.venv/bin/python -m pip install -e '.[dev]'
 LUMEN_STANDALONE=1 LUMEN_SIDECAR_PORT=43127 .venv/bin/python -m app.main
 ```
 
@@ -65,7 +65,7 @@ npm test
 npm run typecheck
 npm run build
 cd src-tauri && cargo test --lib
-cd ../sidecar && .venv/bin/python -W error::ResourceWarning -m unittest discover -s tests -v
+cd ../sidecar && .venv/bin/python -m pytest
 ```
 
 See [AUDIT.md](AUDIT.md) for verified behavior, audit findings, security boundaries, and release blockers.

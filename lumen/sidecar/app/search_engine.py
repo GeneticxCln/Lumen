@@ -4,6 +4,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import pickle
 import re
 import time
 from collections import OrderedDict
@@ -13,7 +14,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .extract import validate_http_url
+from .extract import MAX_API_RESPONSE_BYTES, assert_public_request, read_capped_body, validate_http_url
 from .probe import probe_urls
 
 MAX_PROVIDERS = 12
@@ -85,6 +86,7 @@ def _validate_provider(config: dict[str, Any]) -> dict[str, Any]:
     parsed = urlparse(endpoint)
     if parsed.username or parsed.password or parsed.fragment:
         raise ValueError(f"{name or 'Provider'}: endpoint must not contain credentials or a fragment")
+
     if not provider_id or len(provider_id) > 80:
         raise ValueError("Provider id is missing or too long")
     if not name or len(name) > 80:
@@ -135,12 +137,17 @@ class LibraryProvider:
             url = str(entry.get("url") or "").strip()
             if not title or not url:
                 continue
-            aliases = _aliases([entry.get("group_title"), entry.get("tvg_id"), *(_aliases(entry.get("aliases")))])
-            searchable = normalize_text(" ".join([title, *aliases]))
+            aliases = _aliases(entry.get("aliases"))
+            # Group and tvg-id are searchable context only; they must not drive deduplication identity.
+            context = _aliases([entry.get("group_title"), entry.get("tvg_id")])
+            searchable = normalize_text(" ".join([title, *aliases, *context]))
             if terms and not all(term in searchable for term in terms):
                 continue
             try:
                 validated_url = validate_http_url(url)
+                parsed_url = urlparse(validated_url)
+                if parsed_url.username or parsed_url.password:
+                    continue
             except ValueError:
                 continue
             raw_headers = entry.get("extra_headers")
@@ -157,10 +164,11 @@ class LibraryProvider:
                 "url": validated_url,
                 "provider": self.name,
                 "aliases": aliases,
+                "context": context,
                 "year": entry.get("release_year") if isinstance(entry.get("release_year"), int) else None,
                 "media_type": media_type,
                 "quality": None,
-                "language": None,
+                "language": _language(entry.get("language")),
                 "headers": _safe_headers(raw_headers),
                 "channel_id": entry.get("id"),
                 "playlist_id": entry.get("playlist_id"),
@@ -180,14 +188,17 @@ class UserJsonProvider:
         headers = {"Accept": "application/json", "User-Agent": "Lumen/0.1"}
         if self.config["token"]:
             headers["Authorization"] = f"Bearer {self.config['token']}"
-        response = await self.client.get(
+        # Stream so a provider cannot make us buffer an unbounded response.
+        async with self.client.stream(
+            "GET",
             self.config["endpoint"],
             params={"q": query},
             headers=headers,
             timeout=self.config["timeout"],
-        )
-        response.raise_for_status()
-        payload = response.json()
+        ) as response:
+            response.raise_for_status()
+            body = await read_capped_body(response, MAX_API_RESPONSE_BYTES, f"{self.name} response")
+        payload = json.loads(body)
         rows = _field(payload, self.config["results_path"]) if self.config["results_path"] else payload
         if not isinstance(rows, list):
             raise ValueError(f"{self.name}: response field '{self.config['results_path']}' must be an array")
@@ -202,6 +213,9 @@ class UserJsonProvider:
                 continue
             try:
                 url = validate_http_url(url)
+                parsed_url = urlparse(url)
+                if parsed_url.username or parsed_url.password:
+                    continue
             except ValueError:
                 continue
             raw_year = _field(row, self.config["year_field"])
@@ -258,7 +272,8 @@ def _score(result: dict[str, Any], query: str) -> int:
     terms = normalized_query.split()
     title = normalize_text(result.get("title"))
     aliases = [normalize_text(alias) for alias in result.get("aliases", [])]
-    haystack = " ".join([title, *aliases])
+    context = [normalize_text(item) for item in result.get("context", [])]
+    haystack = " ".join([title, *aliases, *context])
     if title == normalized_query:
         return 100
     if normalized_query in title:
@@ -277,6 +292,29 @@ def _quality(result: dict[str, Any]) -> str | None:
         return None
     value = (match.group(1) or match.group(2) or "").casefold()
     return f"{value}p" if value.isdigit() else value
+
+
+_LANGUAGE_CODES = {
+    "english": "en", "eng": "en", "french": "fr", "fra": "fr", "fre": "fr", "german": "de", "deu": "de", "ger": "de",
+    "spanish": "es", "spa": "es", "italian": "it", "ita": "it", "portuguese": "pt", "por": "pt", "arabic": "ar", "ara": "ar",
+    "hindi": "hi", "hin": "hi", "japanese": "ja", "jpn": "ja", "korean": "ko", "kor": "ko", "chinese": "zh", "zho": "zh",
+    "chi": "zh", "russian": "ru", "rus": "ru", "turkish": "tr", "tur": "tr",
+}
+_LANGUAGE_TAG_RE = re.compile(r"[a-z]{2,3}(?:[-_][a-z0-9]{2,8})*")
+
+
+def _language(value: Any) -> str | None:
+    """Normalize a provider language label such as 'English', 'en-US' or 'fre' to a primary code."""
+    text = _metadata_value(value, 40)
+    if not text:
+        return None
+    tag = re.sub(r"\s*\(.*\)$", "", text.casefold()).strip()
+    if tag in _LANGUAGE_CODES:
+        return _LANGUAGE_CODES[tag]
+    if not _LANGUAGE_TAG_RE.fullmatch(tag):
+        return None
+    primary = re.split(r"[-_]", tag, maxsplit=1)[0]
+    return _LANGUAGE_CODES.get(primary, primary)
 
 
 def _identity(result: dict[str, Any]) -> set[str]:
@@ -299,12 +337,16 @@ def _deduplicate(results: list[dict[str, Any]], query: str) -> list[dict[str, An
         if result["score"] <= 0:
             continue
         result["quality"] = _quality(result)
-        duplicate = next((item for item in merged if _same_title(item, result) or item["url"].split("#", 1)[0] == result["url"].split("#", 1)[0]), None)
+        duplicate = next((item for item in merged if _same_title(item, result) or (item["url"].split("#", 1)[0] == result["url"].split("#", 1)[0] and not (item.get("year") and result.get("year") and item["year"] != result["year"]) and not (item.get("media_type") and result.get("media_type") and item["media_type"] != result["media_type"]))), None)
         if duplicate is None:
             result["providers"] = [result["provider"]]
+            result["provider_sources"] = [{"id": result.get("id"), "name": result["provider"]}]
             merged.append(result)
             continue
         duplicate["providers"] = list(dict.fromkeys([*duplicate["providers"], result["provider"]]))
+        source = {"id": result.get("id"), "name": result["provider"]}
+        if source not in duplicate.get("provider_sources", []):
+            duplicate["provider_sources"] = [*duplicate.get("provider_sources", []), source]
         duplicate["aliases"] = list(dict.fromkeys([*duplicate["aliases"], *result["aliases"]]))[:30]
         if not duplicate.get("year"):
             duplicate["year"] = result.get("year")
@@ -330,19 +372,30 @@ class SearchEngine:
     def __init__(self):
         self._cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
         self._search_slots = asyncio.Semaphore(MAX_CONCURRENT_SEARCHES)
+        self._inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        self._waiters: dict[str, int] = {}
         self._client: httpx.AsyncClient | None = None
 
     async def _http_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(follow_redirects=True, timeout=PROVIDER_TIMEOUT_SECONDS)
+            self._client = httpx.AsyncClient(
+                follow_redirects=False,
+                timeout=PROVIDER_TIMEOUT_SECONDS,
+                event_hooks={"request": [assert_public_request]},
+            )
         return self._client
 
     @staticmethod
-    def _cache_key(query: str, library: list[dict[str, Any]], configs: list[dict[str, Any]], check_availability: bool) -> str:
+    def _cache_key(
+        query: str, library: list[dict[str, Any]], configs: list[dict[str, Any]],
+        check_availability: bool, preferred_language: str | None,
+    ) -> str:
         # Hash the provider configuration so credentials never become cache-key text.
+        # The library hash uses pickle, which is about 3x faster than sorted JSON on 5000 rows.
+        # The key stays in this process; a different encoding of the same library is only a cache miss.
         config_hash = hashlib.sha256(json.dumps(configs, sort_keys=True, default=str).encode()).hexdigest()
-        library_hash = hashlib.sha256(json.dumps(library, sort_keys=True, default=str).encode()).hexdigest()
-        return f"{normalize_text(query)}:{config_hash}:{library_hash}:{int(check_availability)}"
+        library_hash = hashlib.sha256(pickle.dumps(library, protocol=pickle.HIGHEST_PROTOCOL)).hexdigest()
+        return f"{normalize_text(query)}:{config_hash}:{library_hash}:{int(check_availability)}:{preferred_language or ''}"
 
     async def search(
         self,
@@ -351,6 +404,7 @@ class SearchEngine:
         configs: list[dict[str, Any]],
         *,
         check_availability: bool = True,
+        preferred_language: str | None = None,
     ) -> dict[str, Any]:
         query = query.strip()
         if len(query) < 2:
@@ -359,8 +413,8 @@ class SearchEngine:
             raise ValueError(f"Search query must be at most {MAX_QUERY_LENGTH} characters")
         if len(library) > 5000:
             raise ValueError("Library search payload exceeds 5000 entries")
-
-        key = self._cache_key(query, library, configs, check_availability)
+        preferred = _language(preferred_language)
+        key = self._cache_key(query, library, configs, check_availability, preferred)
         now = time.monotonic()
         cached = self._cache.get(key)
         if cached and cached[0] > now:
@@ -369,6 +423,37 @@ class SearchEngine:
         if cached:
             del self._cache[key]
 
+        task = self._inflight.get(key)
+        if task is None:
+            task = asyncio.create_task(self._search_uncached(query, library, configs, check_availability, key, preferred))
+            self._inflight[key] = task
+            self._waiters[key] = 0
+            # Drop the in-flight entry as soon as the shared search finishes or is cancelled.
+            task.add_done_callback(lambda done, key=key: self._forget_inflight(key, done))
+        self._waiters[key] = self._waiters.get(key, 0) + 1
+        try:
+            return copy.deepcopy(await asyncio.shield(task))
+        except asyncio.CancelledError:
+            # Abandon the shared search only when no other caller is still waiting on it.
+            if self._waiters.get(key, 0) <= 1 and not task.done():
+                task.cancel()
+            raise
+        finally:
+            remaining = self._waiters.get(key, 1) - 1
+            if remaining > 0:
+                self._waiters[key] = remaining
+            else:
+                self._waiters.pop(key, None)
+
+    def _forget_inflight(self, key: str, task: asyncio.Task[dict[str, Any]]) -> None:
+        if self._inflight.get(key) is task:
+            del self._inflight[key]
+
+    async def _search_uncached(
+        self, query: str, library: list[dict[str, Any]], configs: list[dict[str, Any]],
+        check_availability: bool, key: str, preferred_language: str | None = None,
+    ) -> dict[str, Any]:
+        started_at = time.monotonic()
         async with self._search_slots:
             client = await self._http_client()
             manager = ProviderManager(client)
@@ -384,12 +469,14 @@ class SearchEngine:
                 except asyncio.TimeoutError:
                     return [], {"id": provider.provider_id, "name": provider.name, "status": "timeout", "count": 0, "error": "Search timed out"}
                 except Exception as error:
-                    detail = str(error).strip() or error.__class__.__name__
-                    return [], {"id": provider.provider_id, "name": provider.name, "status": "error", "count": 0, "error": detail[:240]}
+                    detail = f"HTTP {error.response.status_code}" if isinstance(error, httpx.HTTPStatusError) else "Provider request failed"
+                    return [], {"id": provider.provider_id, "name": provider.name, "status": "error", "count": 0, "error": detail}
 
             outcomes = await asyncio.gather(*(run_provider(provider) for provider in providers))
             raw_results = [result for values, _ in outcomes for result in values]
             statuses = [status for _, status in outcomes]
+            for result in raw_results:
+                result["language"] = _language(result.get("language"))
             results = _deduplicate(raw_results, query)
             for result in results:
                 if result.get("quality"):
@@ -416,6 +503,7 @@ class SearchEngine:
             results.sort(key=lambda result: (
                 bool(result.get("available")),
                 result["score"],
+                bool(preferred_language) and result.get("language") == preferred_language,
                 result.get("quality_rank", 0),
                 bool(result.get("year")),
                 result["title"].casefold(),
@@ -423,8 +511,9 @@ class SearchEngine:
             results = results[:MAX_SEARCH_RESULTS]
             for result in results:
                 result.pop("quality_rank", None)
+                result.pop("context", None)
             response = {"query": query, "results": results, "providers": statuses}
-            self._cache[key] = (now + SEARCH_CACHE_SECONDS, copy.deepcopy(response))
+            self._cache[key] = (started_at + SEARCH_CACHE_SECONDS, copy.deepcopy(response))
             self._cache.move_to_end(key)
             while len(self._cache) > MAX_CACHE_ENTRIES:
                 self._cache.popitem(last=False)
@@ -432,6 +521,7 @@ class SearchEngine:
 
     def clear_cache(self) -> None:
         self._cache.clear()
+        self._inflight.clear()
 
 
 search_engine = SearchEngine()

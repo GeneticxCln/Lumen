@@ -11,3 +11,12 @@ dependencies = [
     "yt-dlp>=2024.0.0",
     "lxml>=5.0.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::ResourceWarning"]

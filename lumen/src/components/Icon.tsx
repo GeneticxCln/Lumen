@@ -1,8 +1,10 @@
 import type { CSSProperties } from "react";
 
-export type IconName = "play" | "pause" | "search" | "plus" | "check" | "close" | "chevron" | "info" | "settings" | "volume" | "mute" | "stop" | "folder" | "grid" | "arrow" | "refresh" | "compass" | "film" | "series" | "tv" | "palette" | "keyboard" | "bookmark" | "sun" | "moon" | "monitor" | "profile";
+export type IconName = "play" | "pause" | "search" | "plus" | "check" | "close" | "chevron" | "info" | "settings" | "volume" | "mute" | "stop" | "folder" | "grid" | "arrow" | "refresh" | "compass" | "film" | "series" | "tv" | "palette" | "keyboard" | "bookmark" | "sun" | "moon" | "monitor" | "profile" | "expand" | "collapse";
 const paths: Record<IconName, string> = {
   profile: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM4 21a8 8 0 0 1 16 0",
+  expand: "M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5",
+  collapse: "M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5",
   compass: "M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Zm-7-3-2 4-4 2 2-4 4-2Z",
   film: "M4 3h16v18H4V3ZM4 8h16M4 16h16M8 3v18M16 3v18",
   series: "M5 3h14M3 7h18v14H3V7Zm5 4 7 3-7 3v-6Z",

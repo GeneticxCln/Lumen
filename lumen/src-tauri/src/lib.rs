@@ -4,6 +4,7 @@ mod db;
 mod error;
 mod playback;
 mod playlist;
+mod secrets;
 mod sidecar;
 mod tmdb;
 
@@ -16,8 +17,6 @@ use tauri::{Manager, RunEvent};
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
@@ -42,6 +41,9 @@ pub fn run() {
             pause,
             seek,
             set_volume,
+            set_fullscreen,
+            set_player_track,
+            set_player_quality,
             stop,
             import_playlist_file,
             import_playlist_url,
@@ -49,7 +51,7 @@ pub fn run() {
             list_playlists_cmd,
             list_channels_cmd,
             search_engine,
-            get_setting_value,
+            get_search_providers,
             set_search_providers,
             extract_url,
             harvest_page,
@@ -67,8 +69,11 @@ pub fn run() {
             activate_profile_cmd,
             list_local_dir,
             local_thumbnail,
+            local_filmstrip,
+            local_poster_candidates,
             get_settings,
             set_setting_cmd,
+            set_tmdb_api_key,
             tmdb_status,
             tmdb_enrich,
             tmdb_clear_enrichment,
