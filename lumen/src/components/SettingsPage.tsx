@@ -4,6 +4,7 @@ import { getSettings, setSetting, setTmdbApiKey, tmdbStatus, enrichTmdb, clearTm
 import type { Channel, Playlist, PosterCandidate, Profile, TmdbStatus } from "../lib/types";
 import { defaultPreferences, themes, applyTheme } from "../lib/discovery";
 import type { Preferences } from "../lib/discovery";
+import { POSTER_FRAME_OPTIONS } from "../lib/local";
 import { LocalBrowser } from "./LocalBrowser";
 import { ProfileSettings } from "./ProfileSettings";
 import { MediaShelf } from "./MediaShelf";
@@ -34,14 +35,7 @@ interface SettingsPageProps {
 }
 
 // Must match the frame times the backends accept when saving.
-const posterFrameChoices = [
-  { seconds: "0", label: "Start of video" },
-  { seconds: "2", label: "2 seconds (default)" },
-  { seconds: "5", label: "5 seconds" },
-  { seconds: "10", label: "10 seconds" },
-  { seconds: "30", label: "30 seconds" },
-  { seconds: "60", label: "1 minute" },
-];
+const posterFrameChoices = POSTER_FRAME_OPTIONS.map((option) => ({ seconds: String(option.seconds), label: option.label }));
 
 const sections: { id: SettingsSection; label: string; description: string; icon: IconName; group: string }[] = [
   { id: "account", label: "Account", description: "Profiles on this device", icon: "profile", group: "ACCOUNT" },

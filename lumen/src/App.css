@@ -550,3 +550,7 @@ kbd { background: var(--bg-secondary); border-color: var(--border); color: var(-
   .folder-browser { padding: 16px 15px 18px; }
   .folder-browser .local-path-bar input { order: 5; flex-basis: 100%; }
 }
+.local-frame-button { margin-top: 9px; padding: 4px 9px; font-size: 11px; }
+.poster-frame-note { font-size: 12px; color: var(--fg-secondary); margin: 0 0 12px; }
+.poster-frame-default { margin-bottom: 4px; }
+.poster-frame-default.is-selected { outline: 2px solid var(--accent); }
