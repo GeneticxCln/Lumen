@@ -150,6 +150,7 @@ export interface Settings {
   poster_frame_seconds: string;
   search_preferred_language: string;
   search_hide_other_languages: string;
+  allow_lan_sources: string;
 }
 
 export interface ExtractResponse {

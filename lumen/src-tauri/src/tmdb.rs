@@ -236,7 +236,7 @@ async fn tmdb_get(
         .query(&query)
         .send()
         .await
-        .map_err(|e| TmdbFailure::Other(e.to_string()))?;
+        .map_err(|e| TmdbFailure::Other(crate::error::redacted(e)))?;
 
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -271,7 +271,7 @@ async fn read_capped_json(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| TmdbFailure::Other(e.to_string()))?
+        .map_err(|e| TmdbFailure::Other(crate::error::redacted(e)))?
     {
         if buffer.len() + chunk.len() > limit {
             return Err(TmdbFailure::Other(format!(

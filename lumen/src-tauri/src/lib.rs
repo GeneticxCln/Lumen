@@ -3,6 +3,7 @@ mod auth;
 mod commands;
 mod db;
 mod error;
+mod netguard;
 mod playback;
 mod pin_guard;
 mod playlist;

@@ -185,6 +185,13 @@ pub async fn stop(app: AppHandle) -> Result<()> {
     Ok(())
 }
 
+/// The user's opt-in to fetch from their own network (a NAS, Jellyfin on this machine).
+const ALLOW_LAN_SETTING: &str = "allow_lan_sources";
+
+async fn allow_lan_sources(pool: &sqlx::Pool<sqlx::Sqlite>) -> bool {
+    matches!(get_setting(pool, ALLOW_LAN_SETTING).await, Ok(Some(value)) if value == "true")
+}
+
 #[tauri::command]
 pub async fn import_playlist_file(path: String, app: AppHandle) -> Result<i64> {
     let (playlist, channels) = import_m3u_file(&path, None).await?;
@@ -195,9 +202,9 @@ pub async fn import_playlist_file(path: String, app: AppHandle) -> Result<i64> {
 
 #[tauri::command]
 pub async fn import_playlist_url(url: String, name: Option<String>, app: AppHandle) -> Result<i64> {
-    let (playlist, channels) = import_m3u_url(&url, name).await?;
-
     let pool = ensure_db(&app).await?;
+    let allow_lan = allow_lan_sources(pool).await;
+    let (playlist, channels) = import_m3u_url(&url, name, allow_lan).await?;
     import_playlist(pool, &playlist, &channels).await
 }
 
@@ -423,6 +430,7 @@ pub async fn harvest_page(url: String, app: AppHandle) -> Result<HarvestResponse
 
     if !harvested.urls.is_empty() {
         let pool = ensure_db(&app).await?;
+        let allow_lan = allow_lan_sources(pool).await;
         let now = Utc::now().timestamp();
         let host_label = url
             .split('/')
@@ -442,7 +450,7 @@ pub async fn harvest_page(url: String, app: AppHandle) -> Result<HarvestResponse
             // If it's a playlist (.m3u), try importing its channels; otherwise add as direct stream.
             // An HLS manifest found on the page comes back as the single stream it describes.
             if found_url.to_lowercase().ends_with(".m3u") {
-                if let Ok((_, parsed_chans)) = import_m3u_url(found_url, None).await {
+                if let Ok((_, parsed_chans)) = import_m3u_url(found_url, None, allow_lan).await {
                     all_channels.extend(parsed_chans);
                     continue;
                 }
@@ -1036,6 +1044,7 @@ pub async fn get_settings(app: AppHandle) -> Result<serde_json::Value> {
         "poster_frame_seconds": poster_frame.to_string(),
         "search_preferred_language": search_language,
         "search_hide_other_languages": hide_other_languages,
+        "allow_lan_sources": get_setting(pool, ALLOW_LAN_SETTING).await?.unwrap_or_default(),
     }))
 }
 
@@ -1046,6 +1055,7 @@ const USER_SETTING_KEYS: &[&str] = &[
     "hwdec",
     "cache",
     "extra_mpv_args",
+    ALLOW_LAN_SETTING,
     POSTER_FRAME_SETTING,
     SEARCH_LANGUAGE_SETTING,
     SEARCH_HIDE_OTHER_LANGUAGES_SETTING,
@@ -1429,7 +1439,7 @@ mod setting_allowlist_tests {
 
     #[test]
     fn only_user_facing_settings_are_writable() {
-        for key in ["hwdec", "cache", "extra_mpv_args", "poster_frame_seconds", "search_preferred_language", "search_hide_other_languages"] {
+        for key in ["hwdec", "cache", "extra_mpv_args", "allow_lan_sources", "poster_frame_seconds", "search_preferred_language", "search_hide_other_languages"] {
             assert!(is_user_setting(key), "{key} is a user setting");
         }
         // Internal state shares the table: writing these would bypass a PIN or corrupt sync.
