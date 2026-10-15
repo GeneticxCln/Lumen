@@ -146,14 +146,13 @@ function App() {
   async function play(channel: Channel) {
     if (busy) return;
     setBusy(true);
-    await run(async () => { await player.playChannel(channel); await player.changeVolume(preferences.defaultVolume); setPlayerOpen(true); setDetails(null); });
+    await run(async () => { await player.playChannel(channel, preferences.defaultVolume); setPlayerOpen(true); setDetails(null); });
     setBusy(false);
   }
 
   async function playFile(path: string, name?: string, headers?: Record<string, string>) {
     try {
-      await player.playMedia(path, name, headers);
-      await player.changeVolume(preferences.defaultVolume);
+      await player.playMedia(path, name, headers, preferences.defaultVolume);
       setPlayerOpen(true);
     } catch (error) {
       setNotice(errorMessage(error));

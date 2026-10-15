@@ -22,9 +22,12 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 
 // Global playback backend
-static PLAYBACK_BACKEND: OnceLock<Arc<Mutex<Option<MpvIpcBackend>>>> = OnceLock::new();
+//
+// The cell is locked only long enough to read or replace the handle. Handlers clone the `Arc`
+// and release the lock before talking to mpv, so a slow `load` can never block Stop or Pause.
+static PLAYBACK_BACKEND: OnceLock<Arc<Mutex<Option<Arc<MpvIpcBackend>>>>> = OnceLock::new();
 
-pub async fn get_playback_backend() -> Result<Arc<Mutex<Option<MpvIpcBackend>>>> {
+pub async fn get_playback_backend() -> Result<Arc<Mutex<Option<Arc<MpvIpcBackend>>>>> {
     let backend = PLAYBACK_BACKEND.get_or_init(|| Arc::new(Mutex::new(None)));
     Ok(backend.clone())
 }
@@ -55,11 +58,22 @@ async fn ensure_sidecar_handle(app: &AppHandle) -> Result<Arc<Mutex<SidecarManag
     get_sidecar().ok_or_else(|| PlayerError::Sidecar("Sidecar not initialized".into()))
 }
 
+/// The running backend, or an error when nothing is playing. Holds the lock only to clone.
+async fn current_backend() -> Result<Arc<MpvIpcBackend>> {
+    let cell = get_playback_backend().await?;
+    let guard = cell.lock().await;
+    guard
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| PlayerError::Mpv("No active playback".into()))
+}
+
 #[tauri::command]
 pub async fn play_url(
     url: String,
     headers: Option<serde_json::Value>,
     channel_id: Option<i64>,
+    volume: Option<i64>,
     app: AppHandle,
 ) -> Result<()> {
     let pool = ensure_db(&app).await?;
@@ -74,21 +88,21 @@ pub async fn play_url(
         .await?
         .unwrap_or_default();
 
-    let backend_cell = get_playback_backend().await?;
-    let mut backend_guard = backend_cell.lock().await;
-
-    let need_spawn = match backend_guard.as_mut() {
-        Some(b) => !b.is_alive().await,
-        None => true,
+    let backend = {
+        let backend_cell = get_playback_backend().await?;
+        let mut guard = backend_cell.lock().await;
+        let running = guard.as_ref().is_some_and(|backend| backend.is_alive());
+        if !running {
+            *guard = Some(Arc::new(
+                MpvIpcBackend::new(Some(app.clone()), &hwdec, &cache, &extra_args).await?,
+            ));
+        }
+        guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| PlayerError::Mpv("mpv did not start".into()))?
     };
 
-    if need_spawn {
-        *backend_guard = Some(
-            MpvIpcBackend::new(Some(app.clone()), &hwdec, &cache, &extra_args).await?,
-        );
-    }
-
-    let backend = backend_guard.as_mut().unwrap();
     let hdrs = headers.as_ref().and_then(|v| {
         v.as_object().map(|obj| {
             obj.iter()
@@ -97,6 +111,10 @@ pub async fn play_url(
         })
     });
 
+    // Volume goes in before the file does, so playback never starts at mpv's default level.
+    if let Some(volume) = volume {
+        let _ = backend.set_volume(volume).await;
+    }
     backend.load(&url, hdrs.as_deref()).await?;
 
     // Check if there is a saved resume position for local files
@@ -117,80 +135,50 @@ pub async fn play_url(
 
 #[tauri::command]
 pub async fn pause() -> Result<()> {
-    let backend_cell = get_playback_backend().await?;
-    let backend_guard = backend_cell.lock().await;
-
-    if let Some(backend) = backend_guard.as_ref() {
-        backend.pause().await
-    } else {
-        Err(PlayerError::Mpv("No active playback".into()))
-    }
+    let backend = current_backend().await?;
+    backend.pause().await
 }
 
 #[tauri::command]
 pub async fn seek(seconds: f64) -> Result<()> {
-    let backend_cell = get_playback_backend().await?;
-    let backend_guard = backend_cell.lock().await;
-
-    if let Some(backend) = backend_guard.as_ref() {
-        backend.seek(seconds).await
-    } else {
-        Err(PlayerError::Mpv("No active playback".into()))
-    }
+    let backend = current_backend().await?;
+    backend.seek(seconds).await
 }
 
 #[tauri::command]
 pub async fn set_volume(vol: i64) -> Result<()> {
-    let backend_cell = get_playback_backend().await?;
-    let backend_guard = backend_cell.lock().await;
-
-    if let Some(backend) = backend_guard.as_ref() {
-        backend.set_volume(vol).await
-    } else {
-        Err(PlayerError::Mpv("No active playback".into()))
-    }
+    let backend = current_backend().await?;
+    backend.set_volume(vol).await
 }
 
 #[tauri::command]
 pub async fn set_fullscreen(enabled: bool) -> Result<()> {
-    let backend_cell = get_playback_backend().await?;
-    let backend_guard = backend_cell.lock().await;
-
-    if let Some(backend) = backend_guard.as_ref() {
-        backend.set_property("fullscreen", serde_json::json!(enabled)).await
-    } else {
-        Err(PlayerError::Mpv("No active playback".into()))
-    }
+    let backend = current_backend().await?;
+    backend.set_property("fullscreen", serde_json::json!(enabled)).await
 }
 
 #[tauri::command]
 pub async fn set_player_track(kind: String, id: String) -> Result<()> {
-    let backend_cell = get_playback_backend().await?;
-    let backend_guard = backend_cell.lock().await;
-    if let Some(backend) = backend_guard.as_ref() {
-        backend.set_track(&kind, &id).await
-    } else {
-        Err(PlayerError::Mpv("No active playback".into()))
-    }
+    let backend = current_backend().await?;
+    backend.set_track(&kind, &id).await
 }
 
 #[tauri::command]
 pub async fn set_player_quality(id: String) -> Result<()> {
-    let backend_cell = get_playback_backend().await?;
-    let backend_guard = backend_cell.lock().await;
-    if let Some(backend) = backend_guard.as_ref() {
-        backend.set_quality(&id).await
-    } else {
-        Err(PlayerError::Mpv("No active playback".into()))
-    }
+    let backend = current_backend().await?;
+    backend.set_quality(&id).await
 }
 
 #[tauri::command]
 pub async fn stop(app: AppHandle) -> Result<()> {
-    let backend_cell = get_playback_backend().await?;
-    let mut backend_guard = backend_cell.lock().await;
-
-    if let Some(backend) = backend_guard.take() {
+    // Take the handle and release the lock first: Stop must never wait behind a load.
+    let taken = {
+        let backend_cell = get_playback_backend().await?;
+        let mut guard = backend_cell.lock().await;
+        guard.take()
+    };
+    if let Some(backend) = taken {
+        // `stop` cancels any load still waiting on this backend before telling mpv to quit.
         let _ = backend.stop().await;
     }
     let _ = app.emit("player://state", PlayerStateEvent::default());
@@ -420,10 +408,8 @@ pub async fn extract_url(url: String, app: AppHandle) -> Result<ExtractResponse>
     // Source and entry are created together; a failed insert leaves no empty source behind.
     import_playlist(pool, &playlist, &[ch]).await?;
 
-    // Immediately start playback
-    let hdr_val = serde_json::to_value(&extracted.headers).ok();
-    let _ = play_url(extracted.url.clone(), hdr_val, None, app).await;
-
+    // Playback is the caller's job: the UI plays the result right after this returns, so a
+    // failure to play reaches the user instead of being dropped here.
     Ok(extracted)
 }
 

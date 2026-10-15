@@ -69,9 +69,10 @@ function callBackend<T>(cmd: string, args: Record<string, unknown> = {}): Promis
 export async function playUrl(
   url: string,
   headers?: Record<string, string>,
-  channelId?: number
+  channelId?: number,
+  volume?: number
 ) {
-  return callBackend("play_url", { url, headers, channelId });
+  return callBackend("play_url", { url, headers, channelId, volume });
 }
 
 export async function pause() {

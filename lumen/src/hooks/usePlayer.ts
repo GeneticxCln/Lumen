@@ -59,7 +59,16 @@ export function usePlayer() {
     return () => clearInterval(timer);
   }, [currentUrl, currentChannelId, playerState.paused, playerState.duration, reportError]);
 
-  const playChannel = useCallback(async (channel: Channel) => {
+  // The backend sets the volume before the file loads; this only brings the UI state in line.
+  const applyStartVolume = useCallback((startVolume?: number) => {
+    if (startVolume === undefined) return;
+    const clamped = Math.max(0, Math.min(100, startVolume));
+    setVolumeState(clamped);
+    setMuted(clamped === 0);
+    if (clamped > 0) prevVolumeRef.current = clamped;
+  }, []);
+
+  const playChannel = useCallback(async (channel: Channel, startVolume?: number) => {
     let parsedHeaders: Record<string, string> | undefined;
     if (channel.extra_headers && channel.extra_headers !== "{}") {
       try {
@@ -68,7 +77,8 @@ export function usePlayer() {
         parsedHeaders = undefined;
       }
     }
-    await playUrl(channel.url, parsedHeaders, channel.id);
+    await playUrl(channel.url, parsedHeaders, channel.id, startVolume);
+    applyStartVolume(startVolume);
     headersRef.current = parsedHeaders;
     setCurrentTitle(channel.name);
     setCurrentUrl(channel.url);
@@ -83,11 +93,12 @@ export function usePlayer() {
       error: undefined,
     }));
 
-  }, []);
+  }, [applyStartVolume]);
 
   const playMedia = useCallback(
-    async (url: string, title?: string, headers?: Record<string, string>) => {
-      await playUrl(url, headers);
+    async (url: string, title?: string, headers?: Record<string, string>, startVolume?: number) => {
+      await playUrl(url, headers, undefined, startVolume);
+      applyStartVolume(startVolume);
       headersRef.current = headers;
       const label = title || url.split("/").pop() || url;
       setCurrentTitle(label);
@@ -104,7 +115,7 @@ export function usePlayer() {
       }));
 
     },
-    []
+    [applyStartVolume]
   );
 
   const togglePause = useCallback(async () => {

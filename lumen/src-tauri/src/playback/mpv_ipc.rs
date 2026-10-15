@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as MpvValue;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -36,15 +36,21 @@ struct MpvMessage {
 /// window, and a timeout is surfaced instead of pretending the file is ready for resume-seek.
 const LOAD_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Shown when Stop interrupts a load that had not finished.
+pub const CANCELLED_MESSAGE: &str = "Playback was stopped before the stream finished loading";
+
 pub struct MpvIpcBackend {
     socket_path: String,
-    mpv_process: Option<tokio::process::Child>,
+    mpv_process: std::sync::Mutex<Option<tokio::process::Child>>,
     writer: mpsc::UnboundedSender<(MpvRequest, oneshot::Sender<Result<MpvValue>>)>,
     request_id: AtomicU64,
     /// Load lifecycle from the reader loop: 0 = not started, 1 = start-file seen, 2 = loaded,
-    /// 3 = failed. Keeping the intermediate state matters when replacing a file: mpv may emit
+    /// 3 = failed, 4 = cancelled. Keeping the intermediate state matters when replacing a file: mpv may emit
     /// end-file for the old item before start-file for the new one.
     load_state: tokio::sync::watch::Sender<u8>,
+    /// Set by `cancel_load`/`stop`. Once set, a `load` that is waiting returns an error instead of
+    /// holding the caller for the rest of `LOAD_SETTLE_TIMEOUT`, and new loads are refused.
+    closing: AtomicBool,
     /// Latest player state shared with the reader loop, so UI-only changes can emit it whole.
     state: Arc<Mutex<PlayerStateEvent>>,
     app: Option<AppHandle>,
@@ -329,10 +335,11 @@ impl MpvIpcBackend {
 
         let backend = Self {
             socket_path,
-            mpv_process: Some(mpv_process),
+            mpv_process: std::sync::Mutex::new(Some(mpv_process)),
             writer: tx,
             request_id: AtomicU64::new(1),
             load_state: load_state_tx,
+            closing: AtomicBool::new(false),
             state,
             app,
         };
@@ -359,12 +366,22 @@ impl MpvIpcBackend {
         Ok(backend)
     }
 
-    pub async fn is_alive(&mut self) -> bool {
-        if let Some(ref mut child) = self.mpv_process {
-            matches!(child.try_wait(), Ok(None))
-        } else {
-            false
+    pub fn is_alive(&self) -> bool {
+        if self.closing.load(Ordering::SeqCst) {
+            return false;
         }
+        let mut process = self.mpv_process.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        match process.as_mut() {
+            Some(child) => matches!(child.try_wait(), Ok(None)),
+            None => false,
+        }
+    }
+
+    /// Wakes a `load` that is still waiting for mpv, making it fail right away. Used by `stop`
+    /// so that pressing Stop on a stream that never loads does not wait out the settle timeout.
+    pub fn cancel_load(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+        self.load_state.send_replace(4);
     }
 
     async fn send_command(&self, cmd: Vec<serde_json::Value>) -> Result<MpvValue> {
@@ -389,6 +406,9 @@ impl MpvIpcBackend {
 #[async_trait]
 impl PlaybackBackend for MpvIpcBackend {
     async fn load(&self, url: &str, headers: Option<&[(&str, &str)]>) -> Result<()> {
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(PlayerError::Mpv(CANCELLED_MESSAGE.into()));
+        }
         if let Some(hdrs) = headers {
             let header_list: Vec<String> =
                 hdrs.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
@@ -419,6 +439,9 @@ impl PlaybackBackend for MpvIpcBackend {
         // playback restarted from zero. Wait for the file to be loaded (or to fail) first.
         let wait_result = timeout(LOAD_SETTLE_TIMEOUT, async {
             loop {
+                if self.closing.load(Ordering::SeqCst) {
+                    return Err(PlayerError::Mpv(CANCELLED_MESSAGE.into()));
+                }
                 match *load_state_rx.borrow_and_update() {
                     2 => return Ok(()),
                     3 => return Err(PlayerError::Mpv("mpv failed to load the requested media".into())),
@@ -518,6 +541,7 @@ impl PlaybackBackend for MpvIpcBackend {
     }
 
     async fn stop(&self) -> Result<()> {
+        self.cancel_load();
         let _ = self
             .send_command(vec![MpvValue::String("quit".to_string())])
             .await;
@@ -527,7 +551,8 @@ impl PlaybackBackend for MpvIpcBackend {
 
 impl Drop for MpvIpcBackend {
     fn drop(&mut self) {
-        if let Some(mut process) = self.mpv_process.take() {
+        let process = self.mpv_process.get_mut().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(mut process) = process.take() {
             let _ = process.start_kill();
         }
         let _ = std::fs::remove_file(&self.socket_path);
@@ -538,6 +563,21 @@ impl Drop for MpvIpcBackend {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// These tests drive a real mpv. On a machine without it (a minimal CI image) they skip, with
+    /// a message, rather than failing for a reason unrelated to the code under test.
+    fn mpv_installed() -> bool {
+        let found = std::process::Command::new("mpv")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !found {
+            eprintln!("skipped: mpv is not installed");
+        }
+        found
+    }
 
     /// A PCM WAV of the requested length, written by hand so the test needs no encoder.
     fn write_wav(path: &Path, seconds: u32) -> std::io::Result<()> {
@@ -564,6 +604,9 @@ mod tests {
     /// This is the regression that made "resume where you left off" silently start from zero.
     #[tokio::test]
     async fn test_load_waits_for_the_file_so_a_resume_seek_lands() {
+        if !mpv_installed() {
+            return;
+        }
         let path = std::env::temp_dir().join(format!(
             "lumen-playback-{}.wav",
             uuid::Uuid::new_v4().simple()
@@ -613,5 +656,47 @@ mod tests {
 
         let _ = backend.stop().await;
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Stop must not wait out `LOAD_SETTLE_TIMEOUT` when a stream never answers. The server below
+    /// accepts the connection and then says nothing, which is what a dead IPTV host looks like.
+    #[tokio::test]
+    async fn test_stop_interrupts_a_load_that_never_finishes() {
+        if !mpv_installed() {
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let held = tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                open.push(stream); // keep the socket open, send nothing
+            }
+        });
+
+        let backend = Arc::new(
+            MpvIpcBackend::new(None, "no", "no", "--vo=null --ao=null --force-window=no")
+                .await
+                .expect("mpv should start"),
+        );
+        let url = format!("http://127.0.0.1:{port}/never.m3u8");
+        let loading = {
+            let backend = backend.clone();
+            tokio::spawn(async move { backend.load(&url, None).await })
+        };
+
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert!(!loading.is_finished(), "the load should still be waiting on the silent server");
+
+        let started = std::time::Instant::now();
+        backend.stop().await.unwrap();
+        let outcome = timeout(Duration::from_secs(3), loading)
+            .await
+            .expect("load must return soon after stop, not after the 30 s settle timeout")
+            .expect("load task should not panic");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let error = outcome.expect_err("an interrupted load is an error");
+        assert!(error.to_string().contains("stopped"), "unexpected error: {error}");
+        held.abort();
     }
 }
