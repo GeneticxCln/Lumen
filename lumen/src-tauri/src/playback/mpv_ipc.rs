@@ -44,6 +44,8 @@ pub struct MpvIpcBackend {
     mpv_process: std::sync::Mutex<Option<tokio::process::Child>>,
     writer: mpsc::UnboundedSender<(MpvRequest, oneshot::Sender<Result<MpvValue>>)>,
     request_id: AtomicU64,
+    /// Requests waiting for mpv's reply, so a timed-out one can be dropped instead of lingering.
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<MpvValue>>>>>,
     /// Load lifecycle from the reader loop: 0 = not started, 1 = start-file seen, 2 = loaded,
     /// 3 = failed, 4 = cancelled. Keeping the intermediate state matters when replacing a file: mpv may emit
     /// end-file for the old item before start-file for the new one.
@@ -54,6 +56,37 @@ pub struct MpvIpcBackend {
     /// Latest player state shared with the reader loop, so UI-only changes can emit it whole.
     state: Arc<Mutex<PlayerStateEvent>>,
     app: Option<AppHandle>,
+}
+
+/// A directory only this user can enter, for mpv's control socket. mpv's IPC accepts commands
+/// that run programs, so the socket must not sit where another local user can reach it.
+/// `$XDG_RUNTIME_DIR` (mode 0700, per user) is the right place; if it is missing, a private
+/// directory is created under the temp dir and checked before use.
+fn private_socket_dir() -> Result<std::path::PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from) {
+        if runtime.is_dir() {
+            return Ok(runtime);
+        }
+    }
+    let dir = std::env::temp_dir().join("lumen-ipc");
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(PlayerError::Mpv(format!("Could not create the player socket directory: {error}"))),
+    }
+    // A directory made by someone else, or readable by others, is not private: refuse it rather
+    // than trust it.
+    let meta = std::fs::symlink_metadata(&dir)?;
+    let mine = std::fs::metadata("/proc/self")?.uid();
+    if !meta.is_dir() || meta.uid() != mine || meta.permissions().mode() & 0o077 != 0 {
+        return Err(PlayerError::Mpv(format!(
+            "{} is not a private directory owned by you; remove it and try again",
+            dir.display()
+        )));
+    }
+    Ok(dir)
 }
 
 fn mpv_id(value: &MpvValue) -> Option<String> {
@@ -89,7 +122,11 @@ impl MpvIpcBackend {
         extra_args: &str,
     ) -> Result<Self> {
         let unique_id = uuid::Uuid::new_v4().simple().to_string();
-        let socket_path = format!("/tmp/lumen-mpv-{}-{}.sock", std::process::id(), &unique_id[..8]);
+        let socket_dir = private_socket_dir()?;
+        let socket_path = socket_dir
+            .join(format!("mpv-{}-{}.sock", std::process::id(), &unique_id[..8]))
+            .to_string_lossy()
+            .into_owned();
 
         let _ = std::fs::remove_file(&socket_path);
 
@@ -273,9 +310,11 @@ impl MpvIpcBackend {
                                         st.buffering = false;
                                         // An end-file before start-file belongs to the previous item
                                         // during replacement; only finish the current load after start.
-                                        if *load_state_reader.borrow() == 1 {
-                                            let failed = msg.reason.as_deref() == Some("error");
-                                            let _ = load_state_reader.send_replace(if failed { 3 } else { 2 });
+                                        // `redirect` means mpv is moving on to another entry, so the load is
+                                        // still going. Any other end before `file-loaded` means this load
+                                        // did not succeed, including Stop and an empty file reaching EOF.
+                                        if *load_state_reader.borrow() == 1 && msg.reason.as_deref() != Some("redirect") {
+                                            let _ = load_state_reader.send_replace(3);
                                         }
                                         if msg.reason.as_deref() == Some("error") {
                                             st.error = Some(
@@ -338,6 +377,7 @@ impl MpvIpcBackend {
             mpv_process: std::sync::Mutex::new(Some(mpv_process)),
             writer: tx,
             request_id: AtomicU64::new(1),
+            pending: pending.clone(),
             load_state: load_state_tx,
             closing: AtomicBool::new(false),
             state,
@@ -398,7 +438,11 @@ impl MpvIpcBackend {
         match timeout(Duration::from_secs(5), rx).await {
             Ok(Ok(res)) => res,
             Ok(Err(_)) => Err(PlayerError::Mpv("mpv response channel closed".into())),
-            Err(_) => Err(PlayerError::Mpv("mpv IPC command timed out".into())),
+            Err(_) => {
+                // No reply is coming for this id; forget it so the map cannot grow over a long session.
+                self.pending.lock().await.remove(&id);
+                Err(PlayerError::Mpv("mpv IPC command timed out".into()))
+            }
         }
     }
 }

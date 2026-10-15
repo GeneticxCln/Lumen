@@ -241,10 +241,10 @@ pub async fn search_engine(
     app: AppHandle,
 ) -> Result<SearchResponse> {
     let pool = ensure_db(&app).await?;
-    let term = format!("%{}%", query.trim());
+    let term = contains_pattern(query.trim());
     let rows = sqlx::query(
         "SELECT id, playlist_id, name, url, group_title, tvg_id, language, extra_headers, tmdb_type, release_year \
-         FROM channels WHERE name LIKE ? OR group_title LIKE ? OR tvg_id LIKE ? \
+         FROM channels WHERE name LIKE ? ESCAPE '\\' OR group_title LIKE ? ESCAPE '\\' OR tvg_id LIKE ? ESCAPE '\\' \
          ORDER BY name LIMIT 5000",
     )
     .bind(&term)

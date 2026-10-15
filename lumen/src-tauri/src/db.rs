@@ -384,6 +384,21 @@ pub struct EnrichedChannel {
 /// The single channel-listing query, used by both the command layer and the tests.
 /// Returning the TMDB columns here keeps one implementation of the query/group
 /// filtering instead of a production copy and a test-only copy that could drift.
+/// A `LIKE` pattern matching `needle` anywhere, with `%`, `_` and `\` taken literally. Pair it
+/// with `ESCAPE '\'` in the SQL. Without this a search for "100%" or "a_b" matches far more.
+pub fn contains_pattern(needle: &str) -> String {
+    let mut pattern = String::with_capacity(needle.len() + 2);
+    pattern.push('%');
+    for ch in needle.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('%');
+    pattern
+}
+
 pub async fn list_channels(
     pool: &Pool<Sqlite>,
     playlist_id: i64,
@@ -397,7 +412,7 @@ pub async fn list_channels(
     );
 
     if query.is_some() {
-        sql.push_str(" AND name LIKE ?");
+        sql.push_str(" AND name LIKE ? ESCAPE '\\'");
     }
 
     if group.is_some() {
@@ -410,7 +425,7 @@ pub async fn list_channels(
     let mut q = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(playlist_id);
 
     if let Some(q_str) = query {
-        q = q.bind(format!("%{}%", q_str));
+        q = q.bind(contains_pattern(q_str));
     }
 
     if let Some(g) = group {
@@ -1831,6 +1846,33 @@ mod tests {
         pin_guard::record_success(profile.id);
         authorize_profile(&pool, profile.id, Some("4821")).await.unwrap();
         pin_guard::record_success(profile.id);
+    }
+
+    #[tokio::test]
+    async fn test_channel_search_treats_percent_and_underscore_literally() {
+        let pool = test_pool().await;
+        let pid = import_playlist(
+            &pool,
+            &playlist("Wildcards"),
+            &[
+                channel(0, "100% Real", "http://x.example/1.m3u8"),
+                channel(0, "100 Really", "http://x.example/2.m3u8"),
+                channel(0, "a_b", "http://x.example/3.m3u8"),
+                channel(0, "axb", "http://x.example/4.m3u8"),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let names = |rows: Vec<EnrichedChannel>| -> Vec<String> {
+            let mut names: Vec<String> = rows.into_iter().map(|row| row.channel.name).collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(list_channels(&pool, pid, Some("100%"), None).await.unwrap()), vec!["100% Real"]);
+        assert_eq!(names(list_channels(&pool, pid, Some("a_b"), None).await.unwrap()), vec!["a_b"]);
+        assert_eq!(names(list_channels(&pool, pid, Some("real"), None).await.unwrap()), vec!["100 Really", "100% Real"]);
+        assert_eq!(contains_pattern(r"50%_\"), r"%50\%\_\\%");
     }
 
     #[tokio::test]
