@@ -170,18 +170,22 @@ export async function createProfile(name: string, color?: string) {
   return callBackend<Profile>("create_profile_cmd", { name, color });
 }
 
-export async function renameProfile(profileId: number, name: string) {
-  return callBackend<Profile>("rename_profile_cmd", { profileId, name });
+/** `currentPin` is required when the profile has a PIN. */
+export async function renameProfile(profileId: number, name: string, currentPin?: string) {
+  return callBackend<Profile>("rename_profile_cmd", { profileId, name, currentPin: currentPin || null });
 }
 
 /** Returns the profiles that remain after the deletion. */
-export async function deleteProfile(profileId: number) {
-  return callBackend<Profile[]>("delete_profile_cmd", { profileId });
+export async function deleteProfile(profileId: number, currentPin?: string) {
+  return callBackend<Profile[]>("delete_profile_cmd", { profileId, currentPin: currentPin || null });
 }
 
-/** Sets a profile's PIN, or clears it when `pin` is undefined or empty. */
-export async function setProfilePin(profileId: number, pin?: string) {
-  return callBackend<Profile>("set_profile_pin_cmd", { profileId, pin: pin ? pin : null });
+/**
+ * Sets a profile's PIN, or clears it when `pin` is undefined or empty. Changing or clearing an
+ * existing PIN requires that PIN as `currentPin`.
+ */
+export async function setProfilePin(profileId: number, pin?: string, currentPin?: string) {
+  return callBackend<Profile>("set_profile_pin_cmd", { profileId, pin: pin ? pin : null, currentPin: currentPin || null });
 }
 
 /**

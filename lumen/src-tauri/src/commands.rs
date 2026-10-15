@@ -608,17 +608,24 @@ pub async fn create_profile_cmd(
 pub async fn rename_profile_cmd(
     profile_id: i64,
     name: String,
+    current_pin: Option<String>,
     app: AppHandle,
 ) -> Result<Profile> {
     let pool = ensure_db(&app).await?;
+    authorize_profile(pool, profile_id, current_pin.as_deref()).await?;
     let profile = rename_profile(pool, profile_id, &name).await?;
     crate::sync::schedule(pool);
     Ok(profile)
 }
 
 #[tauri::command]
-pub async fn delete_profile_cmd(profile_id: i64, app: AppHandle) -> Result<Vec<Profile>> {
+pub async fn delete_profile_cmd(
+    profile_id: i64,
+    current_pin: Option<String>,
+    app: AppHandle,
+) -> Result<Vec<Profile>> {
     let pool = ensure_db(&app).await?;
+    authorize_profile(pool, profile_id, current_pin.as_deref()).await?;
     delete_profile(pool, profile_id).await?;
     crate::sync::schedule(pool);
 
@@ -631,9 +638,12 @@ pub async fn delete_profile_cmd(profile_id: i64, app: AppHandle) -> Result<Vec<P
 pub async fn set_profile_pin_cmd(
     profile_id: i64,
     pin: Option<String>,
+    current_pin: Option<String>,
     app: AppHandle,
 ) -> Result<Profile> {
     let pool = ensure_db(&app).await?;
+    // Setting a PIN on an open profile needs nothing; changing or removing one needs the old PIN.
+    authorize_profile(pool, profile_id, current_pin.as_deref()).await?;
     set_profile_pin(pool, profile_id, pin.as_deref()).await
 }
 
@@ -649,11 +659,7 @@ pub async fn activate_profile_cmd(
 ) -> Result<Profile> {
     let pool = ensure_db(&app).await?;
 
-    if !verify_profile_pin(pool, profile_id, pin.as_deref().unwrap_or_default()).await? {
-        return Err(PlayerError::InvalidArg(
-            "That PIN is not correct".to_string(),
-        ));
-    }
+    authorize_profile(pool, profile_id, pin.as_deref()).await?;
 
     set_active_profile(pool, profile_id).await?;
     touch_profile(pool, profile_id).await?;
@@ -1047,8 +1053,27 @@ pub async fn get_settings(app: AppHandle) -> Result<serde_json::Value> {
     }))
 }
 
+/// Settings the UI may write. The settings table also holds internal state (the active profile,
+/// sync cursors); a generic writer must not be able to reach those, or it could switch to a
+/// locked profile without its PIN.
+const USER_SETTING_KEYS: &[&str] = &[
+    "hwdec",
+    "cache",
+    "extra_mpv_args",
+    POSTER_FRAME_SETTING,
+    SEARCH_LANGUAGE_SETTING,
+    SEARCH_HIDE_OTHER_LANGUAGES_SETTING,
+];
+
+fn is_user_setting(key: &str) -> bool {
+    USER_SETTING_KEYS.contains(&key)
+}
+
 #[tauri::command]
 pub async fn set_setting_cmd(key: String, value: String, app: AppHandle) -> Result<()> {
+    if !is_user_setting(&key) {
+        return Err(PlayerError::InvalidArg(format!("\"{key}\" is not a user setting")));
+    }
     if key == "search_providers" {
         return Err(PlayerError::InvalidArg("Use set_search_providers to change search providers".into()));
     }
@@ -1410,4 +1435,20 @@ pub struct LocalFile {
     pub path: String,
     pub is_dir: bool,
     pub size: Option<u64>,
+}
+
+#[cfg(test)]
+mod setting_allowlist_tests {
+    use super::is_user_setting;
+
+    #[test]
+    fn only_user_facing_settings_are_writable() {
+        for key in ["hwdec", "cache", "extra_mpv_args", "poster_frame_seconds", "search_preferred_language", "search_hide_other_languages"] {
+            assert!(is_user_setting(key), "{key} is a user setting");
+        }
+        // Internal state shares the table: writing these would bypass a PIN or corrupt sync.
+        for key in ["active_profile_id", "sync_pull_cursor", "sync_seeded", "sync_last_synced_at", "search_providers", "tmdb_api_key", ""] {
+            assert!(!is_user_setting(key), "{key:?} must not be writable from the UI");
+        }
+    }
 }

@@ -17,7 +17,7 @@ interface ProfileSettingsProps {
 }
 
 /** Which inline form a row currently has open, if any. */
-type PendingAction = { profileId: number; kind: "switch" | "rename" | "pin" };
+type PendingAction = { profileId: number; kind: "switch" | "rename" | "pin" | "removePin" };
 
 const MIN_PIN_CHARS = 4;
 
@@ -29,6 +29,8 @@ function initials(name: string): string {
 export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }: ProfileSettingsProps) {
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [value, setValue] = useState("");
+  // A profile with a PIN needs that PIN again for any change to it (rename, new PIN, remove, delete).
+  const [currentPin, setCurrentPin] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
@@ -39,6 +41,7 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
   const openAction = (profile: Profile, kind: PendingAction["kind"]) => {
     setPending({ profileId: profile.id, kind });
     setValue(kind === "rename" ? profile.name : "");
+    setCurrentPin("");
     setError(null);
     setConfirmDeleteId(null);
   };
@@ -46,6 +49,7 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
   const closeAction = () => {
     setPending(null);
     setValue("");
+    setCurrentPin("");
   };
 
   /** Run one profile mutation, then let the caller reload profiles, active profile and library. */
@@ -73,7 +77,12 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
         setError("A profile needs a name.");
         return;
       }
-      void run(() => renameProfile(profile.id, trimmed), closeAction);
+      void run(() => renameProfile(profile.id, trimmed, currentPin), closeAction);
+      return;
+    }
+
+    if (pending.kind === "removePin") {
+      void run(() => setProfilePin(profile.id, undefined, currentPin), closeAction);
       return;
     }
 
@@ -94,7 +103,7 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
       setError(`A PIN needs at least ${MIN_PIN_CHARS} characters.`);
       return;
     }
-    void run(() => setProfilePin(profile.id, value), closeAction);
+    void run(() => setProfilePin(profile.id, value, currentPin), closeAction);
   };
 
   const addProfile = () => {
@@ -109,10 +118,7 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
   return (
     <section className="profile-settings">
       {profiles.length === 0 ? (
-        <p className="muted-note">
-          Profiles need the desktop app. This browser development preview has no profile API, so there is
-          nothing to manage here.
-        </p>
+        <p className="muted-note">Profiles could not be loaded.</p>
       ) : (
         <div className="profile-list">
           {profiles.map((profile) => {
@@ -120,6 +126,7 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
             const isPending = pending !== null && pending.profileId === profile.id;
             const pinOpen = isPending && pending.kind === "pin";
             const switchOpen = isPending && pending.kind === "switch";
+            const removeOpen = isPending && pending.kind === "removePin";
 
             return (
               <div className="profile-row" key={profile.id}>
@@ -147,7 +154,7 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
                   {!isPending && profile.has_pin && (
                     <>
                       <button disabled={busy} onClick={() => openAction(profile, "pin")}>Change PIN</button>
-                      <button disabled={busy} onClick={() => void run(() => setProfilePin(profile.id))}>
+                      <button disabled={busy} onClick={() => openAction(profile, "removePin")}>
                         Remove PIN
                       </button>
                     </>
@@ -160,6 +167,7 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
                       onClick={() => {
                         setConfirmDeleteId(profile.id);
                         setPending(null);
+                        setCurrentPin("");
                         setError(null);
                       }}
                     >
@@ -167,10 +175,22 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
                     </button>
                   ) : (
                     <>
+                      {profile.has_pin && (
+                        <input
+                          type="password"
+                          inputMode="numeric"
+                          autoComplete="off"
+                          aria-label={`Current PIN for ${profile.name}`}
+                          placeholder="Current PIN"
+                          value={currentPin}
+                          disabled={busy}
+                          onChange={(event) => setCurrentPin(event.target.value)}
+                        />
+                      )}
                       <button
                         className="danger"
                         disabled={busy}
-                        onClick={() => void run(() => deleteProfile(profile.id), () => setConfirmDeleteId(null))}
+                        onClick={() => void run(() => deleteProfile(profile.id, currentPin), () => { setConfirmDeleteId(null); setCurrentPin(""); })}
                       >
                         Confirm delete
                       </button>
@@ -187,6 +207,18 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
                       submitPending(profile);
                     }}
                   >
+                    {profile.has_pin && (
+                      <input
+                        type="password"
+                        inputMode="numeric"
+                        autoComplete="off"
+                        aria-label={`Current PIN for ${profile.name}`}
+                        placeholder="Current PIN"
+                        value={currentPin}
+                        disabled={busy}
+                        onChange={(event) => setCurrentPin(event.target.value)}
+                      />
+                    )}
                     <label className="sr-only" htmlFor={`profile-rename-${profile.id}`}>New name</label>
                     <input
                       id={`profile-rename-${profile.id}`}
@@ -202,7 +234,7 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
                   </form>
                 )}
 
-                {(switchOpen || pinOpen) && (
+                {(switchOpen || pinOpen || removeOpen) && (
                   <form
                     className="profile-pin-form"
                     onSubmit={(event) => {
@@ -211,21 +243,38 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
                       else submitPending(profile);
                     }}
                   >
-                    <label className="sr-only" htmlFor={`profile-pin-${profile.id}`}>
-                      {switchOpen ? `PIN for ${profile.name}` : `New PIN for ${profile.name}`}
-                    </label>
-                    <input
-                      id={`profile-pin-${profile.id}`}
-                      type="password"
-                      inputMode="numeric"
-                      autoComplete="off"
-                      value={value}
-                      disabled={busy}
-                      onChange={(event) => setValue(event.target.value)}
-                    />
-                    <small>{pinOpen ? `At least ${MIN_PIN_CHARS} characters.` : "Enter this profile's PIN."}</small>
+                    {((pinOpen && profile.has_pin) || removeOpen) && (
+                      <input
+                        type="password"
+                        inputMode="numeric"
+                        autoComplete="off"
+                        aria-label={`Current PIN for ${profile.name}`}
+                        placeholder="Current PIN"
+                        value={currentPin}
+                        disabled={busy}
+                        onChange={(event) => setCurrentPin(event.target.value)}
+                      />
+                    )}
+                    {!removeOpen && (
+                      <>
+                        <label className="sr-only" htmlFor={`profile-pin-${profile.id}`}>
+                          {switchOpen ? `PIN for ${profile.name}` : `New PIN for ${profile.name}`}
+                        </label>
+                        <input
+                          id={`profile-pin-${profile.id}`}
+                          type="password"
+                          inputMode="numeric"
+                          autoComplete="off"
+                          placeholder={pinOpen ? "New PIN" : undefined}
+                          value={value}
+                          disabled={busy}
+                          onChange={(event) => setValue(event.target.value)}
+                        />
+                        <small>{pinOpen ? `At least ${MIN_PIN_CHARS} characters.` : "Enter this profile's PIN."}</small>
+                      </>
+                    )}
                     <button className="primary-button" type="submit" disabled={busy}>
-                      {pinOpen ? "Save PIN" : "Unlock"}
+                      {pinOpen ? "Save PIN" : removeOpen ? "Remove PIN" : "Unlock"}
                     </button>
                     <button className="secondary-button" type="button" disabled={busy} onClick={closeAction}>
                       Cancel
@@ -272,8 +321,9 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
         shared, so it stays.
       </p>
       <p className="settings-note">
-        <strong>A PIN locks one profile on this device.</strong> It is not encryption: the library, the
-        database and the media files are still readable by anyone with access to this machine.
+        <strong>A PIN locks one profile on this device.</strong> Changing or removing it asks for the current
+        PIN. It is not encryption, and it is not synced to your other devices: the library, the database and
+        the media files are still readable by anyone with access to this machine.
       </p>
     </section>
   );

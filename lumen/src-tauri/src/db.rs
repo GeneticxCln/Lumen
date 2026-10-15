@@ -1,5 +1,6 @@
 use crate::auth;
 use crate::error::{PlayerError, Result};
+use crate::pin_guard;
 use crate::playlist::import::{import_m3u_file, Channel, Playlist};
 use crate::sync;
 use chrono::Utc;
@@ -816,6 +817,28 @@ pub async fn verify_profile_pin(
     match row.get::<Option<String>, _>("pin_hash") {
         Some(hash) => Ok(auth::verify_pin(pin, &hash)),
         None => Ok(true),
+    }
+}
+
+/// Proves the caller knows a profile's PIN before a change to that profile. A profile without a
+/// PIN is open. Wrong guesses are throttled per profile (see `pin_guard`).
+pub async fn authorize_profile(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    profile_id: i64,
+    pin: Option<&str>,
+) -> Result<()> {
+    if let Some(wait) = pin_guard::locked_out_for(profile_id) {
+        return Err(PlayerError::InvalidArg(format!(
+            "Too many wrong PINs. Try again in {} seconds.",
+            wait.as_secs().max(1)
+        )));
+    }
+    if verify_profile_pin(pool, profile_id, pin.unwrap_or_default()).await? {
+        pin_guard::record_success(profile_id);
+        Ok(())
+    } else {
+        pin_guard::record_failure(profile_id);
+        Err(PlayerError::InvalidArg("That PIN is not correct".to_string()))
     }
 }
 
@@ -1778,6 +1801,36 @@ mod tests {
         let cleared = set_profile_pin(&pool, profile.id, None).await.unwrap();
         assert!(!cleared.has_pin);
         assert!(verify_profile_pin(&pool, profile.id, "anything").await.unwrap());
+    }
+
+    /// Only this test calls `authorize_profile`: the attempt limiter is process-wide and keyed by
+    /// profile id, so a second test reusing an id could lock it out mid-run.
+    #[tokio::test]
+    async fn test_profile_changes_require_the_current_pin() {
+        let pool = test_pool().await;
+        let profile = create_profile(&pool, "Parent", None).await.unwrap();
+
+        authorize_profile(&pool, profile.id, None)
+            .await
+            .expect("a profile without a PIN is open");
+
+        set_profile_pin(&pool, profile.id, Some("4821")).await.unwrap();
+        assert!(authorize_profile(&pool, profile.id, None).await.is_err(), "no PIN supplied");
+        assert!(authorize_profile(&pool, profile.id, Some("0000")).await.is_err(), "wrong PIN");
+        authorize_profile(&pool, profile.id, Some("4821"))
+            .await
+            .expect("the right PIN is accepted");
+
+        // Repeated wrong guesses lock the profile, and then even the right PIN waits.
+        for _ in 0..5 {
+            let _ = authorize_profile(&pool, profile.id, Some("0000")).await;
+        }
+        let locked = authorize_profile(&pool, profile.id, Some("4821")).await.unwrap_err();
+        assert!(String::from(locked).contains("Too many wrong PINs"));
+
+        pin_guard::record_success(profile.id);
+        authorize_profile(&pool, profile.id, Some("4821")).await.unwrap();
+        pin_guard::record_success(profile.id);
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@ mod commands;
 mod db;
 mod error;
 mod playback;
+mod pin_guard;
 mod playlist;
 mod secrets;
 mod sidecar;
