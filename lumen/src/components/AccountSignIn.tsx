@@ -4,13 +4,10 @@ import {
   accountSignOut,
   accountStatus,
   errorMessage,
-  isTauriRuntime,
   syncNow,
   syncStatus,
 } from "../lib/tauri";
 import type { AccountStatus, SyncStatus } from "../lib/types";
-
-const signedOut: AccountStatus = { signedIn: false, sub: null, verified: true };
 
 function describeSync(sync: SyncStatus): string {
   const last = sync.lastSyncedAt
@@ -29,10 +26,6 @@ export function AccountSignIn() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isTauriRuntime()) {
-      setStatus(signedOut);
-      return;
-    }
     let active = true;
     accountStatus()
       .then(async (next) => {
@@ -71,8 +64,6 @@ export function AccountSignIn() {
     }
   };
 
-  const signInAvailable = isTauriRuntime();
-
   return (
     <div className="account-signin">
       <h3 className="settings-section-title">Lumen account</h3>
@@ -104,7 +95,7 @@ export function AccountSignIn() {
         ) : (
           <button
             className="primary-button"
-            disabled={busy || !signInAvailable}
+            disabled={busy}
             onClick={() => void run(accountSignIn)}
           >
             {busy ? "Waiting for your browser…" : "Sign in with Freebuff"}

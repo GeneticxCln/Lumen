@@ -13,7 +13,7 @@ A Linux-first media library and player built with Tauri v2, React 19, TypeScript
 - Appearance themes: Cinema, Midnight, Forest, Daylight, and System (follows device light/dark mode).
 - Instant theme previews, explicit Save/Discard, and section-specific defaults; preferences persist on this device.
 - Playback, appearance, source management, and keyboard preferences.
-- Native mpv playback on desktop; embedded browser preview for supported media.
+- Native mpv playback on desktop.
 
 ## Accounts and sync
 
@@ -43,37 +43,6 @@ npm run tauri dev
 ```
 
 Native development needs the platform's Tauri/WebKitGTK build dependencies and `mpv`. Extraction needs the sidecar executable; inspect `sidecar/scripts/build.sh` and the release limitations in [AUDIT.md](AUDIT.md) before packaging.
-
-### Browser preview
-
-Terminal 1:
-
-```bash
-cd sidecar
-python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
-LUMEN_STANDALONE=1 LUMEN_SIDECAR_PORT=43127 .venv/bin/python -m app.main
-```
-
-Terminal 2, from this app directory:
-
-```bash
-npm run dev -- --host 127.0.0.1
-```
-
-Open `http://127.0.0.1:1420`. Browser preview uses the real local SQLite bridge and can read local media. **Do not expose it to a network or deploy it.** Only explicitly enabled standalone development mode exposes the browser bridge; native sidecars expose token-protected extraction endpoints.
-
-For an independent preview without touching your library:
-
-```bash
-# Sidecar terminal
-LUMEN_STANDALONE=1 LUMEN_SIDECAR_PORT=43128 LUMEN_PREVIEW_PORT=1422 LUMEN_DATA_DIR=/tmp/lumen-preview-data .venv/bin/python -m app.main
-
-# Frontend terminal, app directory
-LUMEN_BRIDGE_URL=http://127.0.0.1:43128 npm run dev -- --host 127.0.0.1 --port 1422
-```
-
-Browser playback has codec/CORS/header restrictions that native mpv does not. Use the desktop app for MKV/HEVC and streams requiring custom headers.
 
 ## Checks
 

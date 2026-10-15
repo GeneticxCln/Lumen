@@ -4,7 +4,6 @@ import {
   importPlaylistUrl,
   extractUrl,
   harvestPage,
-  isTauriRuntime,
   errorText,
 } from "../lib/tauri";
 import { LocalBrowser } from "./LocalBrowser";
@@ -68,7 +67,6 @@ export function SourceDialog({
 }: SourceDialogProps) {
   const [tab, setTab] = useState<"file" | "url" | "extract" | "catalog" | "local">("url");
   const [url, setUrl] = useState("");
-  const [filePath, setFilePath] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -203,7 +201,7 @@ export function SourceDialog({
         {tab === "file" && (
           <div className="dialog-content">
             <p>Select a local M3U / M3U8 playlist or video file</p>
-            {isTauriRuntime() ? <div className="extract-buttons"><button disabled={loading} onClick={() => void selectFile(false)}>Select M3U / M3U8 file</button><button disabled={loading} onClick={() => void selectFile(true)}>Open video / audio</button></div> : <><p className="muted-note">Browser preview uses paths on this computer. Native file pickers are available in the desktop app.</p><input type="text" aria-label="Local playlist path" placeholder="/home/user/playlist.m3u" value={filePath} onChange={(event) => setFilePath(event.target.value)} /><button disabled={loading || !filePath.trim()} onClick={() => void handleFileImport(filePath.trim())}>{loading ? "Importing…" : "Import local playlist"}</button></>}
+            <div className="extract-buttons"><button disabled={loading} onClick={() => void selectFile(false)}>Select M3U / M3U8 file</button><button disabled={loading} onClick={() => void selectFile(true)}>Open video / audio</button></div>
           </div>
         )}
 

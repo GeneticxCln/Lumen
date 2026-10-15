@@ -56,48 +56,13 @@ export function tmdbImage(path: string | undefined, size: string): string {
   return path ? `${TMDB_IMAGE_BASE}${size}${path}` : "";
 }
 
-export function isTauriRuntime(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
-
 // Re-exported here so components have one import site; the implementation lives in ./errors
 // so it can be regression-tested without loading the Tauri runtime.
 export { errorMessage, errorText } from "./errors";
 
-async function callBackend<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
-  if (isTauriRuntime()) {
-    return invoke<T>(cmd, args);
-  }
-  const res = await fetch(`/api/invoke/${cmd}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Lumen-Client": "local-preview" },
-    body: JSON.stringify(args),
-    signal: AbortSignal.timeout(60000),
-  });
-  if (!res.ok) {
-    let errText = `${res.status} ${res.statusText}`;
-    try {
-      const data = await res.json();
-      if (data?.detail) errText = data.detail;
-    } catch {
-      // ignore
-    }
-    throw new Error(errText);
-  }
-  return res.json() as Promise<T>;
-}
-
-export function resolvePlayableSrc(url: string): string {
-  if (!url) return "";
-  if (
-    url.startsWith("http://") ||
-    url.startsWith("https://") ||
-    url.startsWith("blob:")
-  ) {
-    return url;
-  }
-  // Local filesystem path -> stream via backend file endpoint
-  return `/api/local-media?path=${encodeURIComponent(url)}&client=local-preview`;
+// Every backend call is a Tauri command. There is no browser/HTTP fallback.
+function callBackend<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
+  return invoke<T>(cmd, args);
 }
 
 // Player commands
@@ -163,20 +128,9 @@ export async function listChannels(playlistId: number, query?: string, group?: s
 }
 
 // Search engine
-export async function searchEngine(query: string, signal?: AbortSignal, preferredLanguage?: string) {
+export async function searchEngine(query: string, preferredLanguage?: string) {
   const args = { query, checkAvailability: true, ...(preferredLanguage ? { preferredLanguage } : {}) };
-  if (isTauriRuntime()) return invoke<SearchResponse>("search_engine", args);
-  const response = await fetch("/api/invoke/search_engine", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Lumen-Client": "local-preview" },
-    body: JSON.stringify(args),
-    signal: signal || AbortSignal.timeout(60000),
-  });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(payload?.detail || `${response.status} ${response.statusText}`);
-  }
-  return response.json() as Promise<SearchResponse>;
+  return invoke<SearchResponse>("search_engine", args);
 }
 
 export async function getSearchProviders() {
@@ -311,7 +265,6 @@ export function clearLocalPoster(path: string) {
 function localImage(path: string, kind: "thumbnail" | "filmstrip"): Promise<string> {
   const cacheKey = `${kind}:${path}`;
   const command = kind === "filmstrip" ? "local_filmstrip" : "local_thumbnail";
-  const endpoint = kind === "filmstrip" ? "local-filmstrip" : "local-thumbnail";
   const cached = localThumbnailCache.get(cacheKey);
   if (cached) {
     localThumbnailCache.delete(cacheKey);
@@ -320,18 +273,8 @@ function localImage(path: string, kind: "thumbnail" | "filmstrip"): Promise<stri
   }
 
   const request = (async () => {
-    if (isTauriRuntime()) {
-      const encoded = await invoke<string>(command, { path });
-      return `data:image/jpeg;base64,${encoded}`;
-    }
-    const response = await fetch(`/api/${endpoint}?path=${encodeURIComponent(path)}&client=local-preview`);
-    if (!response.ok) throw new Error(`Video image unavailable (${response.status})`);
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    let binary = "";
-    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
-    }
-    return `data:image/jpeg;base64,${btoa(binary)}`;
+    const encoded = await invoke<string>(command, { path });
+    return `data:image/jpeg;base64,${encoded}`;
   })();
   localThumbnailCache.set(cacheKey, request);
   request.then((url) => {
@@ -360,8 +303,7 @@ export async function setSetting(key: string, value: string) {
   return callBackend("set_setting_cmd", { key, value });
 }
 
-// TMDB metadata enrichment. The API key goes to the OS keychain (or memory in browser
-// preview) through its own command. It is never written to the settings table.
+// TMDB metadata enrichment. The API key goes to the OS keychain through its own command. It is never written to the settings table.
 export async function setTmdbApiKey(key: string) {
   return callBackend("set_tmdb_api_key", { key });
 }
@@ -406,10 +348,6 @@ export async function clearTmdbEnrichment() {
 
 // Player state events
 export function onPlayerState(callback: (state: PlayerState) => void) {
-  if (!isTauriRuntime()) {
-    // Embedded browser playback reports state directly through VideoStage.
-    return Promise.resolve(() => {});
-  }
   return listen<PlayerState>("player://state", (event: Event<PlayerState>) => {
     callback(event.payload);
   });

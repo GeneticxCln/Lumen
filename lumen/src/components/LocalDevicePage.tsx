@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icon";
 import type { IconName } from "./Icon";
 import { Modal } from "./Modal";
-import { clearLocalPoster, errorMessage, getLocalPosterFrame, importPlaylistFile, isTauriRuntime, listLocalDir, localFilmstrip, localPosterCandidates, localThumbnail, setLocalPosterFrame } from "../lib/tauri";
+import { clearLocalPoster, errorMessage, getLocalPosterFrame, importPlaylistFile, listLocalDir, localFilmstrip, localPosterCandidates, localThumbnail, setLocalPosterFrame } from "../lib/tauri";
 import { uniqueHistory } from "../lib/discovery";
 import { MAX_ROOTS, MAX_SUBDIRS, MEDIA_ROOT_HINT, POSTER_FRAME_OPTIONS, extensionOf, fileLabel, fileNameOf, formatClock, formatSize, isLocalPath, kindOf, mapLimit, parentOf } from "../lib/local";
 import type { HistoryEntry, LocalFile, PosterCandidate } from "../lib/types";
@@ -161,11 +161,6 @@ function LocalCard({ item, folder, onPlay }: { item: LocalItem; folder: string; 
     </div>
     {frameOpen && <PosterFrameDialog path={item.path} name={item.name} onClose={() => setFrameOpen(false)} onSaved={() => setPosterVersion((version) => version + 1)} />}
   </article>;
-}
-
-function HeroPoster({ path }: { path: string }) {
-  const poster = usePosterData(path, true);
-  return poster ? <div className="local-hero-poster-wrap" aria-hidden="true"><img className="local-hero-poster" src={poster} alt="" /></div> : null;
 }
 
 function LocalRowView({ row, onPlay }: { row: LocalRow; onPlay: (item: LocalItem) => void }) {
@@ -328,7 +323,6 @@ export function LocalDevicePage({
   return <div className="discovery-page">
     <section className="local-hero">
       <div className="local-hero-glow" />
-      {feature && kindOf(feature.name) === "video" && !isTauriRuntime() && <HeroPoster path={feature.path} />}
       {!feature || kindOf(feature.name) !== "video" ? <div className="local-hero-mark"><Icon name="monitor" size={96} /></div> : null}
       <div className="local-hero-content">
         <div className="hero-kicker"><span className="mini-brand">L</span> ON THIS DEVICE</div>

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef, lazy, Suspense } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { Transport } from "./components/Transport";
 import { PlayerOverlay } from "./components/PlayerOverlay";
 import { PLAYER_SEEK_STEP_SECONDS, PLAYER_VOLUME_STEP, playerShortcutFor } from "./lib/playerKeys";
@@ -15,10 +15,9 @@ import { FacetBrowser } from "./components/FacetBrowser";
 import { DiscoveryPage } from "./components/DiscoveryPage";
 import { LocalDevicePage } from "./components/LocalDevicePage";
 import { SearchEnginePage } from "./components/SearchEnginePage";
-const VideoStage = lazy(() => import("./components/VideoStage").then((module) => ({ default: module.VideoStage })));
 import { usePlayer } from "./hooks/usePlayer";
 import { useChannels } from "./hooks/useChannels";
-import { activeProfile, browseTmdb, errorMessage, getHistory, isTauriRuntime, listProfiles, setPlayerFullscreen, tmdbStatus } from "./lib/tauri";
+import { activeProfile, browseTmdb, errorMessage, getHistory, listProfiles, setPlayerFullscreen, tmdbStatus } from "./lib/tauri";
 import type { BrowseTitle } from "./lib/types";
 import type { Channel, HistoryEntry, Profile } from "./lib/types";
 import { readPreferences, recommendChannels, catalogShelves, contentKind, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
@@ -162,23 +161,11 @@ function App() {
     }
   }
 
-  // Desktop fullscreen drives the mpv window; the browser preview uses the Fullscreen API.
+  // Fullscreen drives the mpv window.
   const [isFullscreen, setIsFullscreen] = useState(false);
-  useEffect(() => {
-    if (isTauriRuntime()) return;
-    const syncFullscreen = () => setIsFullscreen(document.fullscreenElement !== null);
-    document.addEventListener("fullscreenchange", syncFullscreen);
-    return () => document.removeEventListener("fullscreenchange", syncFullscreen);
-  }, []);
   const toggleFullscreen = useCallback(async () => {
     const next = !isFullscreen;
-    if (isTauriRuntime()) {
-      await setPlayerFullscreen(next);
-    } else if (next) {
-      await document.documentElement.requestFullscreen();
-    } else if (document.fullscreenElement) {
-      await document.exitFullscreen();
-    }
+    await setPlayerFullscreen(next);
     setIsFullscreen(next);
   }, [isFullscreen]);
   const closePlayer = useCallback(() => {
@@ -423,21 +410,7 @@ function App() {
       onToggleFullscreen={() => void run(toggleFullscreen)}
       controls={<Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); closePlayer(); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} onSelectTrack={(kind, id) => void run(() => player.selectTrack(kind, id))} onSelectQuality={(id) => void run(() => player.selectQuality(id))} isFullscreen={isFullscreen} onToggleFullscreen={() => void run(toggleFullscreen)} />}
     >
-      {isTauriRuntime() ? <div className="player-native-card"><Icon name="play" size={40} /><h2>{player.currentTitle}</h2><p>Your video plays in the native mpv window.</p></div> : <Suspense fallback={<p className="loading">Loading player…</p>}><VideoStage
-          url={player.currentUrl}
-          title={player.currentTitle || player.playerState.title || null}
-          paused={player.playerState.paused}
-          volume={player.volume}
-          muted={player.muted}
-          seekRequest={player.seekRequest}
-          onTimeUpdate={player.handleVideoTimeUpdate}
-          onPlayStateChange={player.handleVideoPlayState}
-          onBufferingChange={player.handleVideoBuffering}
-          onMutedChange={player.handleVideoMutedChange}
-          onOptionsChange={player.handleVideoOptions}
-          registerBrowserControls={player.registerBrowserControls}
-          onError={player.handleVideoError}
-        /></Suspense>}
+      <div className="player-native-card"><Icon name="play" size={40} /><h2>{player.currentTitle}</h2><p>Your video plays in the native mpv window.</p></div>
     </PlayerOverlay>}
     </div>
     {locked && <ProfileGate profiles={profiles} initialProfileId={activeProfileId} onUnlocked={handleProfilesChanged} />}
