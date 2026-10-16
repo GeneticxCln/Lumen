@@ -3,7 +3,6 @@ pub use lumen_core::{
     search, secrets, tmdb,
 };
 
-mod account;
 mod commands;
 mod playback;
 mod sync;
@@ -32,11 +31,14 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            account::account_status,
-            account::account_sign_in,
-            account::account_sign_out,
             sync::sync_now_cmd,
             sync::sync_status_cmd,
+            sync::sync_state_cmd,
+            sync::sync_set_server,
+            sync::sync_enable,
+            sync::sync_join,
+            sync::sync_show_key,
+            sync::sync_disable,
             play_url,
             next_fallback_source,
             pause,

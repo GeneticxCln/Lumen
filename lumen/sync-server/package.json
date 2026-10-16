@@ -1,22 +1,17 @@
 {
-  "name": "account",
+  "name": "lumen-sync",
   "version": "1.0.0",
-  "description": "",
+  "description": "Zero-knowledge sync server for Lumen: stores encrypted records, holds no keys, has no accounts.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
     "typecheck": "tsc -p tsconfig.json",
-    "dev": "wrangler dev --port 8787",
-    "test:flow": "node test/desktop-flow.mjs",
+    "dev": "wrangler dev --port 8787 --var POW_BITS:8 --var GROUP_CREATE_LIMIT:4 --var MAX_ITEMS:1500",
     "test:sync": "node test/sync-flow.mjs"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
-  "dependencies": {
-    "@freebuff/auth": "^0.1.0"
-  },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261015.1",
     "typescript": "^7.0.2",

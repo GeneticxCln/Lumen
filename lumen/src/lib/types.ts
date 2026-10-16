@@ -1,14 +1,17 @@
-/** Cross-device account state. `sub` is the Freebuff user ID; `verified` is false when the server could not be reached. */
-export interface AccountStatus {
-  signedIn: boolean;
-  sub: string | null;
-  verified: boolean;
+/** Whether this device syncs, and with which server. The sync key itself is never part of this. */
+export interface SyncState {
+  enabled: boolean;
+  serverUrl: string | null;
+  /** True when `serverUrl` is the address built into this version of Lumen. */
+  defaultServer: boolean;
 }
 
-/** Sync state on this device. `pending` counts local changes the server has not accepted yet. */
+/** Sync progress on this device. `pending` counts local changes the server has not accepted yet. */
 export interface SyncStatus {
   pending: number;
   lastSyncedAt: number | null;
+  /** Records from the last pull that failed verification and were ignored. */
+  skipped: number;
 }
 
 export interface Channel {

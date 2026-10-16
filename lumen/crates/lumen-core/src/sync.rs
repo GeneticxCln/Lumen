@@ -1,7 +1,8 @@
-//! Cross-device sync for signed-in users.
+//! Cross-device sync, end-to-end encrypted.
 //!
-//! Profiles, My List and watch progress are queued locally as they change and pushed to the
-//! account Worker. Remote records are applied last-write-wins on `updated_at`. Applying a
+//! Profiles, My List and watch progress are queued locally as they change, sealed with the
+//! group's sync key (`sync_crypto`) and pushed to the sync Worker, which stores only opaque
+//! blobs. Remote records are opened, then applied last-write-wins on `updated_at`. Applying a
 //! remote record writes the local rows directly and never re-queues them, so two devices do
 //! not echo each other's changes back and forth. Only http(s) streams sync: a local file path
 //! means nothing on another device.
@@ -16,16 +17,17 @@ use sha2::{Digest, Sha256};
 use sqlx::{Pool, Row, Sqlite, SqliteConnection};
 use tokio::sync::Mutex;
 
-use crate::account;
 use crate::db::{clean_profile_name, get_setting, set_setting};
 use crate::error::{PlayerError, Result};
+use crate::sync_crypto::{SealedItem, SyncKeys};
 
 const KIND_PROFILE: &str = "profile";
 const KIND_FAVORITE: &str = "favorite";
 const KIND_PROGRESS: &str = "progress";
 
-/// The server rejects a whole push if one payload is over 4 KB, so oversized records are not
-/// queued. Otherwise one long record would block every later change.
+/// The server rejects a whole push if one sealed record is over its size cap, so oversized
+/// records are not queued. Otherwise one long record would block every later change. 4,000 bytes
+/// of payload seal to well under the server's 6,144-character blob limit.
 const MAX_PAYLOAD_BYTES: usize = 4000;
 const PUSH_BATCH: i64 = 500;
 /// Pulls start this far before the saved cursor. A device with a slow clock can push a record
@@ -38,6 +40,8 @@ const PERIODIC: Duration = Duration::from_secs(5 * 60);
 const CURSOR_SETTING: &str = "sync_pull_cursor";
 const LAST_SYNC_SETTING: &str = "sync_last_synced_at";
 const SEEDED_SETTING: &str = "sync_seeded";
+const SKIPPED_SETTING: &str = "sync_skipped";
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 static SYNC_LOCK: Mutex<()> = Mutex::const_new(());
 static SCHEDULED: AtomicBool = AtomicBool::new(false);
@@ -59,7 +63,7 @@ pub struct SyncItem {
 
 #[derive(Deserialize)]
 struct PullPage {
-    items: Vec<SyncItem>,
+    items: Vec<SealedItem>,
     has_more: bool,
 }
 
@@ -70,6 +74,9 @@ pub struct SyncStatus {
     pub pending: i64,
     /// Unix milliseconds of the last completed sync, if any.
     pub last_synced_at: Option<i64>,
+    /// Records from the last pull that failed verification and were ignored. Non-zero means the
+    /// server returned something this key did not write, or altered a record.
+    pub skipped: i64,
 }
 
 fn sql_err(error: sqlx::Error) -> PlayerError {
@@ -480,27 +487,126 @@ async fn queue_all(pool: &Pool<Sqlite>) -> Result<()> {
     Ok(())
 }
 
-fn check_status(status: reqwest::StatusCode) -> Result<()> {
-    if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(PlayerError::Io("Sign in again to keep syncing".into()));
-    }
-    if !status.is_success() {
-        return Err(PlayerError::Io(format!("Sync server returned {status}")));
-    }
-    Ok(())
+/// One sync group on one server: where to send requests and the keys that seal and open them.
+pub(crate) struct Remote {
+    client: reqwest::Client,
+    origin: String,
+    keys: SyncKeys,
 }
 
-async fn push_batch(client: &reqwest::Client, origin: &str, token: &str, items: &[SyncItem]) -> Result<()> {
-    let response = client
-        .post(format!("{origin}/api/desktop/sync"))
-        .bearer_auth(token)
-        .json(&json!({ "items": items }))
+impl Remote {
+    pub(crate) fn new(origin: &str, keys: SyncKeys) -> Result<Self> {
+        // Redirects are never followed: the bearer token must only ever go to the address the
+        // user configured.
+        let client = reqwest::Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        Ok(Self { client, origin: origin.trim_end_matches('/').to_string(), keys })
+    }
+
+    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        self.client
+            .request(method, format!("{}{path}", self.origin))
+            .header("X-Sync-Id", self.keys.sync_id())
+            .bearer_auth(self.keys.auth_token())
+    }
+
+    /// Registers this group on the server. Safe to repeat: the server answers "already exists"
+    /// for the same key and refuses a different one. The proof of work takes about a second, so
+    /// it runs off the async runtime.
+    pub(crate) async fn register(&self, pow_bits: u32) -> Result<()> {
+        let sync_id = self.keys.sync_id();
+        let for_pow = sync_id.clone();
+        let nonce = tokio::task::spawn_blocking(move || crate::sync_crypto::solve_pow(&for_pow, pow_bits))
+            .await
+            .map_err(|error| PlayerError::Io(format!("Could not prepare the sync group: {error}")))?;
+        let response = self
+            .client
+            .post(format!("{}/v1/groups", self.origin))
+            .json(&json!({ "sync_id": sync_id, "verifier": self.keys.verifier(), "pow_nonce": nonce }))
+            .send()
+            .await?;
+        check(response).await.map(|_| ())
+    }
+
+    /// Whether this key has a group on the server, without creating one.
+    pub(crate) async fn exists(&self) -> Result<bool> {
+        let response = self.request(reqwest::Method::GET, "/v1/items").query(&[("since", 0)]).send().await?;
+        if response.status().is_success() {
+            return Ok(true);
+        }
+        let (status, code) = failure(response).await;
+        if status == reqwest::StatusCode::NOT_FOUND && code.as_deref() == Some("group_not_found") {
+            return Ok(false);
+        }
+        Err(describe(status, code.as_deref()))
+    }
+
+    /// Deletes the group and everything in it from the server.
+    pub(crate) async fn delete_group(&self) -> Result<()> {
+        let response = self.request(reqwest::Method::DELETE, "/v1/groups").send().await?;
+        match check(response).await {
+            Ok(_) => Ok(()),
+            // Already gone is the state the caller wanted.
+            Err(PlayerError::NotFound(_)) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// The status and the server's `error` code of a failed response.
+async fn failure(response: reqwest::Response) -> (reqwest::StatusCode, Option<String>) {
+    let status = response.status();
+    let code = response
+        .json::<Value>()
+        .await
+        .ok()
+        .and_then(|body| body.get("error").and_then(Value::as_str).map(str::to_string));
+    (status, code)
+}
+
+fn describe(status: reqwest::StatusCode, code: Option<&str>) -> PlayerError {
+    use reqwest::StatusCode;
+    match (status, code) {
+        (StatusCode::UNAUTHORIZED, _) => PlayerError::Io(
+            "The sync server no longer accepts this sync key. Turn sync off and join again with the right key".into(),
+        ),
+        (StatusCode::NOT_FOUND, Some("group_not_found")) => PlayerError::NotFound(
+            "The synced data for this key was deleted or has expired. Turn sync off, then on again to start fresh".into(),
+        ),
+        (StatusCode::NOT_FOUND, _) => PlayerError::Io("That address is not a Lumen sync server".into()),
+        (StatusCode::CONFLICT, _) => PlayerError::Io("That sync group already belongs to a different key".into()),
+        (StatusCode::PAYLOAD_TOO_LARGE, _) => PlayerError::Io("The sync server is full for this group".into()),
+        (StatusCode::TOO_MANY_REQUESTS, _) => {
+            PlayerError::Io("The sync server is limiting new groups from this network. Try again tomorrow".into())
+        }
+        (StatusCode::BAD_REQUEST, Some("invalid_pow")) => {
+            PlayerError::Io("The sync server wants a stronger proof of work than this version of Lumen provides. Update Lumen".into())
+        }
+        _ => PlayerError::Io(format!("Sync server returned {status}")),
+    }
+}
+
+async fn check(response: reqwest::Response) -> Result<reqwest::Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let (status, code) = failure(response).await;
+    Err(describe(status, code.as_deref()))
+}
+
+async fn push_batch(remote: &Remote, items: &[SyncItem]) -> Result<()> {
+    let sealed = items.iter().map(|item| remote.keys.seal(item)).collect::<Result<Vec<_>>>()?;
+    let response = remote
+        .request(reqwest::Method::POST, "/v1/items")
+        .json(&json!({ "items": sealed }))
         .send()
         .await?;
-    check_status(response.status())
+    check(response).await.map(|_| ())
 }
 
-async fn push_pending(pool: &Pool<Sqlite>, client: &reqwest::Client, origin: &str, token: &str) -> Result<()> {
+async fn push_pending(pool: &Pool<Sqlite>, remote: &Remote) -> Result<()> {
     loop {
         let rows = sqlx::query(
             "SELECT kind, item_key, payload, updated_at, deleted FROM sync_queue ORDER BY updated_at LIMIT ?",
@@ -525,7 +631,7 @@ async fn push_pending(pool: &Pool<Sqlite>, client: &reqwest::Client, origin: &st
             });
         }
 
-        push_batch(client, origin, token, &items).await?;
+        push_batch(remote, &items).await?;
 
         // Remove only what was sent. A newer edit to the same record has a later updated_at and
         // stays queued.
@@ -545,54 +651,57 @@ async fn push_pending(pool: &Pool<Sqlite>, client: &reqwest::Client, origin: &st
     }
 }
 
-/// Where the next pull page starts. The server pages in `(updated_at, kind, key)` order, so the
-/// last row received names the boundary exactly. Using the timestamp alone would skip every row
-/// that shares the boundary's `updated_at`, and a bulk migration gives many rows one timestamp.
+/// Where the next pull page starts. The server pages in `(updated_at, id)` order, so the last
+/// row received names the boundary exactly. Using the timestamp alone would skip every row that
+/// shares the boundary's `updated_at`, and a bulk migration gives many rows one timestamp.
 #[derive(Debug, Clone, PartialEq)]
 struct PullCursor {
     since: i64,
-    after: Option<(String, String)>,
+    after: Option<String>,
 }
 
 /// The cursor after `items`, or an error if a page claims more rows but carries none (the pull
-/// would never advance).
-fn next_cursor(items: &[SyncItem]) -> Result<PullCursor> {
+/// would never advance). Taken from the sealed rows, so a row that fails verification still
+/// moves the cursor past itself.
+fn next_cursor(items: &[SealedItem]) -> Result<PullCursor> {
     let last = items
         .last()
         .ok_or_else(|| PlayerError::Io("Sync page reported more rows but returned none".into()))?;
-    Ok(PullCursor {
-        since: last.updated_at,
-        after: Some((last.kind.clone(), last.key.clone())),
-    })
+    Ok(PullCursor { since: last.updated_at, after: Some(last.id.clone()) })
 }
 
-async fn pull_page(client: &reqwest::Client, origin: &str, token: &str, cursor: &PullCursor) -> Result<PullPage> {
-    let mut request = client
-        .get(format!("{origin}/api/desktop/sync"))
-        .query(&[("since", cursor.since)])
-        .bearer_auth(token);
-    if let Some((kind, key)) = &cursor.after {
-        request = request.query(&[("after_kind", kind.as_str()), ("after_key", key.as_str())]);
+async fn pull_page(remote: &Remote, cursor: &PullCursor) -> Result<PullPage> {
+    let mut request = remote
+        .request(reqwest::Method::GET, "/v1/items")
+        .query(&[("since", cursor.since)]);
+    if let Some(id) = &cursor.after {
+        request = request.query(&[("after_id", id.as_str())]);
     }
-    let response = request.send().await?;
-    check_status(response.status())?;
+    let response = check(request.send().await?).await?;
     Ok(response.json::<PullPage>().await?)
 }
 
-async fn pull_remote(pool: &Pool<Sqlite>, client: &reqwest::Client, origin: &str, token: &str) -> Result<()> {
+/// Pulls and applies every record newer than the saved cursor. Returns how many records failed
+/// verification: they are not applied, and the pull carries on past them.
+async fn pull_remote(pool: &Pool<Sqlite>, remote: &Remote) -> Result<i64> {
     let saved: i64 = get_setting(pool, CURSOR_SETTING)
         .await?
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
     let mut newest = saved;
-    let mut cursor = PullCursor { since: saved.saturating_sub(PULL_OVERLAP_MS), after: None };
+    let mut skipped = 0;
+    // Never below zero: the server rejects a negative `since`, which a first sync would otherwise send.
+    let mut cursor = PullCursor { since: saved.saturating_sub(PULL_OVERLAP_MS).max(0), after: None };
 
     loop {
-        let page = pull_page(client, origin, token, &cursor).await?;
+        let page = pull_page(remote, &cursor).await?;
 
         let mut tx = pool.begin().await.map_err(sql_err)?;
-        for item in &page.items {
-            apply_remote(&mut tx, item).await?;
+        for sealed in &page.items {
+            match remote.keys.open(sealed) {
+                Ok(item) => apply_remote(&mut tx, &item).await?,
+                Err(_) => skipped += 1,
+            }
         }
         tx.commit().await.map_err(sql_err)?;
 
@@ -605,7 +714,8 @@ async fn pull_remote(pool: &Pool<Sqlite>, client: &reqwest::Client, origin: &str
         cursor = next_cursor(&page.items)?;
     }
 
-    set_setting(pool, CURSOR_SETTING, &newest.to_string()).await
+    set_setting(pool, CURSOR_SETTING, &newest.to_string()).await?;
+    Ok(skipped)
 }
 
 pub async fn status(pool: &Pool<Sqlite>) -> Result<SyncStatus> {
@@ -616,25 +726,32 @@ pub async fn status(pool: &Pool<Sqlite>) -> Result<SyncStatus> {
     let last_synced_at = get_setting(pool, LAST_SYNC_SETTING)
         .await?
         .and_then(|value| value.parse().ok());
-    Ok(SyncStatus { pending, last_synced_at })
+    let skipped = get_setting(pool, SKIPPED_SETTING)
+        .await?
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    Ok(SyncStatus { pending, last_synced_at, skipped })
 }
 
-/// Pushes queued changes, then pulls and applies remote ones. Does nothing when signed out.
+/// Pushes queued changes, then pulls and applies remote ones. Does nothing while sync is off.
 pub async fn sync_now(pool: &Pool<Sqlite>) -> Result<SyncStatus> {
-    let _guard = SYNC_LOCK.lock().await;
-    let Some(token) = account::load_app_token()? else {
+    let Some(remote) = crate::sync_keys::remote(pool, &crate::sync_keys::KeyringStore).await? else {
         return status(pool).await;
     };
-    let origin = account::account_origin();
-    let client = account::http_client()?;
+    sync_with(pool, &remote).await
+}
+
+pub(crate) async fn sync_with(pool: &Pool<Sqlite>, remote: &Remote) -> Result<SyncStatus> {
+    let _guard = SYNC_LOCK.lock().await;
 
     if get_setting(pool, SEEDED_SETTING).await?.filter(|value| !value.is_empty()).is_none() {
         queue_all(pool).await?;
         set_setting(pool, SEEDED_SETTING, "1").await?;
     }
 
-    push_pending(pool, &client, &origin, &token).await?;
-    pull_remote(pool, &client, &origin, &token).await?;
+    push_pending(pool, remote).await?;
+    let skipped = pull_remote(pool, remote).await?;
+    set_setting(pool, SKIPPED_SETTING, &skipped.to_string()).await?;
     set_setting(pool, LAST_SYNC_SETTING, &now_ms().to_string()).await?;
     status(pool).await
 }
@@ -675,9 +792,10 @@ pub fn schedule_progress(pool: &'static Pool<Sqlite>) {
 }
 
 /// Syncs at startup and then every few minutes, so changes from another device arrive even
-/// while this one is idle. Does nothing while signed out.
+/// while this one is idle. Does nothing while sync is off.
 pub fn start(pool: &'static Pool<Sqlite>) {
     tokio::spawn(async move {
+        crate::sync_keys::clear_legacy_account_token();
         loop {
             if let Err(error) = sync_now(pool).await {
                 eprintln!("lumen: sync failed: {}", String::from(error));
@@ -687,8 +805,8 @@ pub fn start(pool: &'static Pool<Sqlite>) {
     });
 }
 
-/// Drops this device's sync state when it signs out, so the next account to sign in does not
-/// inherit queued changes from the previous one.
+/// Drops this device's sync state when sync is turned off, so turning it on again (possibly with
+/// another key) does not inherit queued changes or a pull position from the previous group.
 pub async fn forget(pool: &Pool<Sqlite>) -> Result<()> {
     let _guard = SYNC_LOCK.lock().await;
     sqlx::query("DELETE FROM sync_queue")
@@ -697,25 +815,25 @@ pub async fn forget(pool: &Pool<Sqlite>) -> Result<()> {
         .map_err(sql_err)?;
     set_setting(pool, CURSOR_SETTING, "0").await?;
     set_setting(pool, LAST_SYNC_SETTING, "").await?;
+    set_setting(pool, SKIPPED_SETTING, "0").await?;
     set_setting(pool, SEEDED_SETTING, "").await
 }
 
 #[cfg(test)]
 mod cursor_tests {
     use super::*;
-    use serde_json::json;
 
-    fn item(kind: &str, key: &str, updated_at: i64) -> SyncItem {
-        SyncItem { kind: kind.into(), key: key.into(), payload: json!({}), updated_at, deleted: false }
+    fn item(id: &str, updated_at: i64) -> SealedItem {
+        SealedItem { id: id.into(), updated_at, deleted: false, blob: String::new() }
     }
 
     #[test]
     fn the_cursor_names_the_last_row_not_just_its_timestamp() {
         // Every row shares one timestamp: a timestamp-only cursor could not tell them apart.
-        let page = vec![item("favorite", "a", 7), item("favorite", "b", 7), item("favorite", "c", 7)];
+        let page = vec![item("a", 7), item("b", 7), item("c", 7)];
         let cursor = next_cursor(&page).unwrap();
         assert_eq!(cursor.since, 7);
-        assert_eq!(cursor.after, Some(("favorite".to_string(), "c".to_string())));
+        assert_eq!(cursor.after, Some("c".to_string()));
     }
 
     #[test]
