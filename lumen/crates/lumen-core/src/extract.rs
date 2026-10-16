@@ -10,6 +10,7 @@ use crate::netguard;
 use crate::playlist::import::read_capped_body;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::LazyLock;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -281,6 +282,63 @@ pub async fn update_managed_extractor(
     std::fs::rename(&temp, &dest)?;
 
     extractor_status(Some(app_data_dir))
+}
+
+/// How long a resolved stream link is reused. Extracted links expire (hours, not days) and often
+/// carry tokens, so they are never stored in the library; this only covers "extract, then play"
+/// and quick replays, so the page is not resolved twice in a row.
+pub const RESOLVE_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const RESOLVE_CACHE_MAX: usize = 32;
+
+/// A small in-memory cache of resolved links keyed by page URL.
+#[derive(Default)]
+pub struct ResolveCache {
+    entries: HashMap<String, (std::time::Instant, ExtractResponse)>,
+}
+
+impl ResolveCache {
+    pub fn get(&self, page_url: &str, now: std::time::Instant) -> Option<ExtractResponse> {
+        self.entries
+            .get(page_url)
+            .filter(|(stored, _)| now.saturating_duration_since(*stored) < RESOLVE_CACHE_TTL)
+            .map(|(_, response)| response.clone())
+    }
+
+    pub fn put(&mut self, page_url: &str, response: ExtractResponse, now: std::time::Instant) {
+        self.entries
+            .retain(|_, (stored, _)| now.saturating_duration_since(*stored) < RESOLVE_CACHE_TTL);
+        if self.entries.len() >= RESOLVE_CACHE_MAX
+            && let Some(oldest) = self.entries.iter().min_by_key(|(_, (stored, _))| *stored).map(|(key, _)| key.clone())
+        {
+            self.entries.remove(&oldest);
+        }
+        self.entries.insert(page_url.to_string(), (now, response));
+    }
+}
+
+static RESOLVED: LazyLock<std::sync::Mutex<ResolveCache>> = LazyLock::new(Default::default);
+
+/// Remembers a freshly resolved link for the page it came from.
+pub fn remember_resolved(page_url: &str, response: &ExtractResponse) {
+    if let Ok(mut cache) = RESOLVED.lock() {
+        cache.put(page_url, response.clone(), std::time::Instant::now());
+    }
+}
+
+/// Resolves a page URL to a playable stream now, reusing a recent result when there is one.
+pub async fn resolve_stream(
+    page_url: &str,
+    app_data_dir: Option<PathBuf>,
+    allow_lan: bool,
+) -> Result<ExtractResponse> {
+    if let Ok(cache) = RESOLVED.lock()
+        && let Some(hit) = cache.get(page_url, std::time::Instant::now())
+    {
+        return Ok(hit);
+    }
+    let resolved = extract_stream(page_url, app_data_dir, allow_lan).await?;
+    remember_resolved(page_url, &resolved);
+    Ok(resolved)
 }
 
 /// Runs a command with both a time limit and an output byte cap on stdout.
@@ -663,5 +721,29 @@ mod tests {
         assert_eq!(status.source, "managed");
         assert_eq!(status.version.as_deref(), Some("2026.02.04"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolved_links_are_reused_briefly_and_then_dropped() {
+        let mut cache = ResolveCache::default();
+        let start = std::time::Instant::now();
+        let response = ExtractResponse { title: "T".into(), url: "https://cdn.example/v.mp4?sig=abc".into(), audio_url: None, headers: HashMap::new() };
+        assert!(cache.get("https://page.example/watch", start).is_none());
+        cache.put("https://page.example/watch", response.clone(), start);
+        assert_eq!(cache.get("https://page.example/watch", start + Duration::from_secs(60)), Some(response));
+        assert!(cache.get("https://page.example/watch", start + RESOLVE_CACHE_TTL).is_none(), "expired links are not served");
+        assert!(cache.get("https://other.example/", start).is_none());
+    }
+
+    #[test]
+    fn the_resolve_cache_is_bounded() {
+        let mut cache = ResolveCache::default();
+        let start = std::time::Instant::now();
+        let response = ExtractResponse { title: "T".into(), url: "https://cdn.example/v".into(), audio_url: None, headers: HashMap::new() };
+        for index in 0..(RESOLVE_CACHE_MAX + 10) {
+            cache.put(&format!("https://page.example/{index}"), response.clone(), start + Duration::from_millis(index as u64));
+        }
+        assert_eq!(cache.entries.len(), RESOLVE_CACHE_MAX);
+        assert!(cache.get("https://page.example/0", start + Duration::from_secs(1)).is_none(), "the oldest was evicted");
     }
 }

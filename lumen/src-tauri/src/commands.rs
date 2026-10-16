@@ -1,6 +1,6 @@
 use crate::db::*;
 use crate::error::{PlayerError, Result};
-use crate::extract::{self, ExtractResponse, ExtractorStatus};
+use crate::extract::{self, ExtractorStatus};
 use crate::harvest::{self, HarvestResponse};
 use crate::media_tools::{cache_name, prune_cache, run_with_timeout};
 use crate::playback::mpv_ipc::MpvIpcBackend;
@@ -92,6 +92,22 @@ pub async fn play_url(
             .ok_or_else(|| PlayerError::Mpv("mpv did not start".into()))?
     };
 
+    // An entry saved from a page (extract) has no stable stream link: resolve it now. The history
+    // and resume identity stays the entry's own URL, which does not change between plays.
+    let mut headers = headers;
+    let mut audio_url = audio_url;
+    let mut load_url = url.clone();
+    if let Some(page) = match channel_id {
+        Some(id) => extract_origin_for_channel(pool, id).await?,
+        None => None,
+    } {
+        let allow_lan = allow_lan_sources(pool).await;
+        let resolved = extract::resolve_stream(&page, app.path().app_data_dir().ok(), allow_lan).await?;
+        load_url = resolved.url;
+        audio_url = resolved.audio_url;
+        headers = Some(serde_json::to_value(resolved.headers)?);
+    }
+
     let hdrs = headers.as_ref().and_then(|v| {
         v.as_object().map(|obj| {
             obj.iter()
@@ -105,7 +121,7 @@ pub async fn play_url(
         let _ = backend.set_volume(volume).await;
     }
     backend
-        .load(&url, hdrs.as_deref(), audio_url.as_deref())
+        .load(&load_url, hdrs.as_deref(), audio_url.as_deref())
         .await?;
 
     // Check if there is a saved resume position for local files
@@ -383,13 +399,15 @@ pub async fn set_search_providers(
 }
 
 #[tauri::command]
-pub async fn extract_url(url: String, app: AppHandle) -> Result<ExtractResponse> {
+pub async fn extract_url(url: String, app: AppHandle) -> Result<ExtractedEntry> {
     let pool = ensure_db(&app).await?;
     let allow_lan = allow_lan_sources(pool).await;
     let app_dir = app.path().app_data_dir().ok();
-    let extracted = extract::extract_stream(&url, app_dir, allow_lan).await?;
+    // Fail before saving anything when the page cannot be resolved.
+    let extracted = extract::resolve_stream(&url, app_dir, allow_lan).await?;
 
-    // Per PLAN.md §8: "Rust saves as a 1-item playlist, then play_url"
+    // The library entry is the *page*: its stream link expires and often carries a token, so it
+    // is resolved again each time the entry plays (see `play_url`), never stored.
     let now = Utc::now().timestamp();
     let playlist = Playlist {
         id: None,
@@ -399,33 +417,42 @@ pub async fn extract_url(url: String, app: AppHandle) -> Result<ExtractResponse>
         created_at: now,
         updated_at: now,
     };
-    let extra_headers = if extracted.headers.is_empty() {
-        None
-    } else {
-        serde_json::to_string(&extracted.headers).ok()
-    };
-
     let ch = Channel {
         id: None,
         playlist_id: 0,
         name: extracted.title.clone(),
-        url: extracted.url.clone(),
+        url: url.clone(),
         group_title: Some("Extracted".to_string()),
         tvg_id: None,
         tvg_logo: None,
         language: None,
-        extra_headers,
+        extra_headers: None,
         last_ok: Some(now),
         last_error: None,
         is_live: None,
     };
 
     // Source and entry are created together; a failed insert leaves no empty source behind.
-    import_playlist(pool, &playlist, &[ch]).await?;
+    let playlist_id = import_playlist(pool, &playlist, &[ch]).await?;
+    let channel_id: i64 = sqlx::query_scalar("SELECT id FROM channels WHERE playlist_id = ? ORDER BY id LIMIT 1")
+        .bind(playlist_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    // Playback is the caller's job: the UI plays the result right after this returns, so a
+    // Playback is the caller's job: the UI plays the entry right after this returns, so a
     // failure to play reaches the user instead of being dropped here.
-    Ok(extracted)
+    Ok(ExtractedEntry { stream: extracted, channel_id, page_url: url })
+}
+
+/// What `extract_url` returns: the resolved stream (for display) plus the saved library entry to
+/// play. Playing the entry by id resolves the page again, or reuses this result for ten minutes.
+#[derive(serde::Serialize)]
+pub struct ExtractedEntry {
+    #[serde(flatten)]
+    pub stream: extract::ExtractResponse,
+    pub channel_id: i64,
+    pub page_url: String,
 }
 
 #[tauri::command]

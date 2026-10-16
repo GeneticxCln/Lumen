@@ -160,9 +160,13 @@ export interface Settings {
 
 export interface ExtractResponse {
   title: string;
+  /** The resolved stream, for display only. It expires, so it is never what gets saved or played later. */
   url: string;
   audio_url?: string;
   headers: Record<string, string>;
+  /** The library entry saved for the page. Play it by id; the stream is resolved at play time. */
+  channel_id: number;
+  page_url: string;
 }
 
 export interface ExtractorStatus {

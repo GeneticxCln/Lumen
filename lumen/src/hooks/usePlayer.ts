@@ -124,15 +124,15 @@ export function usePlayer() {
   }, [applyStartVolume]);
 
   const playMedia = useCallback(
-    async (url: string, title?: string, headers?: Record<string, string>, startVolume?: number, audioUrl?: string) => {
+    async (url: string, title?: string, headers?: Record<string, string>, startVolume?: number, audioUrl?: string, channelId?: number) => {
       fallbackFromRef.current = null;
-      await playUrl(url, headers, undefined, startVolume, audioUrl);
+      await playUrl(url, headers, channelId, startVolume, audioUrl);
       applyStartVolume(startVolume);
       headersRef.current = headers;
       const label = title || url.split("/").pop() || url;
       setCurrentTitle(label);
       setCurrentUrl(url);
-      setCurrentChannelId(undefined);
+      setCurrentChannelId(channelId);
       setPlayerState((prev) => ({
         ...prev,
         paused: false,

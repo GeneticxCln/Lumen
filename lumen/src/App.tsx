@@ -150,9 +150,9 @@ function App() {
     setBusy(false);
   }
 
-  async function playFile(path: string, name?: string, headers?: Record<string, string>, audioUrl?: string) {
+  async function playFile(path: string, name?: string, headers?: Record<string, string>, audioUrl?: string, channelId?: number) {
     try {
-      await player.playMedia(path, name, headers, preferences.defaultVolume, audioUrl);
+      await player.playMedia(path, name, headers, preferences.defaultVolume, audioUrl, channelId);
       setPlayerOpen(true);
     } catch (error) {
       setNotice(errorMessage(error));
