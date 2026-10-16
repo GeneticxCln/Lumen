@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.quinton.lumen</id>
+  <name>Lumen</name>
+  <summary>Media library and player</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer_name>Lumen Contributors</developer_name>
+  <url type="homepage">https://github.com/GeneticxCln/Lumen</url>
+  <url type="bugtracker">https://github.com/GeneticxCln/Lumen/issues</url>
+  <description>
+    <p>Lumen keeps your own sources in one place: playlists and streams you add, and the video and audio on this computer. It plays them with mpv, remembers where you stopped, follows series, finds subtitles without an account, and can send what is playing to a TV on your network.</p>
+    <p>There are no accounts. Optional sync between your devices is end-to-end encrypted with a key that never leaves them.</p>
+  </description>
+  <launchable type="desktop-id">com.quinton.lumen.desktop</launchable>
+  <provides>
+    <binary>lumen</binary>
+  </provides>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Video</category>
+    <category>Player</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-10-16"/>
+  </releases>
+</component>

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "UI-agnostic media library, playlist, search, TMDB, and sync core for Lumen"
 authors = ["Lumen Contributors"]
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

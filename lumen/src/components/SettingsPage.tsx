@@ -9,13 +9,17 @@ import { ProfileSettings } from "./ProfileSettings";
 import { SyncSettings } from "./SyncSettings";
 import { PlayerPrefsSettings } from "./PlayerPrefsSettings";
 import { OnlineSubtitlesSettings } from "./OnlineSubtitlesSettings";
+import { LanguageSetting } from "./LanguageSetting";
+import { AboutLumen } from "./AboutLumen";
+import { EpisodeAlertsSetting } from "./EpisodeAlertsSetting";
 import { EmbeddedPlayerToggle } from "./EmbeddedPlayerToggle";
 import { LanSourcesToggle } from "./LanSourcesToggle";
+import { t } from "../i18n/index.ts";
 import { MediaShelf } from "./MediaShelf";
 import { Icon } from "./Icon";
 import type { IconName } from "./Icon";
 
-export type SettingsSection = "account" | "sources" | "mylist" | "metadata" | "playback" | "appearance" | "shortcuts";
+export type SettingsSection = "account" | "sources" | "mylist" | "metadata" | "playback" | "appearance" | "shortcuts" | "about";
 
 interface SettingsPageProps {
   preferences: Preferences;
@@ -39,15 +43,27 @@ interface SettingsPageProps {
 
 const posterFrameChoices = POSTER_FRAME_OPTIONS.map((option) => ({ seconds: String(option.seconds), label: option.label }));
 
-const sections: { id: SettingsSection; label: string; description: string; icon: IconName; group: string }[] = [
-  { id: "account", label: "Profiles & sync", description: "Who is watching, and your other devices", icon: "profile", group: "YOU" },
-  { id: "sources", label: "Sources", description: "Manage your connected playlists", icon: "grid", group: "YOUR LIBRARY" },
-  { id: "mylist", label: "My List", description: "Your saved titles, all together", icon: "bookmark", group: "YOUR LIBRARY" },
-  { id: "metadata", label: "Metadata", description: "TMDB posters, genres and years", icon: "film", group: "YOUR LIBRARY" },
-  { id: "playback", label: "Playback", description: "Fine-tune your viewing experience", icon: "play", group: "PREFERENCES" },
-  { id: "appearance", label: "Appearance", description: "Make Lumen feel like you", icon: "palette", group: "PREFERENCES" },
-  { id: "shortcuts", label: "Keyboard shortcuts", description: "Stay in control without a mouse", icon: "keyboard", group: "PREFERENCES" },
-];
+type SettingsGroup = "you" | "library" | "preferences" | "app";
+
+const groupLabels: Record<SettingsGroup, () => string> = {
+  you: () => t("settings.group.you"),
+  library: () => t("settings.group.library"),
+  preferences: () => t("settings.group.preferences"),
+  app: () => t("settings.group.app"),
+};
+
+function buildSections(): { id: SettingsSection; label: string; description: string; icon: IconName; group: SettingsGroup }[] {
+  return [
+    { id: "account", label: t("settings.section.account.label"), description: t("settings.section.account.description"), icon: "profile", group: "you" },
+    { id: "sources", label: t("settings.section.sources.label"), description: t("settings.section.sources.description"), icon: "grid", group: "library" },
+    { id: "mylist", label: t("settings.section.mylist.label"), description: t("settings.section.mylist.description"), icon: "bookmark", group: "library" },
+    { id: "metadata", label: t("settings.section.metadata.label"), description: t("settings.section.metadata.description"), icon: "film", group: "library" },
+    { id: "playback", label: t("settings.section.playback.label"), description: t("settings.section.playback.description"), icon: "play", group: "preferences" },
+    { id: "appearance", label: t("settings.section.appearance.label"), description: t("settings.section.appearance.description"), icon: "palette", group: "preferences" },
+    { id: "shortcuts", label: t("settings.section.shortcuts.label"), description: t("settings.section.shortcuts.description"), icon: "keyboard", group: "preferences" },
+    { id: "about", label: t("settings.section.about.label"), description: t("settings.section.about.description"), icon: "info", group: "app" },
+  ];
+}
 
 export function SettingsPage({
   preferences,
@@ -68,6 +84,7 @@ export function SettingsPage({
   activeProfileId,
   onProfilesChanged,
 }: SettingsPageProps) {
+  const sections = buildSections();
   const preferencesRef = useRef(preferences);
   preferencesRef.current = preferences;
   const [hwdec, setHwdec] = useState("auto-safe");
@@ -116,7 +133,7 @@ export function SettingsPage({
     try {
       const status = await updateExtractor();
       setExtractor(status);
-      setExtractorNotice(`Updated managed yt-dlp (${status.version || status.pinnedVersion}) and verified SHA-256.`);
+      setExtractorNotice(t("settings.extractor.updated", { version: status.version || status.pinnedVersion }));
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
@@ -175,7 +192,7 @@ export function SettingsPage({
       setTmdb(status);
       // Discovery loads TMDB browse titles only when a key exists, so it must reload now.
       onRefresh();
-      setTmdbNotice(status.configured ? "API key saved on this device." : "API key cleared.");
+      setTmdbNotice(status.configured ? t("settings.metadata.keySaved") : t("settings.metadata.keyCleared"));
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
@@ -190,7 +207,7 @@ export function SettingsPage({
     try {
       const result = await enrichTmdb(60, force);
       setTmdb(await tmdbStatus());
-      setTmdbNotice(`Checked ${result.matched + result.skipped} titles, matched ${result.matched} · ${result.remaining} not enriched yet.`);
+      setTmdbNotice(t("settings.metadata.checked", { checked: result.matched + result.skipped, matched: result.matched, remaining: result.remaining }));
       onRefresh();
     } catch (failure) {
       setError(errorMessage(failure));
@@ -206,7 +223,7 @@ export function SettingsPage({
     try {
       const { cleared } = await clearTmdbEnrichment();
       setTmdb(await tmdbStatus());
-      setTmdbNotice(`Cleared metadata from ${cleared} titles.`);
+      setTmdbNotice(t("settings.metadata.cleared", { count: cleared }));
       onRefresh();
     } catch (failure) {
       setError(errorMessage(failure));
@@ -270,9 +287,9 @@ export function SettingsPage({
       } else if (section === "shortcuts") next.keyboardShortcuts = draft.keyboardShortcuts;
       localStorage.setItem("lumen.preferences", JSON.stringify(next));
       onPreferencesChange(next);
-      setNotice(section === "playback" ? "Playback settings saved. Stop playback and play again to apply engine changes." : "Preferences saved on this device.");
+      setNotice(section === "playback" ? t("settings.save.savedPlayback") : t("settings.save.savedPreferences"));
     } catch (failure) {
-      setError(`Could not save all settings: ${errorMessage(failure)}. Retry to complete the save.`);
+      setError(t("settings.save.failed", { reason: errorMessage(failure) }));
     } finally {
       setSaving(false);
     }
@@ -302,13 +319,13 @@ export function SettingsPage({
 
   return (
     <div className="settings-page">
-      <aside className="settings-rail" aria-label="Settings sections">
-        <p className="eyebrow">MAKE IT YOURS</p>
-        <h1 className="settings-rail-title">Settings</h1>
-        <p className="settings-rail-intro">A little fine-tuning. A better experience.</p>
+      <aside className="settings-rail" aria-label={t("settings.sectionsLabel")}>
+        <p className="eyebrow">{t("settings.eyebrow")}</p>
+        <h1 className="settings-rail-title">{t("settings.title")}</h1>
+        <p className="settings-rail-intro">{t("settings.intro")}</p>
         <nav>
           {sections.map((item, index) => (
-            <div key={item.id}>{(index === 0 || sections[index - 1].group !== item.group) && <p className="settings-nav-group">{item.group}</p>}<button
+            <div key={item.id}>{(index === 0 || sections[index - 1].group !== item.group) && <p className="settings-nav-group">{groupLabels[item.group]()}</p>}<button
               key={item.id}
               className={section === item.id ? "active" : ""}
               aria-current={section === item.id ? "true" : undefined}
@@ -324,40 +341,37 @@ export function SettingsPage({
         </nav>
         <div className="settings-rail-actions">
           <button className="primary-button" onClick={onAddSource}>
-            <Icon name="plus" size={17} />Add source
+            <Icon name="plus" size={17} />{t("settings.addSource")}
           </button>
           <button className="secondary-button" onClick={onRefresh}>
-            <Icon name="refresh" size={15} />Refresh library
+            <Icon name="refresh" size={15} />{t("settings.refreshLibrary")}
           </button>
         </div>
-        <div className="settings-device"><Icon name="monitor" size={17} /><div><strong>This device</strong><span>Preferences stay on your computer</span></div></div>
+        <div className="settings-device"><Icon name="monitor" size={17} /><div><strong>{t("settings.device.title")}</strong><span>{t("settings.device.note")}</span></div></div>
       </aside>
 
       <section className="settings-panel" role="region" aria-label={active.label}>
         <header className="settings-panel-head">
-          <div className="settings-breadcrumb">Settings <Icon name="chevron" size={12} /> {active.label}</div>
+          <div className="settings-breadcrumb">{t("settings.title")} <Icon name="chevron" size={12} /> {active.label}</div>
           <div className="settings-title-row"><span className="settings-title-icon"><Icon name={active.icon} size={23} /></span><div><h2>{active.label}</h2><p>{active.description}</p></div></div>
         </header>
 
         {error && (
           <div className="dialog-error" role="alert">
             {error}{" "}
-            <button className="icon-button" onClick={() => setLoadRevision((value) => value + 1)} aria-label="Reload settings">
+            <button className="icon-button" onClick={() => setLoadRevision((value) => value + 1)} aria-label={t("settings.reload")}>
               <Icon name="refresh" size={16} />
             </button>
           </div>
         )}
-        {section === "playback" && engineError && <div className="dialog-error" role="alert">Playback settings could not be loaded: {engineError}<button className="icon-button" aria-label="Retry loading playback settings" onClick={() => setLoadRevision((value) => value + 1)}><Icon name="refresh" size={16} /></button></div>}
+        {section === "playback" && engineError && <div className="dialog-error" role="alert">{t("settings.playbackLoadFailed", { reason: engineError })}<button className="icon-button" aria-label={t("settings.playbackRetry")} onClick={() => setLoadRevision((value) => value + 1)}><Icon name="refresh" size={16} /></button></div>}
         {(section === "sources" || section === "mylist") && loadError && <div className="dialog-error" role="alert">{loadError}</div>}
 
         {section === "account" && (
           <>
             <SyncSettings />
-            <h3 className="settings-section-title">Who is watching</h3>
-            <p>
-              Each profile keeps its own watch history and My List on this device. The library of sources
-              and its channels is shared, and nothing is sent anywhere.
-            </p>
+            <h3 className="settings-section-title">{t("settings.account.whoTitle")}</h3>
+            <p>{t("settings.account.whoNote")}</p>
             <ProfileSettings
               profiles={profiles}
               activeProfileId={activeProfileId}
@@ -371,29 +385,31 @@ export function SettingsPage({
             <LanSourcesToggle />
             <div className="setting-row">
               <div>
-                <label>Stream extractor (yt-dlp)</label>
+                <label>{t("settings.extractor.label")}</label>
                 <p>
                   {extractor?.available
-                    ? `Active (${extractor.source}${extractor.version ? ` · ${extractor.version}` : ""}) · pinned release ${extractor.pinnedVersion}`
-                    : `Not installed · pinned release ${extractor?.pinnedVersion || "2026.02.04"}`}
+                    ? extractor.version
+                      ? t("settings.extractor.activeWithVersion", { source: extractor.source, version: extractor.version, pinned: extractor.pinnedVersion })
+                      : t("settings.extractor.active", { source: extractor.source, pinned: extractor.pinnedVersion })
+                    : t("settings.extractor.notInstalled", { pinned: extractor?.pinnedVersion || "2026.02.04" })}
                 </p>
                 {extractorNotice && <p className="saved-badge" role="status">{extractorNotice}</p>}
               </div>
               <button className="secondary-button" disabled={extractorBusy} onClick={() => void handleUpdateExtractor()}>
-                {extractorBusy ? "Updating…" : "Update extractor"}
+                {extractorBusy ? t("settings.extractor.updating") : t("settings.extractor.update")}
               </button>
             </div>
             <div className="settings-actions settings-actions-top">
               <h3 className="settings-section-title" style={{ margin: 0, flex: 1 }}>
-                Connected sources · {playlists.length}
+                {t("settings.sources.connected", { count: playlists.length })}
               </h3>
               <button className="primary-button" onClick={onAddSource}>
-                <Icon name="plus" size={17} />Add source
+                <Icon name="plus" size={17} />{t("settings.addSource")}
               </button>
             </div>
             {!playlists.length && (
               <p className="muted-note">
-                No sources yet. Add an M3U playlist file, a playlist URL, an extracted page, or a public free-to-air catalog.
+                {t("settings.sources.empty")}
               </p>
             )}
             {playlists.map((source) => (
@@ -401,10 +417,10 @@ export function SettingsPage({
                 <div>
                   <h3>{source.name}</h3>
                   <p>
-                    {source.source} · Added {new Date(source.created_at * 1000).toLocaleDateString()}
+                    {t("settings.sources.added", { source: source.source, date: new Date(source.created_at * 1000).toLocaleDateString() })}
                   </p>
                   {confirmId === source.id && (
-                    <p style={{ marginTop: 8 }}>Remove its channels and saved favorites? Original files stay untouched.</p>
+                    <p style={{ marginTop: 8 }}>{t("settings.sources.removeNote")}</p>
                   )}
                 </div>
                 <div className="extract-buttons">
@@ -425,15 +441,15 @@ export function SettingsPage({
                           }
                         }}
                       >
-                        Confirm removal
+                        {t("settings.sources.confirmRemoval")}
                       </button>
                       <button className="secondary-button" onClick={() => setConfirmId(null)}>
-                        Cancel
+                        {t("common.cancel")}
                       </button>
                     </>
                   ) : (
                     <button className="danger-button" onClick={() => setConfirmId(source.id)}>
-                      Remove
+                      {t("settings.sources.remove")}
                     </button>
                   )}
                 </div>
@@ -444,22 +460,22 @@ export function SettingsPage({
 
         {section === "mylist" && (
           <>
-            <p className="settings-intro">Everything you saved with the + button, in one place.</p>
+            <p className="settings-intro">{t("settings.mylist.intro")}</p>
             {myList.length === 0 ? (
               <div className="empty-state">
                 <div className="empty-symbol">
                   <Icon name="plus" size={30} />
                 </div>
-                <h2>Nothing saved yet.</h2>
-                <p>Use the + on any title to add it to your list.</p>
+                <h2>{t("settings.mylist.emptyTitle")}</h2>
+                <p>{t("settings.mylist.emptyHint")}</p>
                 <button className="primary-button" onClick={onBrowseDiscovery}>
-                  Browse Discovery
+                  {t("settings.mylist.browse")}
                 </button>
               </div>
             ) : (
               <MediaShelf
-                title="My list"
-                subtitle="Saved titles."
+                title={t("settings.mylist.shelfTitle")}
+                subtitle={t("settings.mylist.shelfSubtitle")}
                 channels={myList}
                 favorites={new Set(myList.map((channel) => channel.id))}
                 onPlay={onPlayChannel}
@@ -473,41 +489,35 @@ export function SettingsPage({
 
         {section === "metadata" && (
           <>
-            <h3 className="settings-section-title">Posters, genres and years</h3>
-            <p className="settings-intro">
-              TMDB supplies real posters, genres and release years for the films and series in your library, which is what
-              the Genre and Year categories are built from. Live channels have no TMDB record, so their genre is inferred
-              from the source group and they land under “Year unknown”.
-            </p>
+            <h3 className="settings-section-title">{t("settings.metadata.title")}</h3>
+            <p className="settings-intro">{t("settings.metadata.intro")}</p>
 
             <div className="form-group">
-              <label htmlFor="poster-frame">Local video poster frame</label>
+              <label htmlFor="poster-frame">{t("settings.metadata.posterFrame")}</label>
               <select id="poster-frame" value={posterFrame} onChange={(event) => void savePosterFrame(event.target.value)}>
                 {posterFrameChoices.map((choice) => <option key={choice.seconds} value={choice.seconds}>{choice.label}</option>)}
               </select>
-              <small>
-                The frame shown as the poster for local video files. Posters are regenerated from the new frame the next time they are shown.
-              </small>
+              <small>{t("settings.metadata.posterFrameNote")}</small>
             </div>
 
             <div className="form-group">
-              <label htmlFor="poster-frame-path">Preview frames from a video</label>
+              <label htmlFor="poster-frame-path">{t("settings.metadata.previewFrames")}</label>
               <div className="poster-frame-lookup">
                 <input
                   id="poster-frame-path"
                   type="text"
                   spellCheck={false}
-                  placeholder="Full path to a local video file"
+                  placeholder={t("settings.metadata.framePathPlaceholder")}
                   value={framePath}
                   onChange={(event) => setFramePath(event.target.value)}
                   onKeyDown={(event) => { if (event.key === "Enter") void loadFrameCandidates(); }}
                 />
                 <button type="button" className="secondary-button" disabled={frameCandidatesBusy || !framePath.trim()} onClick={() => void loadFrameCandidates()}>
-                  {frameCandidatesBusy ? "Loading…" : "Show frames"}
+                  {frameCandidatesBusy ? t("common.loading") : t("settings.metadata.showFrames")}
                 </button>
               </div>
               {frameCandidates && (
-                <div className="poster-frame-grid" role="group" aria-label="Poster frame options">
+                <div className="poster-frame-grid" role="group" aria-label={t("settings.metadata.frameOptions")}>
                   {frameCandidates.map((candidate) => {
                     const choice = posterFrameChoices.find((item) => Number(item.seconds) === candidate.seconds);
                     const selected = String(candidate.seconds) === posterFrame;
@@ -520,110 +530,107 @@ export function SettingsPage({
                         disabled={!candidate.image}
                         onClick={() => void savePosterFrame(String(candidate.seconds))}
                       >
-                        {candidate.image ? <img src={candidate.image} alt="" /> : <span className="poster-frame-empty">Past end of video</span>}
-                        <span>{choice?.label ?? `${candidate.seconds} seconds`}</span>
+                        {candidate.image ? <img src={candidate.image} alt="" /> : <span className="poster-frame-empty">{t("settings.metadata.pastEnd")}</span>}
+                        <span>{choice?.label ?? t("settings.metadata.frameSeconds", { seconds: candidate.seconds })}</span>
                       </button>
                     );
                   })}
                 </div>
               )}
-              <small>Pick a frame to save it as the poster. Frames past the end of a short video are unavailable.</small>
+              <small>{t("settings.metadata.framePickNote")}</small>
             </div>
 
             <div className="form-group">
-              <label htmlFor="tmdb-key">TMDB API key</label>
+              <label htmlFor="tmdb-key">{t("settings.metadata.keyLabel")}</label>
               <input
                 id="tmdb-key"
                 type="password"
                 autoComplete="off"
                 spellCheck={false}
-                placeholder={tmdb?.configured ? "Saved on this device — enter a new value to replace it" : "Paste your TMDB v3 API key or v4 read access token"}
+                placeholder={tmdb?.configured ? t("settings.metadata.keyPlaceholderSaved") : t("settings.metadata.keyPlaceholderNew")}
                 value={tmdbKey}
                 onChange={(event) => setTmdbKey(event.target.value)}
               />
               <small>
                 {tmdb?.key_source === "env"
-                  ? "Currently supplied by the LUMEN_TMDB_API_KEY environment variable, which takes precedence over anything saved here."
+                  ? t("settings.metadata.keyNoteEnv")
                   : tmdb?.key_source === "keychain"
-                    ? "A key is saved in this device's OS keychain."
-                    : "Required before any title can be enriched."}{" "}
-                Create one free at developer.themoviedb.org → Settings → API. The key is never written to the library
-                database and is never sent anywhere but TMDB.
+                    ? t("settings.metadata.keyNoteKeychain")
+                    : t("settings.metadata.keyNoteNone")}
               </small>
             </div>
 
             <div className="settings-actions">
               <button className="primary-button" disabled={tmdbBusy || !tmdbKey.trim()} onClick={() => void saveTmdbKey()}>
-                Save key
+                {t("settings.metadata.saveKey")}
               </button>
               {tmdb?.configured && (
                 <button className="secondary-button" disabled={tmdbBusy} onClick={() => void runEnrich(false)}>
-                  {tmdbBusy ? "Working…" : "Enrich library"}
+                  {tmdbBusy ? t("sync.working") : t("settings.metadata.enrich")}
                 </button>
               )}
               {tmdb?.configured && (
                 <button className="secondary-button" disabled={tmdbBusy} onClick={() => void runEnrich(true)}>
-                  Re-check all
+                  {t("settings.metadata.recheck")}
                 </button>
               )}
               {tmdb && tmdb.enriched > 0 && (
                 <button className="secondary-button" disabled={tmdbBusy} onClick={() => void clearTmdbMetadata()}>
-                  Clear metadata
+                  {t("settings.metadata.clear")}
                 </button>
               )}
             </div>
 
             {tmdb && (
               <div className="settings-note">
-                <strong>{tmdb.enriched} of {tmdb.total} titles carry TMDB metadata.</strong>
+                <strong>{t("settings.metadata.coverage", { enriched: tmdb.enriched, total: tmdb.total })}</strong>
                 <br />
-                Every title is attempted once. Unmatched titles are remembered, so a run of “Enrich library” always continues
-                where the last one stopped instead of re-querying your whole library.
+                {t("settings.metadata.coverageNote")}
               </div>
             )}
 
             {tmdbNotice && <p className="saved-badge" role="status">{tmdbNotice}</p>}
 
+            <EpisodeAlertsSetting />
+
             <p className="tmdb-attribution">
-              This product uses the TMDB API but is not endorsed or certified by TMDB.
+              {t("settings.metadata.attribution")}
             </p>
           </>
         )}
 
         {section === "playback" && (
           <>
-            <p className="settings-intro">
-              A great picture. Smooth playback. Tune the native engine for your hardware.
-            </p>
+            <p className="settings-intro">{t("settings.playback.intro")}</p>
             <PlayerPrefsSettings />
             <OnlineSubtitlesSettings />
             <EmbeddedPlayerToggle />
             {loading ? (
-              <p role="status">Loading playback settings…</p>
+              <p role="status">{t("settings.playback.loading")}</p>
             ) : (
               <>
                 <div className="form-group">
-                  <label htmlFor="hwdec">Hardware acceleration</label>
+                  <label htmlFor="hwdec">{t("settings.playback.hardwareDecoding")}</label>
                   <select id="hwdec" value={hwdec} onChange={(event) => setHwdec(event.target.value)}>
-                    <option value="auto-safe">Automatic · safe (recommended)</option>
-                    <option value="auto">Automatic · all supported decoders</option>
-                    <option value="vaapi">VA-API · Intel / AMD</option>
-                    <option value="nvdec">NVDEC · NVIDIA</option>
-                    <option value="no">Software decoding</option>
+                    <option value="auto-safe">{t("settings.playback.hwdecAutoSafe")}</option>
+                    <option value="auto">{t("settings.playback.hwdecAuto")}</option>
+                    <option value="vaapi">{t("settings.playback.hwdecVaapi")}</option>
+                    <option value="nvdec">{t("settings.playback.hwdecNvdec")}</option>
+                    <option value="no">{t("settings.playback.hwdecNo")}</option>
                   </select>
-                  <small>Use software decoding if the picture flickers or your driver is unstable.</small>
+                  <small>{t("settings.playback.hwdecNote")}</small>
                 </div>
                 <div className="form-group">
-                  <label htmlFor="cache">Stream buffering</label>
+                  <label htmlFor="cache">{t("settings.playback.buffering")}</label>
                   <select id="cache" value={cache} onChange={(event) => setCache(event.target.value)}>
-                    <option value="yes">Enabled · smoother live streams</option>
-                    <option value="auto">Automatic</option>
-                    <option value="no">Disabled · lower latency</option>
+                    <option value="yes">{t("settings.playback.cacheYes")}</option>
+                    <option value="auto">{t("settings.playback.cacheAuto")}</option>
+                    <option value="no">{t("settings.playback.cacheNo")}</option>
                   </select>
-                  <small>Buffering helps HLS and IPTV streams on slower connections.</small>
+                  <small>{t("settings.playback.bufferingNote")}</small>
                 </div>
                 <div className="form-group">
-                  <label htmlFor="default-volume">Starting volume · {draft.defaultVolume}%</label>
+                  <label htmlFor="default-volume">{t("settings.playback.startingVolume", { volume: draft.defaultVolume })}</label>
                   <input
                     id="default-volume"
                     type="range"
@@ -635,56 +642,55 @@ export function SettingsPage({
                   />
                 </div>
                 <div className="form-group">
-                  <label htmlFor="mpv-args">Advanced engine arguments</label>
+                  <label htmlFor="mpv-args">{t("settings.playback.engineArgs")}</label>
                   <input
                     id="mpv-args"
                     type="text"
-                    placeholder="--demuxer-max-bytes=50MiB"
+                    placeholder={t("settings.playback.engineArgsPlaceholder")}
                     value={extraArgs}
                     onChange={(event) => setExtraArgs(event.target.value)}
                   />
-                  <small>Space-separated arguments. Avoid quoted values containing spaces; the engine does not parse shell quoting.</small>
+                  <small>{t("settings.playback.engineArgsNote")}</small>
                 </div>
               </>
             )}
             <div className="settings-note">
-              <strong>Native playback, no compromise.</strong>
+              <strong>{t("settings.playback.nativeTitle")}</strong>
               <br />
-              Video plays through native mpv. Hardware decoding and buffering settings apply when the playback engine restarts.
+              {t("settings.playback.nativeNote")}
             </div>
           </>
         )}
 
         {section === "appearance" && (
           <>
-            <fieldset className="theme-fieldset"><legend>Choose your theme</legend><p>A look for every mood. Preview instantly; save to keep it on this device.</p><div className="theme-grid">{themes.map((theme) => <label className="theme-option" key={theme.id} style={{ "--swatch-accent": theme.accent, "--swatch-surface": theme.surface } as CSSProperties}>
-              <input type="radio" name="theme" value={theme.id} checked={draft.theme === theme.id} onChange={() => update("theme", theme.id)} aria-label={`${theme.name} theme`} />
+            <fieldset className="theme-fieldset"><legend>{t("settings.appearance.chooseTheme")}</legend><p>{t("settings.appearance.themeIntro")}</p><div className="theme-grid">{themes.map((theme) => <label className="theme-option" key={theme.id} style={{ "--swatch-accent": theme.accent, "--swatch-surface": theme.surface } as CSSProperties}>
+              <input type="radio" name="theme" value={theme.id} checked={draft.theme === theme.id} onChange={() => update("theme", theme.id)} aria-label={t("settings.appearance.themeAria", { name: theme.name })} />
               <span className="theme-mini" style={{ background: theme.id === "system" ? "linear-gradient(110deg,#f4f5f7 50%,#141414 50%)" : theme.background }} aria-hidden="true"><span className="theme-mini-bars" /><span className="theme-mini-grid"><i /><i /><i /></span></span>
               <span className="theme-option-name">{theme.name}{draft.theme === theme.id ? <Icon name="check" size={15} /> : theme.id === "system" ? <Icon name="monitor" size={14} /> : null}</span><span className="theme-option-desc">{theme.description}</span>
             </label>)}</div></fieldset>
-            <p className="settings-preferences-label">BROWSING & ACCESSIBILITY</p>
-            {toggle("compactCards", "Compact shelves", "Fit more titles into every row.")}
-            {toggle("reduceMotion", "Reduce motion", "Disable animations and use instant shelf scrolling.")}
-            {toggle("personalizedRows", "Personalized discovery", "Recommend titles from saved favorites and recently watched categories. No data leaves your device.")}
-            {toggle("hideUnavailable", "Hide unavailable streams", "Hide titles whose most recent stream check failed. Unchecked streams remain visible.")}
+            <LanguageSetting />
+            <p className="settings-preferences-label">{t("settings.appearance.browsingLabel")}</p>
+            {toggle("compactCards", t("settings.appearance.compactLabel"), t("settings.appearance.compactDescription"))}
+            {toggle("reduceMotion", t("settings.appearance.reduceMotionLabel"), t("settings.appearance.reduceMotionDescription"))}
+            {toggle("personalizedRows", t("settings.appearance.personalizedLabel"), t("settings.appearance.personalizedDescription"))}
+            {toggle("hideUnavailable", t("settings.appearance.hideUnavailableLabel"), t("settings.appearance.hideUnavailableDescription"))}
           </>
         )}
 
         {section === "shortcuts" && (
           <>
-            <h3 className="settings-section-title">Less clicking. More watching.</h3>
-            <p>
-              Playback shortcuts work while media is active. They stay out of the way while typing, using buttons, or editing a dialog.
-            </p>
-            {toggle("keyboardShortcuts", "Playback keyboard shortcuts", "Control playback from the main Lumen window.")}
+            <h3 className="settings-section-title">{t("settings.shortcuts.title")}</h3>
+            <p>{t("settings.shortcuts.intro")}</p>
+            {toggle("keyboardShortcuts", t("settings.shortcuts.toggleLabel"), t("settings.shortcuts.toggleDescription"))}
             <div className="shortcut-grid">
               {[
-                ["Play / pause", "Space"],
-                ["Seek 10 seconds", "← / →"],
-                ["Mute / unmute", "M"],
-                ["Volume ±5%", "9 / 0"],
-                ["App fullscreen", "F"],
-                ["Close dialog", "Esc"],
+                [t("settings.shortcuts.playPause"), t("settings.shortcuts.keySpace")],
+                [t("settings.shortcuts.seek"), "← / →"],
+                [t("settings.shortcuts.mute"), "M"],
+                [t("settings.shortcuts.volume"), "9 / 0"],
+                [t("settings.shortcuts.fullscreen"), "F"],
+                [t("settings.shortcuts.closeDialog"), t("settings.shortcuts.keyEsc")],
               ].map(([label, key]) => (
                 <div key={label}>
                   <span>{label}</span>
@@ -695,12 +701,14 @@ export function SettingsPage({
           </>
         )}
 
+        {section === "about" && <AboutLumen />}
+
         {(section === "playback" || section === "appearance" || section === "shortcuts") && (
           <div className="settings-actions">
-            <span className={`settings-save-state ${draftDirty ? "dirty" : ""}`}><Icon name={draftDirty ? "info" : "check"} size={14} />{draftDirty ? "Unsaved changes" : "Up to date"}</span>
-            <button className="secondary-button" disabled={saving || !draftDirty} onClick={() => { if (section === "playback") { setHwdec(savedEngine.hwdec); setCache(savedEngine.cache); setExtraArgs(savedEngine.extraArgs); setDraft((previous) => ({ ...previous, defaultVolume: preferences.defaultVolume })); } else if (section === "appearance") { setDraft((previous) => ({ ...previous, theme: preferences.theme, compactCards: preferences.compactCards, reduceMotion: preferences.reduceMotion, personalizedRows: preferences.personalizedRows, hideUnavailable: preferences.hideUnavailable })); } else setDraft((previous) => ({ ...previous, keyboardShortcuts: preferences.keyboardShortcuts })); setNotice(null); }}>Discard</button>
+            <span className={`settings-save-state ${draftDirty ? "dirty" : ""}`}><Icon name={draftDirty ? "info" : "check"} size={14} />{draftDirty ? t("settings.save.dirty") : t("settings.save.clean")}</span>
+            <button className="secondary-button" disabled={saving || !draftDirty} onClick={() => { if (section === "playback") { setHwdec(savedEngine.hwdec); setCache(savedEngine.cache); setExtraArgs(savedEngine.extraArgs); setDraft((previous) => ({ ...previous, defaultVolume: preferences.defaultVolume })); } else if (section === "appearance") { setDraft((previous) => ({ ...previous, theme: preferences.theme, compactCards: preferences.compactCards, reduceMotion: preferences.reduceMotion, personalizedRows: preferences.personalizedRows, hideUnavailable: preferences.hideUnavailable })); } else setDraft((previous) => ({ ...previous, keyboardShortcuts: preferences.keyboardShortcuts })); setNotice(null); }}>{t("settings.save.discard")}</button>
             <button onClick={() => void save()} disabled={saving || !draftDirty || (section === "playback" && (loading || Boolean(engineError)))}>
-              {saving ? "Saving…" : "Save changes"}
+              {saving ? t("settings.save.saving") : t("settings.save.save")}
             </button>
             <button
               className="secondary-button"
@@ -708,10 +716,10 @@ export function SettingsPage({
                 if (section === "playback") { setHwdec("auto-safe"); setCache("yes"); setExtraArgs(""); setDraft((previous) => ({ ...previous, defaultVolume: defaultPreferences.defaultVolume })); }
                 else if (section === "appearance") setDraft((previous) => ({ ...previous, theme: defaultPreferences.theme, compactCards: defaultPreferences.compactCards, reduceMotion: defaultPreferences.reduceMotion, personalizedRows: defaultPreferences.personalizedRows, hideUnavailable: defaultPreferences.hideUnavailable }));
                 else setDraft((previous) => ({ ...previous, keyboardShortcuts: defaultPreferences.keyboardShortcuts }));
-                setNotice("Defaults restored in the form. Save changes to apply.");
+                setNotice(t("settings.save.restored"));
               }}
             >
-              Restore defaults
+              {t("settings.save.restore")}
             </button>
           </div>
         )}

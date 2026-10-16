@@ -1,11 +1,13 @@
+import { t, tn } from "../i18n/index.ts";
 import type { BrowseTitle, Channel, HistoryEntry } from "./types.ts";
 
+// Names and descriptions are read when the page draws them, so they follow the language in use.
 export const themes = [
-  { id: "cinema", name: "Cinema", description: "The original. Deep charcoal, signature red.", background: "#141414", surface: "#202023", accent: "#e50914", text: "#f5f5f1" },
-  { id: "midnight", name: "Midnight", description: "Cool navy with a soft violet glow.", background: "#101421", surface: "#1b2235", accent: "#b19aff", text: "#f0f2ff" },
-  { id: "forest", name: "Forest", description: "Quiet greens. A warmer kind of dark.", background: "#101a17", surface: "#1d2b24", accent: "#81d5ad", text: "#eef6f0" },
-  { id: "light", name: "Daylight", description: "Clean, bright, and easy on the eyes.", background: "#f4f5f7", surface: "#ffffff", accent: "#bf1232", text: "#1e2531" },
-  { id: "system", name: "System", description: "Follow your device’s light or dark mode.", background: "#e9ecf1", surface: "#202023", accent: "#e50914", text: "#1e2531" },
+  { id: "cinema", get name() { return t("lib.theme.cinema.name"); }, get description() { return t("lib.theme.cinema.description"); }, background: "#141414", surface: "#202023", accent: "#e50914", text: "#f5f5f1" },
+  { id: "midnight", get name() { return t("lib.theme.midnight.name"); }, get description() { return t("lib.theme.midnight.description"); }, background: "#101421", surface: "#1b2235", accent: "#b19aff", text: "#f0f2ff" },
+  { id: "forest", get name() { return t("lib.theme.forest.name"); }, get description() { return t("lib.theme.forest.description"); }, background: "#101a17", surface: "#1d2b24", accent: "#81d5ad", text: "#eef6f0" },
+  { id: "light", get name() { return t("lib.theme.light.name"); }, get description() { return t("lib.theme.light.description"); }, background: "#f4f5f7", surface: "#ffffff", accent: "#bf1232", text: "#1e2531" },
+  { id: "system", get name() { return t("lib.theme.system.name"); }, get description() { return t("lib.theme.system.description"); }, background: "#e9ecf1", surface: "#202023", accent: "#e50914", text: "#1e2531" },
 ] as const;
 export type Theme = typeof themes[number]["id"];
 export function resolveTheme(theme: Theme, prefersDark: boolean): Exclude<Theme, "system"> {
@@ -274,7 +276,7 @@ function facetList(
 ): FacetValue[] {
   const values = [...counts.entries()].map(([value, count]) => ({ value, label: label(value), count }));
   values.sort(compare || ((a, b) => b.count - a.count || a.label.localeCompare(b.label)));
-  return [{ value: ALL_FACETS, label: "All", count: total }, ...values];
+  return [{ value: ALL_FACETS, label: t("lib.facet.all"), count: total }, ...values];
 }
 
 /**
@@ -304,8 +306,8 @@ export function buildFacets(channels: Channel[], selection: FacetSelection): Fac
     return year === null ? [UNKNOWN_FACET] : [String(year)];
   });
 
-  const labelGenre = (value: string) => (value === UNKNOWN_FACET ? "Genre unknown" : value);
-  const labelYear = (value: string) => (value === UNKNOWN_FACET ? "Year unknown" : value);
+  const labelGenre = (value: string) => (value === UNKNOWN_FACET ? t("lib.facet.genreUnknown") : value);
+  const labelYear = (value: string) => (value === UNKNOWN_FACET ? t("lib.facet.yearUnknown") : value);
 
   return {
     groups: facetList(groups.counts, groups.total, groupLabel),
@@ -356,14 +358,14 @@ export function catalogShelves(channels: Channel[]): CatalogShelf[] {
 
   const topRated = catalog.filter((channel) => (channel.rating ?? 0) > 0).sort(byRating);
   if (topRated.length) {
-    shelves.push({ id: "top-rated", title: "Top rated", subtitle: "Highest TMDB ratings in your library.", channels: topRated.slice(0, SHELF_SIZE) });
+    shelves.push({ id: "top-rated", title: t("lib.shelf.topRated.title"), subtitle: t("lib.shelf.topRated.subtitle"), channels: topRated.slice(0, SHELF_SIZE) });
   }
 
   const recent = catalog
     .filter((channel) => yearOf(channel) !== null)
     .sort((a, b) => (b.release_year ?? 0) - (a.release_year ?? 0) || byRating(a, b));
   if (recent.length) {
-    shelves.push({ id: "recent", title: "Recently released", subtitle: "Newest TMDB release years first.", channels: recent.slice(0, SHELF_SIZE) });
+    shelves.push({ id: "recent", title: t("lib.shelf.recent.title"), subtitle: t("lib.shelf.recent.subtitle"), channels: recent.slice(0, SHELF_SIZE) });
   }
 
   const byGenre = new Map<string, Channel[]>();
@@ -379,7 +381,7 @@ export function catalogShelves(channels: Channel[]): CatalogShelf[] {
     .map(([genre, titles]) => ({
       id: `genre-${genre}`,
       title: genre,
-      subtitle: `${titles.length} ${titles.length === 1 ? "title" : "titles"} with this TMDB genre.`,
+      subtitle: tn("lib.shelf.genre", titles.length),
       channels: [...titles].sort(byRating).slice(0, SHELF_SIZE),
     }));
 
@@ -397,5 +399,5 @@ export function browseCaption(title: BrowseTitle): string {
     typeof title.rating === "number" && title.rating > 0 ? `★ ${title.rating.toFixed(1)}` : null,
     ...genres,
   ].filter((part): part is string => part !== null);
-  return parts.length ? parts.join(" · ") : "On TMDB";
+  return parts.length ? parts.join(" · ") : t("lib.onTmdb");
 }

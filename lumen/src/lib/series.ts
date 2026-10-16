@@ -1,4 +1,5 @@
 import type { Channel, HistoryEntry } from "./types.ts";
+import { currentLocale, t } from "../i18n/index.ts";
 import { episodeInfo } from "./episodes.ts";
 
 /** A watched mark set by hand. It overrides what history says. */
@@ -135,14 +136,21 @@ export interface UpcomingLabel {
 export function describeUpcoming(item: UpcomingSeries, today: string): UpcomingLabel | null {
   if (item.nextAirDate && item.nextAirDate >= today) {
     const days = daysBetween(today, item.nextAirDate);
-    const when = days === 0 ? "airs today" : days === 1 ? "airs tomorrow" : days < 7 ? `airs in ${days} days` : `airs ${new Date(`${item.nextAirDate}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`;
-    return { kind: "upcoming", text: `${code(item.nextSeason, item.nextEpisode)} ${when}`.trim() };
+    const episode = code(item.nextSeason, item.nextEpisode);
+    const text = days === 0 ? t("lib.upcoming.today", { code: episode })
+      : days === 1 ? t("lib.upcoming.tomorrow", { code: episode })
+      : days < 7 ? t("lib.upcoming.inDays", { code: episode, days })
+      : t("lib.upcoming.on", { code: episode, date: new Date(`${item.nextAirDate}T00:00:00Z`).toLocaleDateString(currentLocale(), { month: "short", day: "numeric", timeZone: "UTC" }) });
+    return { kind: "upcoming", text: text.trim() };
   }
   if (item.lastAirDate && item.lastAirDate <= today) {
     const days = daysBetween(item.lastAirDate, today);
     if (days > 14) return null;
-    const when = days === 0 ? "aired today" : days === 1 ? "aired yesterday" : `aired ${days} days ago`;
-    return { kind: "aired", text: `${code(item.lastSeason, item.lastEpisode)} ${when}`.trim() };
+    const episode = code(item.lastSeason, item.lastEpisode);
+    const text = days === 0 ? t("lib.aired.today", { code: episode })
+      : days === 1 ? t("lib.aired.yesterday", { code: episode })
+      : t("lib.aired.daysAgo", { code: episode, days });
+    return { kind: "aired", text: text.trim() };
   }
   return null;
 }

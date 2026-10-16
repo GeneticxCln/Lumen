@@ -7,6 +7,7 @@ import {
   HistoryEntry,
   errorMessage,
 } from "../lib/tauri";
+import { t } from "../i18n/index.ts";
 
 interface LocalBrowserProps {
   onPlayFile: (path: string, name?: string) => void | Promise<void>;
@@ -51,7 +52,7 @@ export function LocalBrowser({ onPlayFile, onPlaylistImported }: LocalBrowserPro
         setCurrentPath(parent);
       }
     } catch (failure: unknown) {
-      setError(errorMessage(failure) || "Failed to read directory");
+      setError(errorMessage(failure) || t("browser.readFailed"));
     } finally {
       setLoading(false);
     }
@@ -62,7 +63,7 @@ export function LocalBrowser({ onPlayFile, onPlaylistImported }: LocalBrowserPro
       const h = await getHistory(10);
       setHistory(h);
     } catch (failure) {
-      setError(`Could not load history: ${errorMessage(failure)}`);
+      setError(t("browser.historyFailed", { reason: errorMessage(failure) }));
     }
   }, []);
 
@@ -88,7 +89,7 @@ export function LocalBrowser({ onPlayFile, onPlaylistImported }: LocalBrowserPro
         await importPlaylistFile(entry.path);
         onPlaylistImported?.();
       } catch (failure: unknown) {
-        setError(errorMessage(failure) || "Failed to import playlist");
+        setError(errorMessage(failure) || t("browser.importFailed"));
       }
     } else {
       try {
@@ -103,16 +104,16 @@ export function LocalBrowser({ onPlayFile, onPlaylistImported }: LocalBrowserPro
   return (
     <div className="local-browser">
       <div className="local-path-bar">
-        <button type="button" onClick={() => browse("")} title="Home directory">
-          Home
+        <button type="button" onClick={() => browse("")} title={t("browser.homeTitle")}>
+          {t("browser.home")}
         </button>
         <button
           type="button"
           onClick={navigateUp}
           disabled={!currentPath || currentPath === "/"}
-          title="Parent directory"
+          title={t("browser.parentTitle")}
         >
-          ↑ Up
+          {t("browser.up")}
         </button>
         <input
           value={currentPath}
@@ -120,22 +121,22 @@ export function LocalBrowser({ onPlayFile, onPlaylistImported }: LocalBrowserPro
           onKeyDown={(e) => {
             if (e.key === "Enter") browse(currentPath);
           }}
-          aria-label="Local folder path"
-          placeholder="/home/user/Videos"
+          aria-label={t("browser.pathLabel")}
+          placeholder={t("browser.pathPlaceholder")}
         />
         <button type="button" onClick={() => browse(currentPath)}>
-          Go
+          {t("browser.go")}
         </button>
       </div>
 
       {error && <div className="dialog-error">{error}</div>}
 
       {loading ? (
-        <div className="loading">Reading folder...</div>
+        <div className="loading">{t("browser.reading")}</div>
       ) : (
         <div className="local-entries-list">
           {entries.length === 0 ? (
-            <div className="empty-channels">No media files or folders in this directory.</div>
+            <div className="empty-channels">{t("browser.empty")}</div>
           ) : (
             entries.map((entry) => (
               <button
@@ -144,7 +145,7 @@ export function LocalBrowser({ onPlayFile, onPlaylistImported }: LocalBrowserPro
                 className="local-entry-item"
                 onClick={() => handleEntryClick(entry)}
               >
-                <span className="local-entry-icon">{entry.is_dir ? "[DIR]" : "▶"}</span>
+                <span className="local-entry-icon">{entry.is_dir ? t("browser.dirIcon") : "▶"}</span>
                 <span className="local-entry-name">{entry.name}</span>
                 {!entry.is_dir && entry.size !== undefined && (
                   <span className="local-entry-size">{formatFileSize(entry.size)}</span>
@@ -157,7 +158,7 @@ export function LocalBrowser({ onPlayFile, onPlaylistImported }: LocalBrowserPro
 
       {history.length > 0 && (
         <div className="recent-history">
-          <h4>Recently Played (Resume Supported)</h4>
+          <h4>{t("browser.recent")}</h4>
           <div className="history-items">
             {history.slice(0, 5).map((item) => {
               const label = item.path.split("/").pop() || item.path;

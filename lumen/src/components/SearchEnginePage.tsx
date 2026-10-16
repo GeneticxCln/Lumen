@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Icon } from "./Icon";
 import { MediaShelf } from "./MediaShelf";
 import { errorMessage, getSearchProviders, getSettings, searchEngine, setSearchProviders, setSetting } from "../lib/tauri";
 import { matchesLanguage } from "../lib/language";
+import { t, tRich } from "../i18n/index.ts";
+import { Rich } from "../i18n/Rich.tsx";
 import type { Channel, SearchProviderConfig, SearchResponse } from "../lib/types";
 
 interface SearchEnginePageProps {
@@ -24,22 +26,22 @@ function configToJson(provider: SearchProviderConfig): string {
 const SEARCH_LANGUAGE_SETTING = "search_preferred_language";
 const SEARCH_HIDE_OTHER_LANGUAGES_SETTING = "search_hide_other_languages";
 
-const PREFERRED_LANGUAGES: Array<{ code: string; label: string }> = [
-  { code: "en", label: "English" },
-  { code: "fr", label: "French" },
-  { code: "de", label: "German" },
-  { code: "es", label: "Spanish" },
-  { code: "it", label: "Italian" },
-  { code: "pt", label: "Portuguese" },
-  { code: "nl", label: "Dutch" },
-  { code: "ru", label: "Russian" },
-  { code: "tr", label: "Turkish" },
-  { code: "ar", label: "Arabic" },
-  { code: "hi", label: "Hindi" },
-  { code: "ja", label: "Japanese" },
-  { code: "ko", label: "Korean" },
-  { code: "zh", label: "Chinese" },
-];
+const PREFERRED_LANGUAGES = [
+  { code: "en", label: "searchEngine.language.en" },
+  { code: "fr", label: "searchEngine.language.fr" },
+  { code: "de", label: "searchEngine.language.de" },
+  { code: "es", label: "searchEngine.language.es" },
+  { code: "it", label: "searchEngine.language.it" },
+  { code: "pt", label: "searchEngine.language.pt" },
+  { code: "nl", label: "searchEngine.language.nl" },
+  { code: "ru", label: "searchEngine.language.ru" },
+  { code: "tr", label: "searchEngine.language.tr" },
+  { code: "ar", label: "searchEngine.language.ar" },
+  { code: "hi", label: "searchEngine.language.hi" },
+  { code: "ja", label: "searchEngine.language.ja" },
+  { code: "ko", label: "searchEngine.language.ko" },
+  { code: "zh", label: "searchEngine.language.zh" },
+] as const;
 
 export function SearchEnginePage({ query, favorites, compact, onPlay, onPlayExternal, onDetails, onFavorite, onRefresh }: SearchEnginePageProps) {
   const [response, setResponse] = useState<SearchResponse | null>(null);
@@ -94,18 +96,18 @@ export function SearchEnginePage({ query, favorites, compact, onPlay, onPlayExte
     setSaving(true); setError(null); setNotice(null);
     try {
       const parsed = draft.trim() ? JSON.parse(`[${draft.replace(/}\s*\n+\s*{/g, "},{")}]`) : [];
-      if (!Array.isArray(parsed)) throw new Error("Providers must be one JSON object per block.");
-      if (parsed.length > 12) throw new Error("At most 12 external providers can be enabled.");
+      if (!Array.isArray(parsed)) throw new Error(t("searchEngine.error.notList"));
+      if (parsed.length > 12) throw new Error(t("searchEngine.error.tooMany"));
       for (const provider of parsed) {
-        if (!provider || typeof provider !== "object" || Array.isArray(provider)) throw new Error("Each provider must be a JSON object.");
+        if (!provider || typeof provider !== "object" || Array.isArray(provider)) throw new Error(t("searchEngine.error.notObject"));
       }
       const { providers: savedProviders } = await setSearchProviders(parsed);
       setProviders(savedProviders);
       setDraft(savedProviders.map(configToJson).join("\n\n"));
-      setNotice("Provider settings saved on this device.");
+      setNotice(t("searchEngine.saved"));
       setResponse(null);
     } catch (failure) {
-      setError(failure instanceof SyntaxError ? "Check the provider JSON syntax. Separate provider objects with a blank line." : errorMessage(failure));
+      setError(failure instanceof SyntaxError ? t("searchEngine.error.syntax") : errorMessage(failure));
     } finally { setSaving(false); }
   };
 
@@ -116,45 +118,50 @@ export function SearchEnginePage({ query, favorites, compact, onPlay, onPlayExte
     group_title: result.group_title || result.providers.join(" · "),
     extra_headers: JSON.stringify(result.headers || {}),
     last_ok: result.available ? Math.floor(Date.now() / 1000) : undefined,
-    last_error: result.available === false ? (result.status ? `HTTP ${result.status}` : "Unavailable") : undefined,
+    last_error: result.available === false ? (result.status ? t("searchEngine.httpStatus", { status: result.status }) : t("searchEngine.unavailable")) : undefined,
     tmdb_type: result.media_type === "series" ? "tv" : result.media_type === "movie" ? "movie" : undefined,
     release_year: result.year || undefined,
   }));
 
+  const summaryParts = (searched: string) => {
+    const values = { count: visible.length, query: searched };
+    return hiddenCount > 0 ? tRich("searchEngine.summaryHidden", { ...values, hidden: hiddenCount }) : tRich("searchEngine.summary", values);
+  };
+
   return <div className="engine-search-page">
     <section className="settings-panel search-engine-panel">
       <header className="settings-panel-head">
-        <div className="settings-breadcrumb">Lumen <Icon name="chevron" size={12} /> Search engine</div>
-        <div className="settings-title-row"><span className="settings-title-icon"><Icon name="search" size={23} /></span><div><h2>Search engine</h2><p>Search your library and configured JSON providers.</p></div></div>
+        <div className="settings-breadcrumb">{t("searchEngine.breadcrumbApp")} <Icon name="chevron" size={12} /> {t("searchEngine.title")}</div>
+        <div className="settings-title-row"><span className="settings-title-icon"><Icon name="search" size={23} /></span><div><h2>{t("searchEngine.title")}</h2><p>{t("searchEngine.subtitle")}</p></div></div>
       </header>
-      <p className="settings-intro">External providers are user-configured JSON endpoints. Lumen sends <code>?q=your search</code> and maps the JSON fields you specify. Search the endpoint’s own terms and follow its rules.</p>
+      <p className="settings-intro"><Rich id="searchEngine.intro" tags={{ code: (text) => <code>{text}</code> }} /></p>
       <div className="search-provider-list">
-        <div className="settings-source"><div><h3>My library</h3><p>Built in · searches the playlists you added</p></div><span className="match-label">Always on</span></div>
-        {providers.map((provider) => <div className="settings-source" key={provider.id}><div><h3>{provider.name}</h3><p>{provider.endpoint}</p></div><span className="match-label">JSON</span></div>)}
+        <div className="settings-source"><div><h3>{t("searchEngine.library.name")}</h3><p>{t("searchEngine.library.note")}</p></div><span className="match-label">{t("searchEngine.library.alwaysOn")}</span></div>
+        {providers.map((provider) => <div className="settings-source" key={provider.id}><div><h3>{provider.name}</h3><p>{provider.endpoint}</p></div><span className="match-label">{t("searchEngine.jsonBadge")}</span></div>)}
       </div>
       <div className="form-group">
-        <label htmlFor="search-providers">External providers · one JSON object per block</label>
-        <textarea id="search-providers" rows={12} spellCheck={false} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={'{\n  "id": "catalog",\n  "name": "My catalog",\n  "endpoint": "https://example.org/search",\n  "token": "optional bearer token",\n  "results_path": "results",\n  "title_field": "title",\n  "url_field": "url",\n  "aliases_field": "aliases",\n  "year_field": "year",\n  "quality_field": "quality",\n  "language_field": "language"\n}'} />
-        <small>Provider settings are saved on this device. Tokens are kept in the OS credential store, masked here, and preserved when omitted; enter an empty token string to clear one. Tokens are sent only to the provider endpoint, never returned in the provider list. JSON data must have an array at results_path; each item must have a title and playable HTTP(S) URL.</small>
+        <label htmlFor="search-providers">{t("searchEngine.providersLabel")}</label>
+        <textarea id="search-providers" rows={12} spellCheck={false} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={t("searchEngine.providersExample", { open: "{", close: "}" })} />
+        <small>{t("searchEngine.providersHelp")}</small>
       </div>
       {error && <div className="dialog-error" role="alert">{error}</div>}
       {notice && <p className="saved-badge" role="status">{notice}</p>}
-      <div className="settings-actions"><button className="primary-button" disabled={saving} onClick={() => void saveProviders()}>{saving ? "Saving…" : "Save providers"}</button></div>
+      <div className="settings-actions"><button className="primary-button" disabled={saving} onClick={() => void saveProviders()}>{saving ? t("searchEngine.saving") : t("searchEngine.save")}</button></div>
     </section>
 
     <div className="browse-toolbar search-filters">
       <div className="form-group">
-        <label htmlFor="search-language">Preferred language</label>
+        <label htmlFor="search-language">{t("searchEngine.language.label")}</label>
         <select id="search-language" value={language} onChange={(event) => {
           const next = event.target.value;
           setLanguage(next);
           setError(null);
           setSetting(SEARCH_LANGUAGE_SETTING, next).catch((failure) => setError(errorMessage(failure)));
         }}>
-          <option value="">Any language</option>
-          {PREFERRED_LANGUAGES.map((option) => <option key={option.code} value={option.code}>{option.label}</option>)}
+          <option value="">{t("searchEngine.language.any")}</option>
+          {PREFERRED_LANGUAGES.map((option) => <option key={option.code} value={option.code}>{t(option.label)}</option>)}
         </select>
-        <small>{hideOtherLanguages && language ? "Results in other languages are hidden. Items with no language label always show." : "Matching results rank first. Other languages still appear."}</small>
+        <small>{hideOtherLanguages && language ? t("searchEngine.language.hiddenNote") : t("searchEngine.language.rankNote")}</small>
       </div>
       <label className="search-toggle">
         <input type="checkbox" checked={hideOtherLanguages} disabled={!language} onChange={(event) => {
@@ -163,21 +170,21 @@ export function SearchEnginePage({ query, favorites, compact, onPlay, onPlayExte
           setError(null);
           setSetting(SEARCH_HIDE_OTHER_LANGUAGES_SETTING, hide ? "true" : "false").catch((failure) => setError(errorMessage(failure)));
         }} />
-        Hide other languages
+        {t("searchEngine.hideOther")}
       </label>
     </div>
 
     {query.trim().length < 2
-      ? <div className="empty-state"><div className="empty-symbol"><Icon name="search" size={32} /></div><h2>Search your library and providers.</h2><p>Type at least two characters in the search bar. Manage external provider endpoints above.</p></div>
+      ? <div className="empty-state"><div className="empty-symbol"><Icon name="search" size={32} /></div><h2>{t("searchEngine.prompt.title")}</h2><p>{t("searchEngine.prompt.body")}</p></div>
       : busy && !response
-        ? <p className="loading" role="status">Searching providers…</p>
+        ? <p className="loading" role="status">{t("searchEngine.searching")}</p>
         : response && <>
-          <div className="browse-toolbar"><p className="browse-summary" role="status"><strong>{visible.length}</strong> results for “{response.query}”{hiddenCount > 0 ? ` · ${hiddenCount} hidden as other languages` : ""}</p></div>
-          {response.providers.map((provider) => <p className="muted-note" key={provider.id} role="status">{provider.name}: {provider.status === "ok" ? `${provider.count} results` : `${provider.status} · ${provider.error || "Provider unavailable"}`}</p>)}
-          {channels.length > 0 ? <MediaShelf title="From your library" subtitle="Playable matches from sources on this device." channels={channels} favorites={favorites} onPlay={onPlay} onDetails={onDetails} onFavorite={onFavorite} compact={compact} /> : null}
-          {visible.filter((result) => result.channel_id === undefined).length > 0 && <section className="search-remote-results" aria-label="External search results"><h2>External provider results</h2>{visible.filter((result) => result.channel_id === undefined).map((result) => <article className="settings-source" key={result.id}><div><h3>{result.title}{result.year ? ` (${result.year})` : ""}</h3><p>{result.providers.join(" · ")} · {[result.quality, result.language, result.content_type, result.available === false ? "Unavailable" : result.available ? "Available" : "Not checked"].filter(Boolean).join(" · ")}</p><p className="muted-note">{result.url}</p></div><button className="secondary-button" disabled={!result.url} onClick={() => onPlayExternal(result.url, result.title, result.headers || {})}>Play</button></article>)}</section>}
-          {!visible.length && <div className="empty-state"><h2>No matches for “{response.query}”.</h2><p>{hiddenCount > 0 ? `${hiddenCount} results are in other languages. Turn off “Hide other languages” to see them.` : "Check provider status above or try another title."}</p></div>}
+          <div className="browse-toolbar"><p className="browse-summary" role="status">{summaryParts(response.query).map((part, index) => part.tag === "strong" ? <strong key={index}>{part.text}</strong> : <Fragment key={index}>{part.text}</Fragment>)}</p></div>
+          {response.providers.map((provider) => <p className="muted-note" key={provider.id} role="status">{provider.status === "ok" ? t("searchEngine.providerOk", { name: provider.name, count: provider.count }) : t("searchEngine.providerProblem", { name: provider.name, status: provider.status, error: provider.error || t("searchEngine.providerUnavailable") })}</p>)}
+          {channels.length > 0 ? <MediaShelf title={t("searchEngine.shelf.title")} subtitle={t("searchEngine.shelf.subtitle")} channels={channels} favorites={favorites} onPlay={onPlay} onDetails={onDetails} onFavorite={onFavorite} compact={compact} /> : null}
+          {visible.filter((result) => result.channel_id === undefined).length > 0 && <section className="search-remote-results" aria-label={t("searchEngine.external.region")}><h2>{t("searchEngine.external.title")}</h2>{visible.filter((result) => result.channel_id === undefined).map((result) => <article className="settings-source" key={result.id}><div><h3>{result.year ? t("searchEngine.resultTitle", { title: result.title, year: result.year }) : result.title}</h3><p>{t("searchEngine.resultMeta", { providers: result.providers.join(" · "), details: [result.quality, result.language, result.content_type, result.available === false ? t("searchEngine.unavailable") : result.available ? t("searchEngine.available") : t("searchEngine.notChecked")].filter(Boolean).join(" · ") })}</p><p className="muted-note">{result.url}</p></div><button className="secondary-button" disabled={!result.url} onClick={() => onPlayExternal(result.url, result.title, result.headers || {})}>{t("transport.play")}</button></article>)}</section>}
+          {!visible.length && <div className="empty-state"><h2>{t("searchEngine.noMatches.title", { query: response.query })}</h2><p>{hiddenCount > 0 ? t("searchEngine.noMatches.hidden", { count: hiddenCount }) : t("searchEngine.noMatches.check")}</p></div>}
         </>}
-    <button className="secondary-button" onClick={onRefresh}>Refresh library</button>
+    <button className="secondary-button" onClick={onRefresh}>{t("searchEngine.refresh")}</button>
   </div>;
 }

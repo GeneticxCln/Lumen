@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod board;
+pub mod cast;
 pub mod content_key;
 pub mod db;
 pub mod error;
@@ -20,6 +21,7 @@ pub mod sync;
 pub mod sync_crypto;
 pub mod sync_keys;
 pub mod tmdb;
+pub mod update;
 
 #[cfg(test)]
 mod sync_tests;

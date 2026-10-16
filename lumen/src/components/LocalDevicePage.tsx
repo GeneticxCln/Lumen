@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icon";
 import type { IconName } from "./Icon";
 import { Modal } from "./Modal";
+import { t, tn, tRich } from "../i18n/index.ts";
 import { clearLocalPoster, errorMessage, getLocalPosterFrame, importPlaylistFile, listLocalDir, localFilmstrip, localPosterCandidates, localThumbnail, setLocalPosterFrame } from "../lib/tauri";
 import { uniqueHistory } from "../lib/discovery";
 import { MAX_ROOTS, MAX_SUBDIRS, MEDIA_ROOT_HINT, POSTER_FRAME_OPTIONS, extensionOf, fileLabel, fileNameOf, formatClock, formatSize, isLocalPath, kindOf, mapLimit, parentOf } from "../lib/local";
@@ -34,7 +35,7 @@ interface LocalDevicePageProps {
 }
 
 const KIND_ICON: Record<string, IconName> = { video: "film", audio: "volume", playlist: "grid", other: "film" };
-const KIND_LABEL: Record<string, string> = { video: "Video", audio: "Audio", playlist: "Playlist", other: "Media" };
+const KIND_LABEL = { video: "local.kind.video", audio: "local.kind.audio", playlist: "local.kind.playlist", other: "local.kind.media" } as const;
 
 function toItem(file: LocalFile): LocalItem {
   return { name: file.name, path: file.path, size: file.size };
@@ -102,17 +103,17 @@ function PosterFrameDialog({ path, name, onClose, onSaved }: { path: string; nam
     }
   };
 
-  return <Modal open onClose={onClose} title={`Poster frame for ${fileLabel(name)}`} className="poster-frame-dialog">
-    <p className="poster-frame-note">Choose the frame shown as this video's poster. Other files keep the frame from Settings.</p>
+  return <Modal open onClose={onClose} title={t("local.poster.title", { name: fileLabel(name) })} className="poster-frame-dialog">
+    <p className="poster-frame-note">{t("local.poster.note")}</p>
     <button type="button" className={`secondary-button${chosen === null ? " is-selected" : ""}`} aria-pressed={chosen === null} disabled={busy || chosen === undefined} onClick={() => void choose(null)}>
-      Use the Settings frame
+      {t("local.poster.useSettings")}
     </button>
-    {candidates === null ? <p>Loading frames…</p> : candidates && <div className="poster-frame-grid" role="group" aria-label="Poster frame options">
+    {candidates === null ? <p>{t("local.poster.loading")}</p> : candidates && <div className="poster-frame-grid" role="group" aria-label={t("local.poster.options")}>
       {candidates.map((candidate) => {
-        const label = POSTER_FRAME_OPTIONS.find((option) => option.seconds === candidate.seconds)?.label ?? `${candidate.seconds} seconds`;
+        const label = POSTER_FRAME_OPTIONS.find((option) => option.seconds === candidate.seconds)?.label ?? t("local.poster.seconds", { seconds: candidate.seconds });
         const selected = chosen === candidate.seconds;
         return <button key={candidate.seconds} type="button" className={`poster-frame-option${selected ? " is-selected" : ""}`} aria-pressed={selected} disabled={busy || !candidate.image} onClick={() => void choose(candidate.seconds)}>
-          {candidate.image ? <img src={candidate.image} alt="" /> : <span className="poster-frame-empty">Past end of video</span>}
+          {candidate.image ? <img src={candidate.image} alt="" /> : <span className="poster-frame-empty">{t("local.poster.pastEnd")}</span>}
           <span>{label}</span>
         </button>;
       })}
@@ -144,20 +145,20 @@ function LocalCard({ item, folder, onPlay }: { item: LocalItem; folder: string; 
   const [previewActive, setPreviewActive] = useState(false);
   const filmstrip = useFilmstripData(item.path, kind === "video" && previewActive);
   const percent = item.duration && item.position ? Math.min(100, Math.round((item.position / item.duration) * 100)) : 0;
-  const meta = [formatSize(item.size), percent > 0 ? `${formatClock(item.position!)} of ${formatClock(item.duration!)}` : folder].filter(Boolean).join(" · ");
+  const meta = [formatSize(item.size), percent > 0 ? t("local.card.progress", { position: formatClock(item.position!), duration: formatClock(item.duration!) }) : folder].filter(Boolean).join(" · ");
   return <article className="local-card">
-    <button ref={artRef} className={`local-card-art ${poster ? "has-poster" : ""}`} aria-label={`Play ${fileLabel(item.name)}`} onClick={() => onPlay(item)} onPointerEnter={() => setPreviewActive(true)} onPointerLeave={() => setPreviewActive(artRef.current === document.activeElement)} onFocus={() => setPreviewActive(true)} onBlur={() => setPreviewActive(artRef.current?.matches(":hover") ?? false)}>
+    <button ref={artRef} className={`local-card-art ${poster ? "has-poster" : ""}`} aria-label={t("episodes.play", { name: fileLabel(item.name) })} onClick={() => onPlay(item)} onPointerEnter={() => setPreviewActive(true)} onPointerLeave={() => setPreviewActive(artRef.current === document.activeElement)} onFocus={() => setPreviewActive(true)} onBlur={() => setPreviewActive(artRef.current?.matches(":hover") ?? false)}>
       {poster && <img className="local-card-poster" src={poster} alt="" loading="lazy" />}
       {!poster && !filmstrip && <span className={`local-card-glyph kind-${kind}`}><Icon name={KIND_ICON[kind]} size={22} /></span>}
       {filmstrip && previewActive && <img className="local-card-filmstrip" src={filmstrip} alt="" aria-hidden="true" />}
-      <span className="local-card-ext">{extensionOf(item.name).toUpperCase() || KIND_LABEL[kind]}</span>
+      <span className="local-card-ext">{extensionOf(item.name).toUpperCase() || t(KIND_LABEL[kind])}</span>
       <span className="card-play"><Icon name="play" size={24} /></span>
       {percent > 0 && <span className="local-card-progress"><i style={{ width: `${percent}%` }} /></span>}
     </button>
     <div className="local-card-body">
       <h3 title={item.path}>{fileLabel(item.name)}</h3>
       <p>{meta}</p>
-      {kind === "video" && <button type="button" className="secondary-button local-frame-button" onClick={() => setFrameOpen(true)}>Choose frame</button>}
+      {kind === "video" && <button type="button" className="secondary-button local-frame-button" onClick={() => setFrameOpen(true)}>{t("local.card.chooseFrame")}</button>}
     </div>
     {frameOpen && <PosterFrameDialog path={item.path} name={item.name} onClose={() => setFrameOpen(false)} onSaved={() => setPosterVersion((version) => version + 1)} />}
   </article>;
@@ -169,9 +170,9 @@ function LocalRowView({ row, onPlay }: { row: LocalRow; onPlay: (item: LocalItem
   if (!row.items.length) return null;
   return <section className="media-shelf local-row" aria-label={row.title}>
     <div className="shelf-heading"><div><h2>{row.title}<span className="shelf-count">{row.items.length}</span></h2>{row.subtitle && <p>{row.subtitle}</p>}</div>
-      <div className="shelf-arrows"><button className="icon-button" aria-label={`Scroll ${row.title} left`} onClick={() => scroll(-1)}><Icon name="chevron" style={{ transform: "rotate(180deg)" }} /></button><button className="icon-button" aria-label={`Scroll ${row.title} right`} onClick={() => scroll(1)}><Icon name="chevron" /></button></div>
+      <div className="shelf-arrows"><button className="icon-button" aria-label={t("local.row.scrollLeft", { title: row.title })} onClick={() => scroll(-1)}><Icon name="chevron" style={{ transform: "rotate(180deg)" }} /></button><button className="icon-button" aria-label={t("local.row.scrollRight", { title: row.title })} onClick={() => scroll(1)}><Icon name="chevron" /></button></div>
     </div>
-    <div className="local-track" ref={track} tabIndex={0} aria-label={`${row.title} files`}>
+    <div className="local-track" ref={track} tabIndex={0} aria-label={t("local.row.files", { title: row.title })}>
       {row.items.map((item) => <LocalCard key={item.path} item={item} folder={parentOf(item.path).split(/[\\/]/).pop() || ""} onPlay={onPlay} />)}
     </div>
   </section>;
@@ -226,13 +227,13 @@ export function LocalDevicePage({
       });
 
       const next: LocalRow[] = [];
-      if (loose.length) next.push({ title: "Loose files in your folder", subtitle: "Media sitting directly beside your folders.", items: loose.map(toItem) });
+      if (loose.length) next.push({ title: t("local.row.loose"), subtitle: t("local.row.looseNote"), items: loose.map(toItem) });
 
       const deeper: { label: string; path: string }[] = [];
       roots.forEach((dir, index) => {
         const listing = listings[index] || [];
         const files = listing.filter((entry) => !entry.is_dir);
-        if (files.length) next.push({ title: `In ${dir.name}`, items: files.map(toItem) });
+        if (files.length) next.push({ title: t("local.row.in", { name: dir.name }), items: files.map(toItem) });
         if (deeper.length < MAX_SUBDIRS) {
           listing.filter((entry) => entry.is_dir).slice(0, 2).forEach((sub) => {
             if (deeper.length < MAX_SUBDIRS) deeper.push({ label: `${dir.name}/${sub.name}`, path: sub.path });
@@ -245,7 +246,7 @@ export function LocalDevicePage({
       });
       deepListings.forEach((listing, index) => {
         const files = listing.filter((entry) => !entry.is_dir);
-        if (files.length) next.push({ title: `In ${deeper[index].label}`, items: files.map(toItem) });
+        if (files.length) next.push({ title: t("local.row.in", { name: deeper[index].label }), items: files.map(toItem) });
       });
 
       setRows(next);
@@ -292,7 +293,7 @@ export function LocalDevicePage({
       setStatus(null);
       try {
         await importPlaylistFile(entry.path);
-        setStatus(`Imported “${entry.name}” as a source.`);
+        setStatus(t("local.browser.imported", { name: entry.name }));
         onLibraryChanged();
         setRevision((value) => value + 1);
       } catch (failure) {
@@ -325,82 +326,82 @@ export function LocalDevicePage({
       <div className="local-hero-glow" />
       {!feature || kindOf(feature.name) !== "video" ? <div className="local-hero-mark"><Icon name="monitor" size={96} /></div> : null}
       <div className="local-hero-content">
-        <div className="hero-kicker"><span className="mini-brand">L</span> ON THIS DEVICE</div>
-        <p className="eyebrow">{feature ? "FROM YOUR OWN FOLDERS" : "YOUR FILES, ON PLAY"}</p>
-        <h1>{feature ? fileLabel(feature.name) : <>Your own files,<br />ready to play.</>}</h1>
+        <div className="hero-kicker"><span className="mini-brand">{t("local.hero.brandMark")}</span> {t("local.hero.onThisDevice")}</div>
+        <p className="eyebrow">{feature ? t("local.hero.eyebrowFeature") : t("local.hero.eyebrowEmpty")}</p>
+        <h1>{feature ? fileLabel(feature.name) : <>{tRich("local.hero.title").map((part, index) => <Fragment key={index}>{index > 0 && <br />}{part.text}</Fragment>)}</>}</h1>
         <div className="hero-meta">
           {feature
-            ? <><span className="match-label">{feature.playedAt ? "In progress" : "On this device"}</span><span>{parentOf(feature.path).split(/[\\/]/).pop() || "Local media"}</span>{feature.duration ? <span className="quality-tag">{formatClock(feature.duration)}</span> : null}</>
-            : <><span className="match-label">Local first</span><span>Folders · Video · Audio</span><span className="quality-tag">MPV</span></>}
+            ? <><span className="match-label">{feature.playedAt ? t("local.hero.inProgress") : t("local.hero.onDevice")}</span><span>{parentOf(feature.path).split(/[\\/]/).pop() || t("local.hero.localMedia")}</span>{feature.duration ? <span className="quality-tag">{formatClock(feature.duration)}</span> : null}</>
+            : <><span className="match-label">{t("local.hero.localFirst")}</span><span>{t("local.hero.formats")}</span><span className="quality-tag">{t("local.hero.engine")}</span></>}
         </div>
         {feature && feature.duration ? <div className="local-hero-progress" aria-hidden="true"><i style={{ width: `${Math.min(100, Math.round(((feature.position || 0) / feature.duration) * 100))}%` }} /></div> : null}
         <p className="hero-description">
           {feature
-            ? `Played with the native engine straight from ${parentOf(feature.path)}. Resume position is remembered per file, so this always picks up where you stopped.`
-            : "Lumen reads the media already on this computer — no uploads, no accounts, no catalogues. Point it at a folder and it shows up right here."}
+            ? t("local.hero.descriptionFeature", { folder: parentOf(feature.path) })
+            : t("local.hero.descriptionEmpty")}
         </p>
         <div className="hero-buttons">
           {feature
-            ? <button className="primary-button" disabled={busy} onClick={() => void playLocal(feature)}><Icon name="play" size={23} />{feature.position && feature.position > 10 ? `Resume · ${formatClock(feature.position)}` : "Play"}</button>
-            : <button className="primary-button" onClick={() => openBrowser("")}><Icon name="folder" size={23} />Browse folders</button>}
+            ? <button className="primary-button" disabled={busy} onClick={() => void playLocal(feature)}><Icon name="play" size={23} />{feature.position && feature.position > 10 ? t("local.hero.resume", { time: formatClock(feature.position) }) : t("transport.play")}</button>
+            : <button className="primary-button" onClick={() => openBrowser("")}><Icon name="folder" size={23} />{t("local.hero.browse")}</button>}
         </div>
-        <div className="hero-footnote"><span className="tiny-dot" />{scanning ? "Reading your folders…" : hasLocalContent ? `${totalLocal} local ${totalLocal === 1 ? "file" : "files"} found · Nothing leaves this device` : "Nothing found in your usual folders yet"}</div>
+        <div className="hero-footnote"><span className="tiny-dot" />{scanning ? t("local.hero.reading") : hasLocalContent ? tn("local.hero.found", totalLocal) : t("local.hero.nothingFound")}</div>
       </div>
-      <div className="hero-side-label">{scanning ? "SCANNING THIS DEVICE" : hasLocalContent ? "ON THIS DEVICE" : "WAITING FOR FILES"}</div>
+      <div className="hero-side-label">{scanning ? t("local.hero.sideScanning") : hasLocalContent ? t("local.hero.onThisDevice") : t("local.hero.sideWaiting")}</div>
     </section>
 
     <div className="discovery-body">
-      {status && <div className="app-notice discovery-notice" role="status"><span>{status}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => setStatus(null)}><Icon name="close" /></button></div>}
-      {error && <div className="app-notice discovery-notice" role="alert"><div><strong>Couldn’t read your local folders</strong><p>{error}</p></div><button onClick={() => setRevision((value) => value + 1)}>Retry</button></div>}
+      {status && <div className="app-notice discovery-notice" role="status"><span>{status}</span><button className="icon-button" aria-label={t("local.dismiss")} onClick={() => setStatus(null)}><Icon name="close" /></button></div>}
+      {error && <div className="app-notice discovery-notice" role="alert"><div><strong>{t("local.error.title")}</strong><p>{error}</p></div><button onClick={() => setRevision((value) => value + 1)}>{t("local.retry")}</button></div>}
 
-      {scanning && <div className="skeleton-row" role="status" aria-label="Scanning this device">{[1, 2, 3, 4].map((id) => <div key={id} />)}</div>}
+      {scanning && <div className="skeleton-row" role="status" aria-label={t("local.scanning")}>{[1, 2, 3, 4].map((id) => <div key={id} />)}</div>}
 
-      {!scanning && continueItems.length > 0 && <LocalRowView row={{ title: "Continue watching", subtitle: "Pick up exactly where you stopped.", items: continueItems }} onPlay={(item) => void playLocal(item)} />}
-      {!scanning && recentItems.length > 0 && <LocalRowView row={{ title: "Recently played on this device", subtitle: "Your last local sessions.", items: recentItems }} onPlay={(item) => void playLocal(item)} />}
+      {!scanning && continueItems.length > 0 && <LocalRowView row={{ title: t("local.row.continue"), subtitle: t("local.row.continueNote"), items: continueItems }} onPlay={(item) => void playLocal(item)} />}
+      {!scanning && recentItems.length > 0 && <LocalRowView row={{ title: t("local.row.recent"), subtitle: t("local.row.recentNote"), items: recentItems }} onPlay={(item) => void playLocal(item)} />}
       {!scanning && filteredRows.map((row) => <LocalRowView key={row.title} row={row} onPlay={(item) => void playLocal(item)} />)}
 
       {nothingToShow && <div className="empty-state">
         <div className="empty-symbol"><Icon name="folder" size={32} /></div>
-        <h2>No local media found yet.</h2>
-        <p>Looked in your usual folders for video, audio and playlist files. Point Lumen at another folder, or add a playlist source — both show up here.</p>
-        <div className="hero-buttons"><button className="primary-button" onClick={() => openBrowser("")}><Icon name="folder" size={20} />Browse folders</button><button className="secondary-button" onClick={onOpenSources}><Icon name="plus" size={20} />Add a source</button></div>
+        <h2>{t("local.empty.title")}</h2>
+        <p>{t("local.empty.body")}</p>
+        <div className="hero-buttons"><button className="primary-button" onClick={() => openBrowser("")}><Icon name="folder" size={20} />{t("local.hero.browse")}</button><button className="secondary-button" onClick={onOpenSources}><Icon name="plus" size={20} />{t("local.empty.addSource")}</button></div>
       </div>}
 
       {query && !continueItems.length && !recentItems.length && !filteredRows.length && <div className="empty-state">
         <div className="empty-symbol"><Icon name="search" size={32} /></div>
-        <h2>No matches for “{query}”.</h2>
-        <p>Nothing on this device matches that. Try a shorter word, or clear the search.</p>
+        <h2>{t("local.noMatch.title", { query })}</h2>
+        <p>{t("local.noMatch.body")}</p>
       </div>}
 
       <section className="folder-browser">
         <div className="folder-browser-head">
-          <div className="folder-browser-title"><span className="settings-title-icon"><Icon name="folder" size={20} /></span><div><h2>Browse this computer</h2><p>Folders, video, audio and playlist files.</p></div></div>
-          <button className="secondary-button" aria-expanded={browsing} onClick={() => (browsing ? setBrowsing(false) : openBrowser(browsePath || ""))}>{browsing ? "Hide" : "Open browser"}</button>
+          <div className="folder-browser-title"><span className="settings-title-icon"><Icon name="folder" size={20} /></span><div><h2>{t("local.browser.title")}</h2><p>{t("local.browser.subtitle")}</p></div></div>
+          <button className="secondary-button" aria-expanded={browsing} onClick={() => (browsing ? setBrowsing(false) : openBrowser(browsePath || ""))}>{browsing ? t("local.browser.hide") : t("local.browser.open")}</button>
         </div>
 
         {browsing && <>
           <div className="local-path-bar">
-            <button type="button" onClick={() => void browse("")} title="Your home folder"><Icon name="folder" size={15} />Home</button>
-            <button type="button" onClick={() => void browse(parentOf(browsePath))} disabled={!parentOf(browsePath)} title="Parent folder"><Icon name="arrow" size={15} />Up</button>
-            <div className="local-crumbs">{crumbs.length === 0 ? <span className="muted-note">Home</span> : crumbs.map((crumb, index) => <span key={`${crumb}-${index}`}>{index > 0 && <Icon name="chevron" size={12} />}<span className="crumb">{crumb}</span></span>)}</div>
-            <button type="button" className="icon-button" aria-label="Rescan this device" onClick={() => setRevision((value) => value + 1)}><Icon name="refresh" size={17} /></button>
+            <button type="button" onClick={() => void browse("")} title={t("local.browser.homeTitle")}><Icon name="folder" size={15} />{t("local.browser.home")}</button>
+            <button type="button" onClick={() => void browse(parentOf(browsePath))} disabled={!parentOf(browsePath)} title={t("local.browser.parentTitle")}><Icon name="arrow" size={15} />{t("local.browser.up")}</button>
+            <div className="local-crumbs">{crumbs.length === 0 ? <span className="muted-note">{t("local.browser.home")}</span> : crumbs.map((crumb, index) => <span key={`${crumb}-${index}`}>{index > 0 && <Icon name="chevron" size={12} />}<span className="crumb">{crumb}</span></span>)}</div>
+            <button type="button" className="icon-button" aria-label={t("local.browser.rescan")} onClick={() => setRevision((value) => value + 1)}><Icon name="refresh" size={17} /></button>
           </div>
           {browseError && <div className="dialog-error" role="alert">{browseError}</div>}
           <div className="local-entries-list">
             {browseLoading
-              ? <div className="loading">Reading folder…</div>
+              ? <div className="loading">{t("local.browser.reading")}</div>
               : visibleEntries.length === 0
-                ? <div className="empty-channels">Nothing to play in this folder.</div>
+                ? <div className="empty-channels">{t("local.browser.emptyFolder")}</div>
                 : visibleEntries.map((entry) => <button key={entry.path} type="button" className="local-entry-item" onClick={() => void openEntry(entry)}>
                   <span className={`local-entry-icon kind-${kindOf(entry.name)}`}><Icon name={entry.is_dir ? "folder" : KIND_ICON[kindOf(entry.name)]} size={17} /></span>
                   <span className="local-entry-name" title={entry.path}>{entry.is_dir ? entry.name : fileLabel(entry.name)}</span>
-                  <span className="local-entry-size">{entry.is_dir ? "Folder" : [formatSize(entry.size), extensionOf(entry.name).toUpperCase()].filter(Boolean).join(" · ")}</span>
+                  <span className="local-entry-size">{entry.is_dir ? t("local.browser.folder") : [formatSize(entry.size), extensionOf(entry.name).toUpperCase()].filter(Boolean).join(" · ")}</span>
                 </button>)}
           </div>
         </>}
       </section>
 
-      {historyError && <p className="muted-note" role="status">Recently played is unavailable: {historyError}</p>}
+      {historyError && <p className="muted-note" role="status">{t("local.historyUnavailable", { reason: historyError })}</p>}
     </div>
   </div>;
 }

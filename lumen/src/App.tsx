@@ -1,8 +1,9 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { Fragment, useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { Transport } from "./components/Transport";
 import { PlayerOverlay } from "./components/PlayerOverlay";
 import { PLAYER_SEEK_STEP_SECONDS, PLAYER_VOLUME_STEP, playerShortcutFor } from "./lib/playerKeys";
 import { nextUp } from "./lib/autoplay";
+import { useEpisodeAlerts } from "./hooks/useEpisodeAlerts";
 import type { PlayerShortcut } from "./lib/playerKeys";
 import { SourceDialog } from "./components/SourceDialog";
 import { SettingsPage } from "./components/SettingsPage";
@@ -18,9 +19,9 @@ import { LocalDevicePage } from "./components/LocalDevicePage";
 import { SearchEnginePage } from "./components/SearchEnginePage";
 import { usePlayer } from "./hooks/usePlayer";
 import { useChannels } from "./hooks/useChannels";
-import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, getPlayerPrefs, listProfiles, setPlayerFullscreen, tmdbStatus } from "./lib/tauri";
+import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, getPlayerPrefs, listProfiles, setPlayerFullscreen, tmdbStatus, updateRestart } from "./lib/tauri";
 import type { BrowseTitle } from "./lib/types";
-import type { Channel, HistoryEntry, PlayerPrefs, Profile } from "./lib/types";
+import type { CastState, Channel, HistoryEntry, PlayerPrefs, Profile, UpdateEventPayload } from "./lib/types";
 import { readPreferences, recommendChannels, catalogShelves, contentKind, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
 import { isLocalPath } from "./lib/local";
 import { nextEpisode } from "./lib/episodes";
@@ -30,9 +31,13 @@ import type { OpenTarget } from "./lib/launch";
 import { describeUpcoming } from "./lib/series";
 import type { EpisodeMark, UpcomingSeries } from "./lib/series";
 import { EpisodeList } from "./components/EpisodeList";
+import { CastBar } from "./components/CastBar";
+import { CastDialog } from "./components/CastDialog";
 import { FindSubtitles } from "./components/FindSubtitles";
 import type { UpcomingCard } from "./components/MediaShelf";
 import type { FacetSelection, Preferences } from "./lib/discovery";
+import { splitRich, t, tn } from "./i18n/index.ts";
+import type { PlainKey, RichPart } from "./i18n/index.ts";
 import "./App.css";
 
 type Page = "discovery" | "search" | "movies" | "series" | "live" | "local" | "settings";
@@ -43,19 +48,24 @@ type Page = "discovery" | "search" | "movies" | "series" | "live" | "local" | "s
 // them. Search is not a destination either: it lives in the top bar on every page.
 type NavPage = Exclude<Page, "settings">;
 
-const pages: { id: NavPage; label: string; icon: IconName }[] = [
-  { id: "discovery", label: "Discovery", icon: "compass" },
-  { id: "movies", label: "Movies", icon: "film" },
-  { id: "series", label: "Series", icon: "series" },
-  { id: "live", label: "Live TV", icon: "tv" },
-  { id: "local", label: "Local Device", icon: "monitor" },
+const pages: { id: NavPage; label: PlainKey; icon: IconName }[] = [
+  { id: "discovery", label: "app.nav.discovery", icon: "compass" },
+  { id: "movies", label: "app.nav.movies", icon: "film" },
+  { id: "series", label: "app.nav.series", icon: "series" },
+  { id: "live", label: "app.nav.live", icon: "tv" },
+  { id: "local", label: "app.nav.local", icon: "monitor" },
 ];
 
-const headings: Record<Exclude<Page, "discovery" | "search" | "local" | "settings">, { title: string; blurb: string }> = {
-  movies: { title: "Movies.", blurb: "Films and on-demand titles from your own sources." },
-  series: { title: "Series.", blurb: "Shows and episodic titles from your own sources." },
-  live: { title: "Live. Right now.", blurb: "Channels that are broadcasting as you browse." },
+const headings: Record<Exclude<Page, "discovery" | "search" | "local" | "settings">, { title: PlainKey; blurb: PlainKey }> = {
+  movies: { title: "app.heading.movies.title", blurb: "app.heading.movies.blurb" },
+  series: { title: "app.heading.series.title", blurb: "app.heading.series.blurb" },
+  live: { title: "app.heading.live.title", blurb: "app.heading.live.blurb" },
 };
+
+/** Renders a message that marks text with `<strong>`. */
+function renderStrong(parts: RichPart[]) {
+  return parts.map((part, index) => <Fragment key={index}>{part.tag === "strong" ? <strong>{part.text}</strong> : part.text}</Fragment>);
+}
 
 function App() {
   const [page, setPage] = useState<Page>("discovery");
@@ -162,12 +172,14 @@ function App() {
   // Lets the user pick a subtitle file for what is playing now.
   async function chooseSubtitleFile() {
     const { open } = await import("@tauri-apps/plugin-dialog");
-    const selected = await open({ filters: [{ name: "Subtitles", extensions: ["srt", "ass", "ssa", "vtt", "sub"] }] });
+    const selected = await open({ filters: [{ name: t("transport.subtitles"), extensions: ["srt", "ass", "ssa", "vtt", "sub"] }] });
     if (typeof selected === "string") await player.addSubtitle(selected);
   }
 
   // Opens the online subtitle search for what is playing, starting from the profile's language.
   const [findingSubtitles, setFindingSubtitles] = useState(false);
+  const [castOpen, setCastOpen] = useState(false);
+  const [cast, setCast] = useState<CastState | null>(null);
   const [subtitleLanguage, setSubtitleLanguage] = useState("");
   async function openSubtitleFinder() {
     try {
@@ -202,7 +214,7 @@ function App() {
     } else if (plan.play?.kind === "stream") {
       // Anyone can send a link (a web page can open lumen:// URLs), so ask before playing it.
       const { ask } = await import("@tauri-apps/plugin-dialog");
-      if (await ask(`Play this address in Lumen?\n\n${plan.play.url}`, { title: "Open link", kind: "warning" })) {
+      if (await ask(t("app.openLink.confirm", { url: plan.play.url }), { title: t("app.openLink.title"), kind: "warning" })) {
         try { await playFile(plan.play.url); playing = true; } catch { /* playFile already told the user */ }
       }
     }
@@ -245,6 +257,20 @@ function App() {
     return () => { disposed = true; unlisten?.(); };
   }, []);
 
+  // An update installed in the background waits for a restart; a newer release that is not
+  // installed automatically is mentioned once.
+  const [updateReady, setUpdateReady] = useState<string | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    const offs: Array<() => void> = [];
+    import("@tauri-apps/api/event").then(async ({ listen }) => {
+      const ready = await listen<UpdateEventPayload>("update://ready", (event) => setUpdateReady(event.payload.tag));
+      const available = await listen<UpdateEventPayload>("update://available", (event) => setNotice(t("update.notice.available", { tag: event.payload.tag })));
+      if (disposed) { ready(); available(); } else offs.push(ready, available);
+    }).catch(() => {});
+    return () => { disposed = true; offs.forEach((off) => off()); };
+  }, []);
+
   // Dropping files on the window opens them the same way.
   const [dragging, setDragging] = useState(false);
   useEffect(() => {
@@ -259,7 +285,7 @@ function App() {
           setDragging(false);
           classifyOpenTargets(event.payload.paths).then((targets) => {
             if (targets.length > 0) void openTargetsRef.current(targets);
-            else setNotice("Nothing to open: drop video, audio, playlist (.m3u) or subtitle files.");
+            else setNotice(t("app.drop.nothing"));
           }).catch((error) => setNotice(errorMessage(error)));
         }
       });
@@ -333,7 +359,7 @@ function App() {
       if (event.key === " " && target?.closest("button, a")) return;
       if (!playerOpen && document.querySelector("dialog[open]")) return;
       // The subtitle search is a dialog over the player: its keys (Escape closes only the dialog) belong to it.
-      if (findingSubtitles) return;
+      if (findingSubtitles || castOpen) return;
       const shortcut = playerShortcutFor(event.key);
       if (!shortcut || (shortcut === "close" && !playerOpen)) return;
       event.preventDefault();
@@ -351,7 +377,7 @@ function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [preferences.keyboardShortcuts, player, playerOpen, findingSubtitles, seekStep, toggleFullscreen, closePlayer]);
+  }, [preferences.keyboardShortcuts, player, playerOpen, findingSubtitles, castOpen, seekStep, toggleFullscreen, closePlayer]);
 
   // Files on this computer belong to the Local Device page only; every other tab shows sources.
   const available = useMemo(() => library.channels.filter((channel) => !isLocalPath(channel.url) && (!preferences.hideUnavailable || !channel.last_error)), [library.channels, preferences.hideUnavailable]);
@@ -361,6 +387,9 @@ function App() {
     const current = library.allChannels.find((channel) => channel.id === player.currentChannelId);
     return current ? nextEpisode(current, library.allChannels) : null;
   }, [library.allChannels, player.currentChannelId]);
+  // Desktop notifications for new episodes of followed series, when the user turned them on.
+  useEpisodeAlerts(activeProfileId);
+
   // Offer the next episode in the last seconds, and start it when this one ends.
   const [dismissedNextFor, setDismissedNextFor] = useState<string | null>(null);
   const upNext = nextUp({
@@ -455,17 +484,17 @@ function App() {
   const listForPage = (target: Page): Channel[] =>
     target === "movies" ? byKind.movie : target === "series" ? byKind.series : target === "live" ? byKind.live : [];
   const emptyState = (kind: "movies" | "series" | "live") => {
-    const title = library.error ? "Your library will be here."
-      : kind === "movies" ? "No movies yet."
-      : kind === "series" ? "No series yet."
-      : "No live channels right now.";
-    const body = kind === "live" ? "Live channels come from news, sport, and channel playlists in your sources."
-      : "Movies and series come from your own playlists. Import one and they show up here automatically.";
+    const title = library.error ? t("app.empty.libraryWillBeHere")
+      : kind === "movies" ? t("app.empty.noMovies")
+      : kind === "series" ? t("app.empty.noSeries")
+      : t("app.empty.noLive");
+    const body = kind === "live" ? t("app.empty.liveBody")
+      : t("app.empty.moviesSeriesBody");
     return <div className="empty-state">
       <div className="empty-symbol"><Icon name="grid" size={32} /></div>
       <h2>{title}</h2>
       <p>{body}</p>
-      <button className="primary-button" onClick={() => openSettings("sources")}>Open Settings</button>
+      <button className="primary-button" onClick={() => openSettings("sources")}>{t("app.empty.openSettings")}</button>
     </div>;
   };
 
@@ -486,26 +515,28 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [openSearch]);
 
-  const searchModifier = typeof navigator !== "undefined" && /mac|iphone|ipad/i.test(navigator.userAgent) ? "⌘" : "Ctrl ";
+  const searchShortcut = typeof navigator !== "undefined" && /mac|iphone|ipad/i.test(navigator.userAgent) ? t("app.search.shortcutMac") : t("app.search.shortcutOther");
+
+  const detailSource = details ? library.playlists.find((source) => source.id === details.playlist_id)?.name : undefined;
 
   return <>
     <div className="app" inert={locked}>
-    <a className="skip-link" href="#main-content">Skip to content</a>
+    <a className="skip-link" href="#main-content">{t("app.skipToContent")}</a>
     <header className="app-header">
-      <div className="brand-lockup"><button className="wordmark" onClick={() => navigate("discovery")} aria-label="Lumen home">LUMEN<span>•</span></button><span className="brand-caption">YOUR PERSONAL CINEMA</span></div>
-      <nav className="main-nav" aria-label="Main navigation">{pages.map((item) => <button key={item.id} className={page === item.id ? "active" : ""} aria-current={page === item.id ? "page" : undefined} onClick={() => navigate(item.id)}><Icon name={item.icon} size={17} /><span>{item.label}</span></button>)}</nav>
+      <div className="brand-lockup"><button className="wordmark" onClick={() => navigate("discovery")} aria-label={t("app.brand.home")}>{t("app.brand.name")}<span>•</span></button><span className="brand-caption">{t("app.brand.caption")}</span></div>
+      <nav className="main-nav" aria-label={t("app.nav.label")}>{pages.map((item) => <button key={item.id} className={page === item.id ? "active" : ""} aria-current={page === item.id ? "page" : undefined} onClick={() => navigate(item.id)}><Icon name={item.icon} size={17} /><span>{t(item.label)}</span></button>)}</nav>
       <div className="header-tools">
         <form className={`header-search ${searchOpen || library.searchQuery ? "open" : ""}`} role="search" onSubmit={(event) => event.preventDefault()}>
-          <button type="button" className="search-trigger" aria-label="Search your library" aria-expanded={searchOpen || Boolean(library.searchQuery)} onClick={openSearch}>
-            <Icon name="search" size={17} /><span>Search</span><kbd className="search-kbd">{searchModifier}K</kbd>
+          <button type="button" className="search-trigger" aria-label={t("app.search.label")} aria-expanded={searchOpen || Boolean(library.searchQuery)} onClick={openSearch}>
+            <Icon name="search" size={17} /><span>{t("app.search.button")}</span><kbd className="search-kbd">{searchShortcut}</kbd>
           </button>
           <label className="search-field">
             <Icon name="search" size={17} />
             <input
               ref={searchRef}
               value={library.searchQuery}
-              aria-label="Search your library"
-              placeholder="Search titles, categories, files"
+              aria-label={t("app.search.label")}
+              placeholder={t("app.search.placeholder")}
               onChange={(event) => {
                 const value = event.target.value;
                 library.setSearchQuery(value);
@@ -516,16 +547,16 @@ function App() {
               onBlur={(event) => { if (!event.currentTarget.value) setSearchOpen(false); }}
             />
             {library.searchQuery
-              ? <button type="button" className="icon-button search-clear" aria-label="Clear search" onMouseDown={(event) => event.preventDefault()} onClick={() => { library.setSearchQuery(""); searchRef.current?.focus(); }}><Icon name="close" size={15} /></button>
-              : <kbd className="search-kbd">Esc</kbd>}
+              ? <button type="button" className="icon-button search-clear" aria-label={t("app.search.clear")} onMouseDown={(event) => event.preventDefault()} onClick={() => { library.setSearchQuery(""); searchRef.current?.focus(); }}><Icon name="close" size={15} /></button>
+              : <kbd className="search-kbd">{t("app.search.escKey")}</kbd>}
           </label>
         </form>
-        <button className="icon-button header-save" aria-label="Open My List" onClick={() => openSettings("mylist")}><Icon name="bookmark" size={19} /><span className="header-count">{myList.length}</span></button><span className="header-divider" /><button className="header-profile" aria-label={currentProfile ? `Open settings. Profile: ${currentProfile.name}` : "Open settings"} onClick={() => openSettings(settingsSection)}>{currentProfile ? currentProfile.name.slice(0, 1).toUpperCase() : "L"}</button></div>
+        <button className="icon-button header-save" aria-label={t("app.header.openMyList")} onClick={() => openSettings("mylist")}><Icon name="bookmark" size={19} /><span className="header-count">{myList.length}</span></button><span className="header-divider" /><button className="header-profile" aria-label={currentProfile ? t("app.header.openSettingsProfile", { name: currentProfile.name }) : t("app.header.openSettings")} onClick={() => openSettings(settingsSection)}>{currentProfile ? currentProfile.name.slice(0, 1).toUpperCase() : t("app.header.profileFallback")}</button></div>
     </header>
     <main id="main-content">
-      {dragging && <div className="drop-overlay" aria-hidden="true"><div>Drop to open</div></div>}
-      {notice && <div className="app-notice" role="alert"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notice" onClick={() => setNotice(null)}><Icon name="close" /></button></div>}
-      {library.error && <div className="app-notice" role="alert"><div><strong>Couldn’t connect to your library</strong><p>{library.error}. Start the Lumen backend or desktop app, then retry.</p></div><button onClick={library.loadChannels}>Retry</button></div>}
+      {dragging && <div className="drop-overlay" aria-hidden="true"><div>{t("app.drop.overlay")}</div></div>}
+      {notice && <div className="app-notice" role="alert"><span>{notice}</span><button className="icon-button" aria-label={t("app.notice.dismiss")} onClick={() => setNotice(null)}><Icon name="close" /></button></div>}
+      {library.error && <div className="app-notice" role="alert"><div><strong>{t("app.error.connectTitle")}</strong><p>{t("app.error.connectBody", { error: library.error })}</p></div><button onClick={library.loadChannels}>{t("app.error.retry")}</button></div>}
 
       {page === "settings" ? <SettingsPage
         preferences={preferences}
@@ -579,20 +610,20 @@ function App() {
         onLibraryChanged={() => { setRefresh((value) => value + 1); library.loadChannels(); }}
         onOpenSources={() => openSettings("sources")}
       /> : <div className="browse-content standalone-content">
-          <div className="page-heading"><div><p className="eyebrow">FROM YOUR OWN SOURCES</p><h1>{headings[page as Exclude<Page, "discovery" | "search" | "local" | "settings">].title}</h1><p>{headings[page as Exclude<Page, "discovery" | "search" | "local" | "settings">].blurb}</p></div><span className="library-stat"><strong>{listForPage(page).length}</strong> titles</span></div>
+          <div className="page-heading"><div><p className="eyebrow">{t("app.browse.eyebrow")}</p><h1>{t(headings[page as Exclude<Page, "discovery" | "search" | "local" | "settings">].title)}</h1><p>{t(headings[page as Exclude<Page, "discovery" | "search" | "local" | "settings">].blurb)}</p></div><span className="library-stat">{renderStrong(splitRich(tn("app.browse.libraryStat", listForPage(page).length)))}</span></div>
 
           <div className="browse-toolbar">
             <p className="browse-summary" role="status">
-              <strong>{browseChannels.length}</strong> {browseChannels.length === 1 ? "title" : "titles"}
-              {facetCount(facetSelection) > 0 && <> · {facetCount(facetSelection)} {facetCount(facetSelection) === 1 ? "category" : "categories"} applied</>}
+              {renderStrong(splitRich(tn("app.browse.count", browseChannels.length)))}
+              {facetCount(facetSelection) > 0 && <> {tn("app.browse.filtersApplied", facetCount(facetSelection))}</>}
             </p>
-            {filtered && <button className="secondary-button browse-clear" onClick={() => { setFacetSelection(EMPTY_FACETS); library.setSearchQuery(""); library.selectPlaylist(null); }}>Clear filters</button>}
-            <label className="source-filter"><span className="sr-only">Filter by source</span><select aria-label="Filter by source" value={library.selectedPlaylistId ?? "all"} onChange={(event) => library.selectPlaylist(event.target.value === "all" ? null : Number(event.target.value))}><option value="all">All sources</option>{library.playlists.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}</select></label>
+            {filtered && <button className="secondary-button browse-clear" onClick={() => { setFacetSelection(EMPTY_FACETS); library.setSearchQuery(""); library.selectPlaylist(null); }}>{t("app.browse.clearFilters")}</button>}
+            <label className="source-filter"><span className="sr-only">{t("app.browse.filterBySource")}</span><select aria-label={t("app.browse.filterBySource")} value={library.selectedPlaylistId ?? "all"} onChange={(event) => library.selectPlaylist(event.target.value === "all" ? null : Number(event.target.value))}><option value="all">{t("app.browse.allSources")}</option>{library.playlists.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}</select></label>
           </div>
 
-          {library.loading ? <div className="skeleton-row" role="status" aria-label="Loading library">{[1, 2, 3, 4].map((id) => <div key={id} />)}</div>
+          {library.loading ? <div className="skeleton-row" role="status" aria-label={t("app.browse.loading")}>{[1, 2, 3, 4].map((id) => <div key={id} />)}</div>
             : (page === "movies" || page === "series" || page === "live") && listForPage(page).length === 0 && !filtered ? emptyState(page as "movies" | "series" | "live")
-            : baseChannels.length === 0 ? <div className="empty-state"><div className="empty-symbol"><Icon name="grid" size={32} /></div><h2>{library.error ? "Your library will be here." : library.searchQuery ? "No matching titles" : library.allChannels.length ? "Nothing here just yet." : "Your next favorite starts here."}</h2><p>{filtered ? "Try another category, source, or search." : "Add a playlist, explore a free-to-air catalog, or bring your own media."}</p><button className="primary-button" onClick={() => { if (filtered) { setFacetSelection(EMPTY_FACETS); library.setSearchQuery(""); library.selectPlaylist(null); } else openSettings("sources"); }}>{filtered ? "Clear filters" : "Add your first source"}</button></div>
+            : baseChannels.length === 0 ? <div className="empty-state"><div className="empty-symbol"><Icon name="grid" size={32} /></div><h2>{library.error ? t("app.empty.libraryWillBeHere") : library.searchQuery ? t("app.empty.noMatchingTitles") : library.allChannels.length ? t("app.empty.nothingYet") : t("app.empty.firstFavorite")}</h2><p>{filtered ? t("app.empty.tryAnother") : t("app.empty.addOrExplore")}</p><button className="primary-button" onClick={() => { if (filtered) { setFacetSelection(EMPTY_FACETS); library.setSearchQuery(""); library.selectPlaylist(null); } else openSettings("sources"); }}>{filtered ? t("app.browse.clearFilters") : t("app.empty.addFirstSource")}</button></div>
             : <>
               <FacetBrowser
                 channels={browseChannels}
@@ -604,22 +635,22 @@ function App() {
                 onDetails={setDetails}
                 onFavorite={(id) => void library.handleToggleFavorite(id)}
                 compact={preferences.compactCards}
-                emptyMessage={page === "live" ? "No live channels match these categories." : page === "movies" ? "No movies match these categories." : "No series match these categories."}
+                emptyMessage={page === "live" ? t("app.empty.liveMatch") : page === "movies" ? t("app.empty.moviesMatch") : t("app.empty.seriesMatch")}
               />
             </>}
       </div>}
       {page !== "settings" && <div className="browse-content">
-        {historyError && <p className="muted-note" role="status">Recently watched is unavailable: {historyError}</p>}
-        {profileError && <p className="muted-note" role="status">Profiles are unavailable here: {profileError}</p>}
-        <footer><span className="footer-brand">LUMEN</span><span>Your media. Your rules.</span><button onClick={() => openSettings("sources")}>Settings & preferences</button></footer>
+        {historyError && <p className="muted-note" role="status">{t("app.history.unavailable", { error: historyError })}</p>}
+        {profileError && <p className="muted-note" role="status">{t("app.profiles.unavailable", { error: profileError })}</p>}
+        <footer><span className="footer-brand">{t("app.brand.name")}</span><span>{t("app.footer.tagline")}</span><button onClick={() => openSettings("sources")}>{t("app.footer.settings")}</button></footer>
       </div>}
     </main>
 
-    {player.currentUrl && <aside className="now-playing-dock" aria-label="Now playing"><button className="dock-title" onClick={() => setPlayerOpen(true)}><span className="dock-play-icon"><Icon name="play" /></span><span><small>NOW PLAYING</small><strong>{player.currentTitle || player.playerState.title}</strong></span></button><button className="secondary-button" onClick={() => setPlayerOpen(true)}>Player controls</button><button className="icon-button" aria-label="Stop playback" onClick={() => void run(player.stopPlayback)}><Icon name="stop" /></button></aside>}
+    {player.currentUrl && <aside className="now-playing-dock" aria-label={t("app.nowPlaying.label")}><button className="dock-title" onClick={() => setPlayerOpen(true)}><span className="dock-play-icon"><Icon name="play" /></span><span><small>{t("app.nowPlaying.eyebrow")}</small><strong>{player.currentTitle || player.playerState.title}</strong></span></button><button className="secondary-button" onClick={() => setPlayerOpen(true)}>{t("app.nowPlaying.controls")}</button><button className="icon-button" aria-label={t("transport.stop")} onClick={() => void run(player.stopPlayback)}><Icon name="stop" /></button></aside>}
     <SourceDialog isOpen={showSource} onClose={() => setShowSource(false)} onSourceAdded={() => setRefresh((value) => value + 1)} onPlayFile={playFile} />
-    <Modal open={details !== null} onClose={() => setDetails(null)} title="Title details" className="details-dialog">{details && <><ChannelArtwork key={details.id} channel={details} /><div className="dialog-content"><p className="eyebrow">{details.group_title || "YOUR LIBRARY"}</p><h2>{details.name}</h2><p>From {library.playlists.find((source) => source.id === details.playlist_id)?.name || "your sources"}. Playback uses native mpv on desktop.</p><p className="muted-note">{details.last_error ? `Last check failed: ${details.last_error}` : details.last_ok ? `Last successful check: ${new Date(details.last_ok * 1000).toLocaleString()}. Availability can change.` : "Availability has not been checked yet."}</p><div className="hero-buttons"><button className="primary-button" disabled={busy} onClick={() => void play(details)}><Icon name="play" />Play</button><button className="secondary-button" aria-pressed={library.favoriteIds.has(details.id)} onClick={() => void library.handleToggleFavorite(details.id)}><Icon name={library.favoriteIds.has(details.id) ? "check" : "plus"} />My List</button><button className="secondary-button" disabled={library.probing} onClick={() => void library.handleProbeVisible([details.id])}>{library.probing ? "Checking…" : "Check stream"}</button></div><EpisodeList current={details} channels={library.allChannels} marks={marks} history={history} busy={busy} onPlay={(channel) => void play(channel)} onMark={(key, season, episodes, watched) => void markEpisodes(key, season, episodes, watched)} /></div></>}</Modal>
+    <Modal open={details !== null} onClose={() => setDetails(null)} title={t("app.details.title")} className="details-dialog">{details && <><ChannelArtwork key={details.id} channel={details} /><div className="dialog-content"><p className="eyebrow">{details.group_title || t("app.details.eyebrow")}</p><h2>{details.name}</h2><p>{detailSource ? t("app.details.fromSource", { source: detailSource }) : t("app.details.fromYourSources")}</p><p className="muted-note">{details.last_error ? t("app.details.lastFailed", { error: details.last_error }) : details.last_ok ? t("app.details.lastOk", { when: new Date(details.last_ok * 1000).toLocaleString() }) : t("app.details.neverChecked")}</p><div className="hero-buttons"><button className="primary-button" disabled={busy} onClick={() => void play(details)}><Icon name="play" />{t("transport.play")}</button><button className="secondary-button" aria-pressed={library.favoriteIds.has(details.id)} onClick={() => void library.handleToggleFavorite(details.id)}><Icon name={library.favoriteIds.has(details.id) ? "check" : "plus"} />{t("app.myList")}</button><button className="secondary-button" disabled={library.probing} onClick={() => void library.handleProbeVisible([details.id])}>{library.probing ? t("app.details.checking") : t("app.details.checkStream")}</button></div><EpisodeList current={details} channels={library.allChannels} marks={marks} history={history} busy={busy} onPlay={(channel) => void play(channel)} onMark={(key, season, episodes, watched) => void markEpisodes(key, season, episodes, watched)} /></div></>}</Modal>
     {player.currentUrl && <PlayerOverlay
-      title={player.currentTitle || player.playerState.title || "Now playing"}
+      title={player.currentTitle || player.playerState.title || t("app.nowPlaying.label")}
       paused={player.playerState.paused}
       hidden={!playerOpen}
       onBack={closePlayer}
@@ -631,11 +662,11 @@ function App() {
       controlsAlwaysVisible={embeddedActive}
       onTogglePause={() => void run(player.togglePause)}
       onToggleFullscreen={() => void run(toggleFullscreen)}
-      controls={<Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); closePlayer(); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} onSelectTrack={(kind, id) => void run(() => player.selectTrack(kind, id))} onSelectQuality={(id) => void run(() => player.selectQuality(id))} subtitleDelay={player.subtitleDelay} onSubtitleDelay={(direction) => void run(() => player.changeSubtitleDelay(direction))} onSubtitleScale={(direction) => void run(() => player.changeSubtitleScale(direction))} onAddSubtitle={() => void run(chooseSubtitleFile)} onFindSubtitles={() => void run(openSubtitleFinder)} seekStep={seekStep} speed={player.speed} onSpeed={(speed) => void run(() => player.changeSpeed(speed))} isFullscreen={isFullscreen} onToggleFullscreen={() => void run(toggleFullscreen)} />}
+      controls={<Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); closePlayer(); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} onSelectTrack={(kind, id) => void run(() => player.selectTrack(kind, id))} onSelectQuality={(id) => void run(() => player.selectQuality(id))} subtitleDelay={player.subtitleDelay} onSubtitleDelay={(direction) => void run(() => player.changeSubtitleDelay(direction))} onSubtitleScale={(direction) => void run(() => player.changeSubtitleScale(direction))} onAddSubtitle={() => void run(chooseSubtitleFile)} onFindSubtitles={() => void run(openSubtitleFinder)} onCast={() => setCastOpen(true)} seekStep={seekStep} speed={player.speed} onSpeed={(speed) => void run(() => player.changeSpeed(speed))} isFullscreen={isFullscreen} onToggleFullscreen={() => void run(toggleFullscreen)} />}
     >
       {embeddedActive
         ? null
-        : <div className="player-native-card"><Icon name="play" size={40} /><h2>{player.currentTitle}</h2><p>Your video plays in the native mpv window.</p></div>}
+        : <div className="player-native-card"><Icon name="play" size={40} /><h2>{player.currentTitle}</h2><p>{t("app.nowPlaying.nativeNote")}</p></div>}
     </PlayerOverlay>}
     </div>
     <FindSubtitles
@@ -644,6 +675,25 @@ function App() {
       preferredLanguage={subtitleLanguage}
       onClose={() => setFindingSubtitles(false)}
     />
+    <CastDialog
+      open={castOpen}
+      item={player.currentUrl ? { channelId: player.currentChannelId, source: player.currentUrl, name: player.currentTitle || undefined } : null}
+      startAt={player.playerState.time}
+      onStarted={(state) => {
+        setCast(state);
+        setCastOpen(false);
+        void run(async () => { await player.stopPlayback(); closePlayer(); });
+      }}
+      onClose={() => setCastOpen(false)}
+    />
+    {cast && <CastBar cast={cast} seekStep={seekStep} onEnded={() => setCast(null)} onError={setNotice} />}
+    {updateReady && (
+      <div className="update-banner" role="status">
+        <span>{t("update.notice.ready", { tag: updateReady })}</span>
+        <button className="primary-button" onClick={() => void run(updateRestart)}>{t("update.restart")}</button>
+        <button className="secondary-button" onClick={() => setUpdateReady(null)}>{t("update.later")}</button>
+      </div>
+    )}
     {locked && <ProfileGate profiles={profiles} initialProfileId={activeProfileId} onUnlocked={handleProfilesChanged} />}
   </>;
 }

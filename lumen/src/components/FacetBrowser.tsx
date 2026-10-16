@@ -5,6 +5,7 @@ import type { Facets, FacetSelection, FacetValue } from "../lib/discovery";
 import { ALL_FACETS, artworkCategory, genresOf, groupLabel, yearOf } from "../lib/discovery";
 import { TMDB_POSTER_SIZE, tmdbImage } from "../lib/tauri";
 import { Icon } from "./Icon";
+import { t, tn } from "../i18n/index.ts";
 
 interface FacetBrowserProps {
   channels: Channel[];
@@ -45,8 +46,8 @@ function FacetRail({
           aria-pressed={active}
           disabled={dead}
           onClick={() => onSelect(active ? ALL_FACETS : value.value)}
-          title={`${value.label} · ${value.count} ${value.count === 1 ? "title" : "titles"}`}
-          aria-label={`${value.label}: ${value.count} ${value.count === 1 ? "title" : "titles"}`}
+          title={tn("facets.chipTitle", value.count, { label: value.label })}
+          aria-label={tn("facets.chipLabel", value.count, { label: value.label })}
         >
           {/* The count is decorative here; the button's own label announces it. */}
           <span aria-hidden="true">{value.label}</span>
@@ -75,7 +76,7 @@ function PosterCard({
   const genreText = names.length ? names.slice(0, 2).join(", ") : groupLabel(channel.group_title);
 
   return <article className="poster-card" style={{ width }}>
-    <button className="poster-art-button" aria-label={`Play ${channel.name}`} onClick={() => onPlay(channel)}>
+    <button className="poster-art-button" aria-label={t("episodes.play", { name: channel.name })} onClick={() => onPlay(channel)}>
       {poster && !posterFailed
         ? <img className="poster-image" src={poster} alt="" loading="lazy" onError={() => setPosterFailed(true)} />
         : <span className={`channel-art poster-fallback art-${artworkCategory(channel.group_title)}`}>
@@ -85,24 +86,24 @@ function PosterCard({
           </span>}
       <span className="card-play"><Icon name="play" size={24} /></span>
       {/* Marks which titles carry real TMDB metadata rather than inferred genres. */}
-      {source === "tmdb" && <span className="poster-source-tag">TMDB</span>}
-      {channel.last_error && <span className="card-badge unavailable">Unavailable</span>}
+      {source === "tmdb" && <span className="poster-source-tag">{t("facets.tmdbTag")}</span>}
+      {channel.last_error && <span className="card-badge unavailable">{t("transport.qualityUnavailable")}</span>}
     </button>
     <div className="poster-meta">
       <div className="poster-meta-text">
         <strong title={channel.name}>{channel.name}</strong>
-        <span>{genreText}{year ? ` · ${year}` : ""}</span>
+        <span>{year ? t("facets.genreYear", { genre: genreText, year }) : genreText}</span>
       </div>
       <div className="poster-actions">
         <button
           className={`icon-button circle ${favorite ? "is-saved" : ""}`}
-          aria-label={`${favorite ? "Remove" : "Add"} ${channel.name} ${favorite ? "from" : "to"} My List`}
+          aria-label={favorite ? t("shelf.removeFromList", { name: channel.name }) : t("shelf.addToList", { name: channel.name })}
           aria-pressed={favorite}
           onClick={() => onFavorite(channel.id)}
         >
           <Icon name={favorite ? "check" : "plus"} size={16} />
         </button>
-        <button className="icon-button circle" aria-label={`Details for ${channel.name}`} onClick={() => onDetails(channel)}>
+        <button className="icon-button circle" aria-label={t("shelf.details", { name: channel.name })} onClick={() => onDetails(channel)}>
           <Icon name="info" size={16} />
         </button>
       </div>
@@ -146,30 +147,30 @@ export function FacetBrowser({
 
   return <>
     <div className="facet-browser">
-      <aside className="facet-sidebar" aria-label="Filter titles">
-        <FacetRail label="Group" values={facets.groups} selected={selection.group} onSelect={(value) => set("group", value)} />
+      <aside className="facet-sidebar" aria-label={t("facets.filterTitles")}>
+        <FacetRail label={t("facets.group")} values={facets.groups} selected={selection.group} onSelect={(value) => set("group", value)} />
         <FacetRail
-          label="Genre"
+          label={t("facets.genre")}
           values={facets.genres}
           selected={selection.genre}
           onSelect={(value) => set("genre", value)}
-          hint={facets.hasTmdbGenres ? "TMDB metadata · source tags as fallback" : "Source tags · TMDB metadata when available"}
+          hint={facets.hasTmdbGenres ? t("facets.genreHintTmdb") : t("facets.genreHintSource")}
         />
-        <FacetRail label="Year" values={facets.years} selected={selection.year} onSelect={(value) => set("year", value)} hint="TMDB release year · unknown remains browseable" />
+        <FacetRail label={t("facets.year")} values={facets.years} selected={selection.year} onSelect={(value) => set("year", value)} hint={t("facets.yearHint")} />
       </aside>
 
-      <section className="facet-results" aria-label="Browse titles">
+      <section className="facet-results" aria-label={t("facets.browseTitles")}>
         <div className="facet-results-heading">
-          <div><h2>Titles</h2><p>Posters and details from TMDB when matched.</p></div>
-          {facets.enriched > 0 && <span className="facet-enriched-count">{facets.enriched} TMDB matched</span>}
+          <div><h2>{t("facets.titles")}</h2><p>{t("facets.titlesNote")}</p></div>
+          {facets.enriched > 0 && <span className="facet-enriched-count">{t("facets.enriched", { count: facets.enriched })}</span>}
         </div>
         {channels.length === 0
           ? <div className="empty-state">
               <div className="empty-symbol"><Icon name="grid" size={32} /></div>
               <h2>{emptyMessage}</h2>
-              <p>Clear a category, or try a different combination of group, genre, and year.</p>
+              <p>{t("facets.emptyHint")}</p>
             </div>
-          : <div className="poster-grid-viewport" ref={trackRef} tabIndex={0} aria-label={`${channels.length} titles`}>
+          : <div className="poster-grid-viewport" ref={trackRef} tabIndex={0} aria-label={tn("facets.gridLabel", channels.length)}>
               <div style={{ height: virtualizer.getTotalSize(), width: "100%", position: "relative" }}>
                 {virtualizer.getVirtualItems().map((row) => {
                   const start = row.index * columns;

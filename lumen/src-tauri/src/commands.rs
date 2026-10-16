@@ -105,26 +105,50 @@ async fn play_url_inner(
         let mut guard = backend_cell.lock().await;
         let running = guard.as_ref().is_some_and(|backend| backend.is_alive());
         if !running {
-            // Playing inside the window (experimental): mpv is started to draw into a native area
-            // above the page. If that cannot be set up, the separate mpv window is used instead.
+            // Playing inside the window (experimental): on X11 mpv draws into a native area above
+            // the page; on native Wayland libmpv runs here and draws into an OpenGL area. If that
+            // cannot be set up, the separate mpv window is used instead.
             let mut args = extra_args.clone();
             embed::set_in_use(false);
+            let mut in_window = None;
             if matches!(get_setting(pool, EMBED_PLAYER_SETTING).await, Ok(Some(value)) if value == "true")
             {
-                match embed::ensure_area(&app).await {
-                    Ok(xid) => {
-                        // Last, so a user's own arguments cannot point mpv away from the area.
-                        args = format!("{args} {}", embed::mpv_args(xid));
-                        embed::set_in_use(true);
+                match embed::mode() {
+                    Some(embed::Mode::Wid) => match embed::ensure_area(&app).await {
+                        Ok(xid) => {
+                            // Last, so a user's own arguments cannot point mpv away from the area.
+                            args = format!("{args} {}", embed::mpv_args(xid));
+                            embed::set_in_use(true);
+                        }
+                        Err(reason) => eprintln!(
+                            "lumen: playing in the window is not available, using the mpv window: {reason}"
+                        ),
+                    },
+                    Some(embed::Mode::Gl) => {
+                        match embed::start_gl_engine(&app, &hwdec, &cache, &extra_args).await {
+                            Ok(started) => {
+                                in_window = Some(started);
+                                embed::set_in_use(true);
+                            }
+                            Err(reason) => eprintln!(
+                                "lumen: playing in the window is not available, using the mpv window: {reason}"
+                            ),
+                        }
                     }
-                    Err(reason) => eprintln!(
-                        "lumen: playing in the window is not available, using the mpv window: {reason}"
-                    ),
+                    None => {}
                 }
             }
-            *guard = Some(Arc::new(
-                MpvIpcBackend::new(Some(app.clone()), &hwdec, &cache, &args).await?,
-            ));
+            *guard = Some(Arc::new(match in_window {
+                Some((socket_path, engine)) => {
+                    MpvIpcBackend::connect(
+                        Some(app.clone()),
+                        socket_path,
+                        crate::playback::mpv_ipc::Engine::Embedded(engine),
+                    )
+                    .await?
+                }
+                None => MpvIpcBackend::new(Some(app.clone()), &hwdec, &cache, &args).await?,
+            }));
         }
         guard
             .as_ref()
@@ -489,7 +513,7 @@ const EMBED_PLAYER_SETTING: &str = "embed_player";
 /// The user's opt-in to fetch from their own network (a NAS, Jellyfin on this machine).
 const ALLOW_LAN_SETTING: &str = "allow_lan_sources";
 
-async fn allow_lan_sources(pool: &sqlx::Pool<sqlx::Sqlite>) -> bool {
+pub(crate) async fn allow_lan_sources(pool: &sqlx::Pool<sqlx::Sqlite>) -> bool {
     matches!(get_setting(pool, ALLOW_LAN_SETTING).await, Ok(Some(value)) if value == "true")
 }
 

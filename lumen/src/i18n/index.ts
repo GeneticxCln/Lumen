@@ -43,6 +43,12 @@ export function setLocale(code: string): void {
   const found = locales[wanted] ? wanted : wanted.split("-")[0];
   active = locales[found] ?? en;
   activeCode = locales[found] ? found : "en";
+  if (typeof document !== "undefined") document.documentElement.lang = activeCode;
+}
+
+/** The code of the language in use (`en`, `de`). */
+export function currentLocale(): string {
+  return activeCode;
 }
 
 function fill(message: string, values?: Record<string, string | number>): string {
@@ -83,7 +89,12 @@ export function splitRich(message: string): RichPart[] {
   return parts;
 }
 
-/** The message with its markup split out, for a component to render. */
+/**
+ * The message with its markup split out, for a component to render. The markup is found in the
+ * message itself and the values are filled in afterwards, so a value that happens to contain
+ * `<tag>` is shown as text, never taken for markup.
+ */
 export function tRich<K extends MessageKey>(key: K, ...args: VarArgs<(typeof en)[K]>): RichPart[] {
-  return splitRich(t(key, ...args));
+  const values = args[0] as Record<string, string | number> | undefined;
+  return splitRich(lookup(key)).map((part) => ({ ...part, text: fill(part.text, values) }));
 }

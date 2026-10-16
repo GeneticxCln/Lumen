@@ -1,0 +1,37 @@
+# Maintainer: Lumen Contributors
+#
+# Builds Lumen from the tagged source. After a release, set pkgver to the new version and replace
+# the checksum with the output of `makepkg -g`.
+pkgname=lumen
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Media library and player built on mpv'
+arch=('x86_64' 'aarch64')
+url='https://github.com/GeneticxCln/Lumen'
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'mpv')
+makedepends=('cargo' 'nodejs' 'npm' 'pkgconf' 'openssl' 'librsvg')
+# makepkg's default LTO flags make the bundled SQLite (built by the cc crate) unusable by rustc's
+# linker: the sqlx proc-macro then fails with "undefined symbol: sqlite3_bind_int64".
+options=('!lto')
+optdepends=('ffmpeg: thumbnails for local videos'
+            'gnome-keyring: stores the sync key and API keys')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/Lumen-$pkgver/lumen"
+  npm ci
+  # The program only; the desktop file and icons are installed below.
+  npx tauri build --no-bundle
+}
+
+package() {
+  cd "$srcdir/Lumen-$pkgver/lumen"
+  install -Dm755 target/release/lumen "$pkgdir/usr/bin/lumen"
+  install -Dm644 ../LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 packaging/com.quinton.lumen.desktop "$pkgdir/usr/share/applications/com.quinton.lumen.desktop"
+  install -Dm644 packaging/com.quinton.lumen.metainfo.xml "$pkgdir/usr/share/metainfo/com.quinton.lumen.metainfo.xml"
+  install -Dm644 src-tauri/icons/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/com.quinton.lumen.png"
+  install -Dm644 src-tauri/icons/128x128@2x.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/com.quinton.lumen.png"
+}

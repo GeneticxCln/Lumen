@@ -1,22 +1,25 @@
 {
   "name": "lumen",
   "private": true,
+  "license": "MIT",
   "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types src/lib/discovery.test.ts && node --experimental-strip-types src/lib/errors.test.ts && node --experimental-strip-types src/lib/local.test.ts && node --experimental-strip-types src/lib/player.test.ts && node --experimental-strip-types src/lib/language.test.ts && node --experimental-strip-types src/lib/playerKeys.test.ts && node --experimental-strip-types src/lib/episodes.test.ts && node --experimental-strip-types src/lib/sync.test.ts && node --experimental-strip-types src/lib/board.test.ts && node --experimental-strip-types src/lib/series.test.ts && node --experimental-strip-types src/lib/languages.test.ts && node --experimental-strip-types src/lib/launch.test.ts && node --experimental-strip-types src/lib/autoplay.test.ts && node --experimental-strip-types src/i18n/i18n.test.ts && node --experimental-strip-types src/i18n/gate.test.ts",
+    "test": "node --experimental-strip-types src/lib/discovery.test.ts && node --experimental-strip-types src/lib/errors.test.ts && node --experimental-strip-types src/lib/local.test.ts && node --experimental-strip-types src/lib/language.test.ts && node --experimental-strip-types src/lib/playerKeys.test.ts && node --experimental-strip-types src/lib/episodes.test.ts && node --experimental-strip-types src/lib/sync.test.ts && node --experimental-strip-types src/lib/board.test.ts && node --experimental-strip-types src/lib/series.test.ts && node --experimental-strip-types src/lib/languages.test.ts && node --experimental-strip-types src/lib/launch.test.ts && node --experimental-strip-types src/lib/autoplay.test.ts && node --experimental-strip-types src/lib/alerts.test.ts && node --experimental-strip-types src/i18n/i18n.test.ts && node --experimental-strip-types src/i18n/gate.test.ts",
     "preview": "vite preview",
     "tauri": "tauri",
     "lint": "eslint src --max-warnings 0",
+    "i18n:hits": "node --experimental-strip-types src/i18n/hits.ts",
     "i18n:baseline": "node --experimental-strip-types src/i18n/gate.test.ts --update"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.19",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.8.3",
+    "@tauri-apps/plugin-notification": "^2.7.0",
     "@tauri-apps/plugin-opener": "^2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

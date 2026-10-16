@@ -21,6 +21,7 @@ import {
 } from "../lib/tauri";
 import { DEFAULT_PLAYER_STATE } from "../lib/types";
 import { clampScale, SUB_DELAY_STEP, SUB_SCALE_STEP } from "../lib/languages";
+import { t } from "../i18n/index.ts";
 import type { PlayerTrackKind } from "../lib/types";
 
 interface PlayerOptions {
@@ -72,7 +73,7 @@ export function usePlayer(options: PlayerOptions = {}) {
       .then(async (next) => {
         if (!next) return;
         await playUrl(next.url, next.headers ?? undefined, next.channel_id ?? undefined);
-        onNoticeRef.current?.(`${currentTitleRef.current ?? "This title"} failed to play from that source, so Lumen switched to another one.`);
+        onNoticeRef.current?.(t("lib.notice.sourceFailed", { title: currentTitleRef.current ?? t("lib.notice.thisTitle") }));
         headersRef.current = next.headers ?? undefined;
         setCurrentUrl(next.url);
         setCurrentChannelId(next.channel_id ?? undefined);

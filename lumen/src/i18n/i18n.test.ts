@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { addLocale, availableLocales, setLocale, splitRich, t, tn, tRich } from "./index.ts";
 import type { Catalog } from "./index.ts";
 import { en } from "./en.ts";
+import { detectLocale } from "./locale.ts";
 
 // Interpolation.
 assert.equal(t("common.cancel"), "Cancel");
@@ -31,6 +32,9 @@ assert.deepEqual(
   tRich("prefs.sideloadNote").filter((part) => part.tag).map((part) => part.text),
   ["Movie.srt", "Movie.mkv"],
 );
+
+// Values are never taken for markup.
+assert.deepEqual(tRich("episodes.row", { episode: "<b>1</b>", name: "x" }), [{ text: "E<b>1</b> · x" }]);
 
 // A language is chosen by code; `de-AT` falls back to `de`, and anything unknown to English.
 // This table is a test fixture, not a real translation: every key is the English text with a marker.
@@ -64,5 +68,12 @@ for (const key of keys) {
   const text = (en as Record<string, string>)[key];
   assert.equal(text.replace(/\{\w+\}/g, "").match(/[{}]/), null, `${key} has an unmatched brace`);
 }
+
+// The system's language picks the catalog: exact, then main part, then English.
+assert.equal(detectLocale(["en", "de"], ["de-AT", "en-US"]), "de");
+assert.equal(detectLocale(["en", "de"], ["fr-FR", "de"]), "de", "the first language that exists wins");
+assert.equal(detectLocale(["en", "pt-br"], ["pt-BR"]), "pt-br");
+assert.equal(detectLocale(["en"], ["ja-JP"]), "en");
+assert.equal(detectLocale(["en", "de"], []), "en");
 
 console.log("i18n.test.ts: ok");

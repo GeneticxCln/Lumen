@@ -2,6 +2,7 @@ import { useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Channel, playUrl } from "../lib/tauri";
 import { useChannels } from "../hooks/useChannels";
+import { t } from "../i18n/index.ts";
 
 interface ChannelListProps {
   onPlayChannel?: (channel: Channel) => void;
@@ -50,11 +51,11 @@ export function ChannelList({ onPlayChannel, refreshTrigger = 0 }: ChannelListPr
     <div className="channel-list">
       <div className="playlist-selector">
         <div className="playlist-header-row">
-          <label>Playlist ({playlists.length})</label>
+          <label>{t("channels.playlistCount", { count: playlists.length })}</label>
           {selectedPlaylistId && (
             <button
               className="btn-icon-small"
-              title="Delete selected playlist"
+              title={t("channels.deletePlaylist")}
               onClick={() => handleDeletePlaylist(selectedPlaylistId)}
             >
               ✕
@@ -67,11 +68,11 @@ export function ChannelList({ onPlayChannel, refreshTrigger = 0 }: ChannelListPr
           disabled={playlists.length === 0}
         >
           {playlists.length === 0 ? (
-            <option value="">No playlists imported</option>
+            <option value="">{t("channels.noPlaylists")}</option>
           ) : (
             playlists.map((p) => (
               <option key={p.id} value={p.id}>
-                {p.name} ({p.source})
+                {t("channels.playlistOption", { name: p.name, source: p.source })}
               </option>
             ))
           )}
@@ -81,7 +82,7 @@ export function ChannelList({ onPlayChannel, refreshTrigger = 0 }: ChannelListPr
       <div className="channel-filters">
         <input
           type="text"
-          placeholder="Search channels..."
+          placeholder={t("channels.search")}
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           className="search-input"
@@ -91,7 +92,7 @@ export function ChannelList({ onPlayChannel, refreshTrigger = 0 }: ChannelListPr
             value={selectedGroup}
             onChange={(e) => setSelectedGroup(e.target.value)}
           >
-            <option value="all">All Groups ({groups.length})</option>
+            <option value="all">{t("channels.allGroups", { count: groups.length })}</option>
             {groups.map((g) => (
               <option key={g} value={g}>
                 {g}
@@ -102,7 +103,7 @@ export function ChannelList({ onPlayChannel, refreshTrigger = 0 }: ChannelListPr
             type="button"
             className={`filter-chip ${favoritesOnly ? "active" : ""}`}
             onClick={() => setFavoritesOnly((v) => !v)}
-            title="Show Favorites Only"
+            title={t("channels.favoritesOnly")}
           >
             ★
           </button>
@@ -111,21 +112,21 @@ export function ChannelList({ onPlayChannel, refreshTrigger = 0 }: ChannelListPr
             className="filter-chip"
             onClick={() => handleProbeVisible()}
             disabled={probing || channels.length === 0}
-            title="Probe channels for live status"
+            title={t("channels.probeTitle")}
           >
-            {probing ? "…" : "⚡ Probe"}
+            {probing ? "…" : t("channels.probe")}
           </button>
         </div>
       </div>
 
       <div className="channel-list-container" ref={listRef}>
         {loading ? (
-          <div className="loading">Loading channels...</div>
+          <div className="loading">{t("channels.loading")}</div>
         ) : channels.length === 0 ? (
           <div className="empty-channels">
             {playlists.length === 0
-              ? "Click 'Add Source' to import an M3U playlist, FTA catalog, or stream URL."
-              : "No channels match your filter."}
+              ? t("channels.emptyNoPlaylists")
+              : t("channels.emptyNoMatch")}
           </div>
         ) : (
           <div
@@ -159,7 +160,7 @@ export function ChannelList({ onPlayChannel, refreshTrigger = 0 }: ChannelListPr
                       e.stopPropagation();
                       handleToggleFavorite(channel.id);
                     }}
-                    title={isFav ? "Remove favorite" : "Add favorite"}
+                    title={isFav ? t("channels.removeFavorite") : t("channels.addFavorite")}
                   >
                     {isFav ? "★" : "☆"}
                   </button>
@@ -181,13 +182,13 @@ export function ChannelList({ onPlayChannel, refreshTrigger = 0 }: ChannelListPr
                     <span className="channel-group">{channel.group_title}</span>
                   )}
                   {channel.last_ok ? (
-                    <span className="live-indicator" title="Live (verified)">
+                    <span className="live-indicator" title={t("channels.live")}>
                       ●
                     </span>
                   ) : channel.last_error ? (
                     <span
                       className="dead-indicator"
-                      title={`Offline: ${channel.last_error}`}
+                      title={t("channels.offline", { reason: channel.last_error })}
                     >
                       ●
                     </span>

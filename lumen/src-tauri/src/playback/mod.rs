@@ -101,3 +101,6 @@ pub trait PlaybackBackend: Send + Sync {
 }
 
 pub mod mpv_ipc;
+
+#[cfg(target_os = "linux")]
+pub mod libmpv;

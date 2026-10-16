@@ -1,3 +1,5 @@
+import { t, tn } from "../i18n/index.ts";
+
 /** Something the app was asked to open: from "Open with Lumen", a lumen:// link, or a dropped file. */
 export type OpenTarget =
   | { kind: "media"; path: string }
@@ -31,8 +33,8 @@ export function planLaunch(targets: OpenTarget[]): LaunchPlan {
 /** The sentence shown after opening, or null when there is nothing to add to what the user sees. */
 export function launchNotice(plan: LaunchPlan, importedPlaylists: number, subtitlesWithoutVideo: boolean): string | null {
   const parts: string[] = [];
-  if (importedPlaylists > 0) parts.push(`Added ${importedPlaylists} playlist${importedPlaylists === 1 ? "" : "s"} to your sources.`);
-  if (plan.skipped > 0) parts.push(`Playing the first item; ${plan.skipped} other${plan.skipped === 1 ? " was" : "s were"} not opened (one thing plays at a time).`);
-  if (subtitlesWithoutVideo) parts.push("Open a video first, then add its subtitle file.");
+  if (importedPlaylists > 0) parts.push(tn("lib.launch.added", importedPlaylists));
+  if (plan.skipped > 0) parts.push(tn("lib.launch.skipped", plan.skipped));
+  if (subtitlesWithoutVideo) parts.push(t("lib.launch.subtitleFirst"));
   return parts.length ? parts.join(" ") : null;
 }

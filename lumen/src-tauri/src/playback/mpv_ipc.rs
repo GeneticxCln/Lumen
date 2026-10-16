@@ -42,9 +42,21 @@ const LOAD_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Shown when Stop interrupts a load that had not finished.
 pub const CANCELLED_MESSAGE: &str = "Playback was stopped before the stream finished loading";
 
+/// What keeps the player behind the socket running.
+pub enum Engine {
+    /// A separate mpv process, which opens its own window (or draws into a window it was given).
+    Process(tokio::process::Child),
+    /// A libmpv player inside this program, drawing into the app window. Dropping it destroys the player.
+    // Held so that dropping it stops the player.
+    Embedded(#[allow(dead_code)] Box<dyn EmbeddedEngine>),
+}
+
+/// A player living inside this process. Its `Drop` stops it.
+pub trait EmbeddedEngine: Send + Sync {}
+
 pub struct MpvIpcBackend {
     socket_path: String,
-    mpv_process: std::sync::Mutex<Option<tokio::process::Child>>,
+    engine: std::sync::Mutex<Option<Engine>>,
     writer: mpsc::UnboundedSender<(MpvRequest, oneshot::Sender<Result<MpvValue>>)>,
     request_id: AtomicU64,
     /// Requests waiting for mpv's reply, so a timed-out one can be dropped instead of lingering.
@@ -158,12 +170,8 @@ fn mpv_track(track: &MpvValue) -> Option<PlayerTrack> {
 }
 
 impl MpvIpcBackend {
-    pub async fn new(
-        app: Option<AppHandle>,
-        hwdec: &str,
-        cache: &str,
-        extra_args: &str,
-    ) -> Result<Self> {
+    /// A fresh control-socket path in a directory only this user can enter.
+    pub fn new_socket_path() -> Result<String> {
         let unique_id = uuid::Uuid::new_v4().simple().to_string();
         let socket_dir = private_socket_dir()?;
         let socket_path = socket_dir
@@ -174,8 +182,17 @@ impl MpvIpcBackend {
             ))
             .to_string_lossy()
             .into_owned();
-
         let _ = std::fs::remove_file(&socket_path);
+        Ok(socket_path)
+    }
+
+    pub async fn new(
+        app: Option<AppHandle>,
+        hwdec: &str,
+        cache: &str,
+        extra_args: &str,
+    ) -> Result<Self> {
+        let socket_path = Self::new_socket_path()?;
 
         let hwdec_arg = format!(
             "--hwdec={}",
@@ -215,6 +232,16 @@ impl MpvIpcBackend {
             .spawn()
             .map_err(|e| PlayerError::Mpv(format!("Failed to spawn mpv: {}", e)))?;
 
+        Self::connect(app, socket_path, Engine::Process(mpv_process)).await
+    }
+
+    /// Connects to the control socket of a player that is starting (or running) and sets the
+    /// backend up around it. `engine` is what keeps that player alive.
+    pub async fn connect(
+        app: Option<AppHandle>,
+        socket_path: String,
+        engine: Engine,
+    ) -> Result<Self> {
         // Wait for socket to appear and accept connections
         let mut connected_stream = None;
         for _ in 0..60 {
@@ -481,7 +508,7 @@ impl MpvIpcBackend {
 
         let backend = Self {
             socket_path,
-            mpv_process: std::sync::Mutex::new(Some(mpv_process)),
+            engine: std::sync::Mutex::new(Some(engine)),
             writer: tx,
             request_id: AtomicU64::new(1),
             pending: pending.clone(),
@@ -517,12 +544,13 @@ impl MpvIpcBackend {
         if self.closing.load(Ordering::SeqCst) {
             return false;
         }
-        let mut process = self
-            .mpv_process
+        let mut engine = self
+            .engine
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match process.as_mut() {
-            Some(child) => matches!(child.try_wait(), Ok(None)),
+        match engine.as_mut() {
+            Some(Engine::Process(child)) => matches!(child.try_wait(), Ok(None)),
+            Some(Engine::Embedded(_)) => true,
             None => false,
         }
     }
@@ -837,12 +865,16 @@ impl MpvIpcBackend {
 
 impl Drop for MpvIpcBackend {
     fn drop(&mut self) {
-        let process = self
-            .mpv_process
+        let engine = self
+            .engine
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(mut process) = process.take() {
-            let _ = process.start_kill();
+        match engine.take() {
+            Some(Engine::Process(mut process)) => {
+                let _ = process.start_kill();
+            }
+            // Dropping the embedded player stops it.
+            Some(Engine::Embedded(_)) | None => {}
         }
         let _ = std::fs::remove_file(&self.socket_path);
     }

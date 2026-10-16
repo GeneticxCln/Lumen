@@ -27,6 +27,11 @@ import type {
   SubtitleSearch,
   SubtitleState,
   BrowseTitle,
+  CastDevice,
+  CastState,
+  UpdateAvailable,
+  UpdateMode,
+  UpdateState,
 } from "./types";
 import type { PosterCandidate } from "./types";
 import type { EpisodeMark, UpcomingSeries } from "./series";
@@ -180,6 +185,48 @@ export async function subtitlesSearch(item: PlayingItem, languages: string[]) {
 /** Downloads the chosen subtitle, remembers it for the title and shows it in the player. */
 export async function subtitlesApply(item: PlayingItem, candidate: SubtitleCandidate) {
   return callBackend("subtitles_apply_cmd", { item, candidate });
+}
+
+export async function updateState() {
+  return callBackend<UpdateState>("update_state_cmd");
+}
+
+export async function updateSetMode(mode: UpdateMode) {
+  return callBackend("update_set_mode_cmd", { mode });
+}
+
+/** Looks for a newer release now; null when this is the newest. */
+export async function updateCheck() {
+  return callBackend<UpdateAvailable | null>("update_check_cmd");
+}
+
+/** Downloads, checks and installs the newest release; returns its tag. */
+export async function updateInstall() {
+  return callBackend<string>("update_install_cmd");
+}
+
+/** Starts the installed version in place of this one. */
+export async function updateRestart() {
+  return callBackend("update_restart_cmd");
+}
+
+/** Looks for TVs and speakers on the network (a few seconds). */
+export async function castDiscover() {
+  return callBackend<CastDevice[]>("cast_discover_cmd");
+}
+
+/** Sends what is playing to a device found by the last search. */
+export async function castStart(rendererId: string, item: PlayingItem, startAt: number) {
+  return callBackend<CastState>("cast_start_cmd", { rendererId, item, startAt });
+}
+
+export async function castControl(action: "play" | "pause" | "stop" | "seek", position?: number) {
+  return callBackend("cast_control_cmd", { action, position });
+}
+
+/** The cast in progress, or null. */
+export async function castState() {
+  return callBackend<CastState | null>("cast_state_cmd");
 }
 
 export async function stop() {
