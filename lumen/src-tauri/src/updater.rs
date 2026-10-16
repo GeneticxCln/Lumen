@@ -182,7 +182,9 @@ pub async fn update_restart_cmd(app: AppHandle) -> Result<()> {
         .ok_or_else(|| PlayerError::InvalidArg("There is no installed update to start".into()))?;
     // The new copy starts after this one has gone, or the single-instance guard would hand it
     // over to this one and exit.
-    std::process::Command::new("sh")
+    let mut starter = std::process::Command::new("sh");
+    lumen_core::child_env::scrub(&mut starter);
+    starter
         .arg("-c")
         .arg("sleep 1; exec \"$0\"")
         .arg(target)

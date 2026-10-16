@@ -653,3 +653,10 @@ kbd { background: var(--bg-secondary); border-color: var(--border); color: var(-
   border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
 }
+
+/* Smooth scrolling. A blurred layer over scrolling content is redrawn every frame by the page
+   engine, so the header is a plain background; hover effects move or fade (cheap) instead of
+   animating shadows and borders (repaint); shelves that are off screen are not laid out. */
+.app-header { -webkit-backdrop-filter: none; backdrop-filter: none; }
+.media-card, .poster-card, .local-card { transition: transform .2s, opacity .2s; }
+.media-shelf { content-visibility: auto; contain-intrinsic-size: auto 300px; }

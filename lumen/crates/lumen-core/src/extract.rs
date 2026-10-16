@@ -143,7 +143,9 @@ pub fn resolve_ytdlp_binary(app_data_dir: Option<&Path>) -> Option<(PathBuf, &'s
             return Some((managed, "managed"));
         }
     }
-    if let Ok(output) = Command::new("yt-dlp")
+    let mut system = Command::new("yt-dlp");
+    crate::child_env::scrub(&mut system);
+    if let Ok(output) = system
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -158,7 +160,9 @@ pub fn resolve_ytdlp_binary(app_data_dir: Option<&Path>) -> Option<(PathBuf, &'s
 
 /// Queries the version string of a yt-dlp binary, if runnable.
 pub fn query_binary_version(bin: &Path) -> Option<String> {
-    let output = Command::new(bin)
+    let mut command = Command::new(bin);
+    crate::child_env::scrub(&mut command);
+    let output = command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -665,6 +669,7 @@ pub async fn extract_stream(
 
     tokio::task::spawn_blocking(move || {
         let mut cmd = Command::new(&binary);
+        crate::child_env::scrub(&mut cmd);
         cmd.args([
             "-J",
             "--no-playlist",

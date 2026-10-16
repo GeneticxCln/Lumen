@@ -41,6 +41,11 @@ Releases are published at <https://github.com/GeneticxCln/Lumen/releases>. Lumen
 
 Build status: the `.deb` and AppImage have been built and inspected, but none of the packages has been installed on a clean machine yet, and no release has been published. See [lumen/AUDIT.md](lumen/AUDIT.md) for exactly what is and is not verified.
 
+## Troubleshooting
+
+- **"mpv stopped before it was ready" / "did not open its control socket".** The message now includes the last lines mpv printed. Run `LUMEN_DEBUG_MPV=1 lumen` (or `LUMEN_DEBUG_MPV=1 ./lumen_*.AppImage`) to see everything mpv says. Check that `mpv` runs on its own (`mpv --version`). Programs Lumen starts do not inherit the AppImage's own library paths.
+- **Scrolling is choppy.** Lumen asks the page engine for smooth, hardware-accelerated scrolling. If it is still slow, try `LUMEN_WEBKIT_SAFE=1 lumen` (turns off WebKitGTK's DMA-BUF renderer, which some NVIDIA and Wayland setups handle badly). The AppImage runs through XWayland on a Wayland session; `GDK_BACKEND=wayland ./lumen_*.AppImage` uses native Wayland.
+
 ## Updates
 
 Settings → **About & updates** shows the version and has one button, **Update to the latest version**. Click it and Lumen looks up the newest published release of this repository on GitHub, and if its tag is higher than the version you are running, downloads that release, checks it and installs it. A banner then offers a restart. There is no account, no signing key and no update server: GitHub's releases are the update channel.

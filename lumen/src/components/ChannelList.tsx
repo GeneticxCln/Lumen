@@ -170,6 +170,7 @@ export function ChannelList({ onPlayChannel, refreshTrigger = 0 }: ChannelListPr
                       alt=""
                       className="channel-logo"
                       loading="lazy"
+                      decoding="async"
                       onError={(e) => {
                         (e.target as HTMLImageElement).style.display = "none";
                       }}

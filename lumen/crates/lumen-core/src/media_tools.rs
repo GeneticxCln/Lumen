@@ -18,6 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 /// look like a timeout it never had a chance to beat.
 pub fn run_with_timeout(mut command: Command, limit: Duration) -> Result<Output> {
     let program = command.get_program().to_string_lossy().into_owned();
+    crate::child_env::scrub(&mut command);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

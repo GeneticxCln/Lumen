@@ -148,7 +148,7 @@ function LocalCard({ item, folder, onPlay }: { item: LocalItem; folder: string; 
   const meta = [formatSize(item.size), percent > 0 ? t("local.card.progress", { position: formatClock(item.position!), duration: formatClock(item.duration!) }) : folder].filter(Boolean).join(" · ");
   return <article className="local-card">
     <button ref={artRef} className={`local-card-art ${poster ? "has-poster" : ""}`} aria-label={t("episodes.play", { name: fileLabel(item.name) })} onClick={() => onPlay(item)} onPointerEnter={() => setPreviewActive(true)} onPointerLeave={() => setPreviewActive(artRef.current === document.activeElement)} onFocus={() => setPreviewActive(true)} onBlur={() => setPreviewActive(artRef.current?.matches(":hover") ?? false)}>
-      {poster && <img className="local-card-poster" src={poster} alt="" loading="lazy" />}
+      {poster && <img className="local-card-poster" src={poster} alt="" loading="lazy" decoding="async" />}
       {!poster && !filmstrip && <span className={`local-card-glyph kind-${kind}`}><Icon name={KIND_ICON[kind]} size={22} /></span>}
       {filmstrip && previewActive && <img className="local-card-filmstrip" src={filmstrip} alt="" aria-hidden="true" />}
       <span className="local-card-ext">{extensionOf(item.name).toUpperCase() || t(KIND_LABEL[kind])}</span>

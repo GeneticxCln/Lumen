@@ -78,10 +78,10 @@ function PosterCard({
   return <article className="poster-card" style={{ width }}>
     <button className="poster-art-button" aria-label={t("episodes.play", { name: channel.name })} onClick={() => onPlay(channel)}>
       {poster && !posterFailed
-        ? <img className="poster-image" src={poster} alt="" loading="lazy" onError={() => setPosterFailed(true)} />
+        ? <img className="poster-image" src={poster} alt="" loading="lazy" decoding="async" onError={() => setPosterFailed(true)} />
         : <span className={`channel-art poster-fallback art-${artworkCategory(channel.group_title)}`}>
             <img className="landscape-art" src="/artwork/landscape.svg" alt="" aria-hidden="true" />
-            {channel.tvg_logo && !logoFailed && <img className="source-logo" src={channel.tvg_logo} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setLogoFailed(true)} />}
+            {channel.tvg_logo && !logoFailed && <img className="source-logo" src={channel.tvg_logo} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setLogoFailed(true)} />}
             <span className="poster-fallback-title">{channel.name}</span>
           </span>}
       <span className="card-play"><Icon name="play" size={24} /></span>
