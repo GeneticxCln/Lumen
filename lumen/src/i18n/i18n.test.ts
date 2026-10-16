@@ -33,6 +33,9 @@ assert.deepEqual(
   ["Movie.srt", "Movie.mkv"],
 );
 
+// Values are never taken for markup.
+assert.deepEqual(tRich("episodes.row", { episode: "<b>1</b>", name: "x" }), [{ text: "E<b>1</b> · x" }]);
+
 // A language is chosen by code; `de-AT` falls back to `de`, and anything unknown to English.
 // This table is a test fixture, not a real translation: every key is the English text with a marker.
 const marked = Object.fromEntries(Object.entries(en).map(([key, value]) => [key, `«${value}»`])) as Catalog;

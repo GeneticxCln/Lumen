@@ -9,6 +9,8 @@ import { ProfileSettings } from "./ProfileSettings";
 import { SyncSettings } from "./SyncSettings";
 import { PlayerPrefsSettings } from "./PlayerPrefsSettings";
 import { OnlineSubtitlesSettings } from "./OnlineSubtitlesSettings";
+import { LanguageSetting } from "./LanguageSetting";
+import { EpisodeAlertsSetting } from "./EpisodeAlertsSetting";
 import { EmbeddedPlayerToggle } from "./EmbeddedPlayerToggle";
 import { LanSourcesToggle } from "./LanSourcesToggle";
 import { t } from "../i18n/index.ts";
@@ -586,6 +588,8 @@ export function SettingsPage({
 
             {tmdbNotice && <p className="saved-badge" role="status">{tmdbNotice}</p>}
 
+            <EpisodeAlertsSetting />
+
             <p className="tmdb-attribution">
               {t("settings.metadata.attribution")}
             </p>
@@ -662,6 +666,7 @@ export function SettingsPage({
               <span className="theme-mini" style={{ background: theme.id === "system" ? "linear-gradient(110deg,#f4f5f7 50%,#141414 50%)" : theme.background }} aria-hidden="true"><span className="theme-mini-bars" /><span className="theme-mini-grid"><i /><i /><i /></span></span>
               <span className="theme-option-name">{theme.name}{draft.theme === theme.id ? <Icon name="check" size={15} /> : theme.id === "system" ? <Icon name="monitor" size={14} /> : null}</span><span className="theme-option-desc">{theme.description}</span>
             </label>)}</div></fieldset>
+            <LanguageSetting />
             <p className="settings-preferences-label">{t("settings.appearance.browsingLabel")}</p>
             {toggle("compactCards", t("settings.appearance.compactLabel"), t("settings.appearance.compactDescription"))}
             {toggle("reduceMotion", t("settings.appearance.reduceMotionLabel"), t("settings.appearance.reduceMotionDescription"))}
