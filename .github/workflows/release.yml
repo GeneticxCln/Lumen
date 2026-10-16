@@ -70,3 +70,54 @@ jobs:
             lumen/target/release/bundle/deb/*.deb
             lumen/target/release/bundle/appimage/*.AppImage
             lumen/target/release/bundle/SHA256SUMS
+
+  # The Flatpak bundle and the Arch package are built from the same commit and added to the release
+  # the job above made. Install the bundle with `flatpak install --user lumen_*.flatpak`, the Arch
+  # package with `sudo pacman -U lumen-*.pkg.tar.zst`.
+  flatpak:
+    name: Flatpak bundle
+    needs: linux
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-48
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: lumen_${{ inputs.tag || github.ref_name }}_x86_64.flatpak
+          manifest-path: lumen/packaging/flatpak/com.quinton.lumen.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+          arch: x86_64
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: lumen_*.flatpak
+
+  arch:
+    name: Arch package
+    needs: linux
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Tools
+        working-directory: .
+        run: pacman -Syu --noconfirm git cargo nodejs npm pkgconf openssl librsvg webkit2gtk-4.1 gtk3 mpv
+      - uses: actions/checkout@v4
+      - name: Build as an ordinary user
+        run: |
+          pkgver=$(sed -n 's/^pkgver=//p' packaging/aur/PKGBUILD)
+          useradd -m builder
+          mkdir -p /home/builder/pkg
+          cd "$GITHUB_WORKSPACE"
+          tar --transform "s#^\./#Lumen-${pkgver}/#" -czf /home/builder/pkg/lumen-${pkgver}.tar.gz --exclude=./.git --exclude=./lumen/node_modules --exclude=./lumen/target .
+          # Use the checkout in place of the release download.
+          sed "s#^source=.*#source=(\"lumen-\$pkgver.tar.gz\")#" lumen/packaging/aur/PKGBUILD > /home/builder/pkg/PKGBUILD
+          chown -R builder:builder /home/builder
+          cd /home/builder/pkg
+          su builder -c 'makepkg --noconfirm --skipchecksums'
+          cp lumen-*.pkg.tar.* "$GITHUB_WORKSPACE/"
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: lumen-*.pkg.tar.*
