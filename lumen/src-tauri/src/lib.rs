@@ -29,6 +29,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(launch::PendingLaunch::default())
         .setup(|app| {
             // What this launch was asked to open ("Open with Lumen", a lumen:// link).

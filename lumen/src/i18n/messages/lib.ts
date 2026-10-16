@@ -33,6 +33,14 @@ export const lib = {
   "lib.launch.skipped.other": "Playing the first item; {count} others were not opened (one thing plays at a time).",
   "lib.launch.subtitleFirst": "Open a video first, then add its subtitle file.",
 
+  "lib.upcoming.today": "{code} airs today",
+  "lib.upcoming.tomorrow": "{code} airs tomorrow",
+  "lib.upcoming.inDays": "{code} airs in {days} days",
+  "lib.upcoming.on": "{code} airs {date}",
+  "lib.aired.today": "{code} aired today",
+  "lib.aired.yesterday": "{code} aired yesterday",
+  "lib.aired.daysAgo": "{code} aired {days} days ago",
+
   "lib.notice.sourceFailed": "{title} failed to play from that source, so Lumen switched to another one.",
   "lib.notice.thisTitle": "This title",
 } as const;

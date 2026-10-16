@@ -172,6 +172,15 @@ export const base = {
   "language.description": "The language of menus and buttons. The page reloads when you change it.",
   "language.system": "Follow the system",
 
+  "alerts.label": "Tell me when a new episode is out",
+  "alerts.description":
+    "Shows a desktop notification when an episode of a series you follow has aired in the last few days. Needs a TMDB key in Settings → Metadata. Checked while Lumen is running; each episode is announced once.",
+  "alerts.denied": "The system did not allow notifications, so this stays off.",
+  "alerts.newEpisode": "New episode: {series}",
+  "alerts.episodeAired": "{code} aired on {date}",
+  "alerts.moreEpisodes.one": "{count} more new episode",
+  "alerts.moreEpisodes.other": "{count} more new episodes",
+
   "player.region": "Video player",
   "player.buffering": "Buffering…",
   "player.bufferingLabel": "Buffering",
