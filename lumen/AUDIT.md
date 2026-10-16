@@ -30,7 +30,7 @@ Tauri v2 shell (`src-tauri`) over a UI-agnostic Rust core (`crates/lumen-core`: 
 - **Single-window playback is an experiment.** Playing inside the Lumen window works on X11/XWayland (verified by screenshot under Xvfb: one window, video above the controls, setting off gives the separate mpv window). It is unavailable in a native Wayland window, controls are beside the video rather than over it, and fullscreen in this mode is untested on a real window manager.
 - **Sync data model.** Synced records still carry the (credential-stripped) stream URL beside the `content_key`; the server cannot read either. Query parameters whose names contain `key`, `auth`, `token`, `secret` or `pass` are removed from synced URLs, which can break a stream whose identity lives in such a parameter on the other device.
 - **Search and discovery** classify movies, series and live TV from names and groups, not catalog metadata. All library rows are held in memory; shelves virtualize the DOM but very large libraries need pagination.
-- **Clippy** reports a few style lints in `extract.rs`, `harvest.rs` and `search.rs`; they are not enforced.
+- **Interface language.** The catalog and a gate against new hard-coded text exist (README, "Translating Lumen"), but only English is shipped and most screens (Settings sections, local files, search engine, source dialog, profile management, home) still hold their text in the components, about 390 strings recorded in `src/i18n/baseline.json`. Text built in code (notices, errors, language names) is outside the gate.
 - Extra mpv arguments are a trusted-local feature: whitespace-split, no shell involved.
 
 ## Checks

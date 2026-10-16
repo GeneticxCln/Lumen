@@ -77,6 +77,12 @@ No Netflix catalog, paid-channel access, DRM bypass, or external recommendation 
 
 Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds both packages and attaches them, with a `SHA256SUMS` file, to a **draft** GitHub release. Set the repository variable `LUMEN_SYNC_URL` to bake in a default sync server. Both package types have been built and inspected here (desktop entry, file types, `lumen://` handler, dependencies); neither has been installed on a clean machine, and the release workflow itself has not been run. There is no Flatpak, AUR or signed auto-update yet.
 
+## Translating Lumen
+
+Interface text lives in one catalog, `src/i18n/en.ts`, and screens show it with `t("key")` (`tn("key", count)` for plurals, `{name}` for values, `<code>…</code>` markup through `<Rich>`). A wrong key or a missing value is a type error. To add a language, create a `Catalog` for it (the type lists every key) and register it with `addLocale("de", catalog)`; `setLocale("de")` selects it, `de-AT` falls back to `de`, and anything unknown falls back to English. Nothing chooses a language automatically yet, and only English exists.
+
+Only some screens are migrated: the player and its controls, profile unlock, episode lists, sync, audio and subtitle preferences, and the two switches in Settings. `npm test` runs a gate (`src/i18n/gate.test.ts`) that fails if a component gains hard-coded text, and the remaining screens are listed with their counts in `src/i18n/baseline.json`. After migrating a screen, `npm run i18n:baseline` records the lower count; the gate fails if the baseline is out of date, so it can only go down. The gate sees JSX text and text attributes (`aria-label`, `title`, `placeholder`, `alt`, `label`). Messages that code builds elsewhere (notices, error text, language names in `lib/languages.ts`) are not checked.
+
 ## Development
 
 Use the existing npm lockfile with Node 24+:

@@ -2,6 +2,7 @@ import { buildSeasons, seriesIdOf } from "../lib/series";
 import type { EpisodeMark } from "../lib/series";
 import type { Channel, HistoryEntry } from "../lib/types";
 import { Icon } from "./Icon";
+import { t } from "../i18n/index.ts";
 
 interface EpisodeListProps {
   current: Channel;
@@ -21,12 +22,12 @@ export function EpisodeList({ current, channels, marks, history, busy, onPlay, o
   const currentSeason = seasons.find((season) => season.episodes.some((row) => row.channel.id === current.id))?.season;
 
   return <div className="episode-list">
-    <h3 className="settings-section-title">Episodes</h3>
+    <h3 className="settings-section-title">{t("episodes.title")}</h3>
     {seasons.map((season) => {
       const allWatched = season.watchedCount === season.episodes.length;
       return <details key={season.season} open={season.season === currentSeason || seasons.length === 1}>
         <summary>
-          Season {season.season} <span className="muted-note">{season.watchedCount} of {season.episodes.length} watched</span>
+          {t("episodes.season", { season: season.season })} <span className="muted-note">{t("episodes.watchedCount", { watched: season.watchedCount, total: season.episodes.length })}</span>
         </summary>
         <div className="settings-actions">
           <button
@@ -34,7 +35,7 @@ export function EpisodeList({ current, channels, marks, history, busy, onPlay, o
             disabled={busy}
             onClick={() => onMark(series, season.season, season.episodes.map((row) => row.episode), !allWatched)}
           >
-            {allWatched ? "Mark season unwatched" : "Mark season watched"}
+            {allWatched ? t("episodes.markSeasonUnwatched") : t("episodes.markSeasonWatched")}
           </button>
         </div>
         <ul className="episode-rows">
@@ -42,14 +43,14 @@ export function EpisodeList({ current, channels, marks, history, busy, onPlay, o
             <button
               className={`icon-button circle ${row.watched ? "is-saved" : ""}`}
               aria-pressed={row.watched}
-              aria-label={`${row.watched ? "Mark unwatched" : "Mark watched"}: ${row.channel.name}`}
+              aria-label={t(row.watched ? "episodes.markUnwatched" : "episodes.markWatched", { name: row.channel.name })}
               disabled={busy}
               onClick={() => onMark(series, row.season, [row.episode], !row.watched)}
             >
               <Icon name={row.watched ? "check" : "plus"} size={16} />
             </button>
-            <span className="episode-name">E{String(row.episode).padStart(2, "0")} · {row.channel.name}</span>
-            <button className="icon-button" aria-label={`Play ${row.channel.name}`} disabled={busy} onClick={() => onPlay(row.channel)}>
+            <span className="episode-name">{t("episodes.row", { episode: String(row.episode).padStart(2, "0"), name: row.channel.name })}</span>
+            <button className="icon-button" aria-label={t("episodes.play", { name: row.channel.name })} disabled={busy} onClick={() => onPlay(row.channel)}>
               <Icon name="play" size={16} />
             </button>
           </li>)}

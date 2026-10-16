@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { errorMessage, getSettings, setSetting } from "../lib/tauri";
+import { t } from "../i18n/index.ts";
 
 /**
  * Whether Lumen may fetch playlists from addresses on this computer or its network. Off by
@@ -33,11 +34,8 @@ export function LanSourcesToggle() {
   return (
     <div className="setting-row">
       <div>
-        <label htmlFor="setting-allow-lan-sources">Allow sources on my local network</label>
-        <p>
-          Lets Lumen import playlists from this computer or your home network (for example a NAS or a
-          media server). Leave this off unless you host a playlist yourself.
-        </p>
+        <label htmlFor="setting-allow-lan-sources">{t("lan.label")}</label>
+        <p>{t("lan.description")}</p>
         {error && <p className="dialog-error" role="alert">{error}</p>}
       </div>
       <input

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { embeddedPlayerSupport, errorMessage, getSettings, setSetting } from "../lib/tauri";
 import type { EmbeddedSupport } from "../lib/tauri";
+import { t } from "../i18n/index.ts";
 
 /**
  * Experimental: play video inside the Lumen window instead of a separate mpv window. It needs an
@@ -40,11 +41,8 @@ export function EmbeddedPlayerToggle() {
   return (
     <div className="setting-row">
       <div>
-        <label htmlFor="setting-embed-player">Play video inside the Lumen window (experimental)</label>
-        <p>
-          Shows the video above the controls in this window instead of opening a separate mpv window.
-          Takes effect the next time playback starts.
-        </p>
+        <label htmlFor="setting-embed-player">{t("embed.label")}</label>
+        <p>{t("embed.description")}</p>
         {unavailable && <p className="muted-note">{support?.reason}</p>}
         {error && <p className="dialog-error" role="alert">{error}</p>}
       </div>

@@ -10,6 +10,7 @@ import {
   syncStatus,
   syncNow,
 } from "../lib/tauri";
+import { t } from "../i18n/index.ts";
 import { describeSync, skippedWarning } from "../lib/sync";
 import type { SyncState, SyncStatus } from "../lib/types";
 
@@ -61,7 +62,7 @@ export function SyncSettings() {
     try {
       setSync(await syncNow());
     } catch (failure) {
-      setError(`Sync is on, but the first sync failed: ${errorMessage(failure)}`);
+      setError(t("sync.firstSyncFailed", { reason: errorMessage(failure) }));
     }
   };
 
@@ -108,7 +109,7 @@ export function SyncSettings() {
       await navigator.clipboard.writeText(shownKey);
       setCopied(true);
     } catch {
-      setError("Could not copy to the clipboard. Select the key and copy it by hand.");
+      setError(t("sync.key.copyFailed"));
     }
   };
 
@@ -116,39 +117,32 @@ export function SyncSettings() {
 
   return (
     <div className="sync-settings">
-      <h3 className="settings-section-title">Sync across devices</h3>
-      {!state && !error && <p className="muted-note">Checking sync…</p>}
+      <h3 className="settings-section-title">{t("sync.title")}</h3>
+      {!state && !error && <p className="muted-note">{t("sync.checking")}</p>}
 
       {state && !state.enabled && (
         <>
-          <p>
-            Keep your profiles, My List and watch progress in step on your other computers. There is no
-            account: Lumen makes a secret key on this device, and you type that key into your other devices.
-          </p>
-          <p className="muted-note">
-            Everything is encrypted on this device before it is uploaded, so the sync server only holds data it
-            cannot read. Because there is no account, nobody can recover a lost key. If you lose the key and every
-            device that has it, the synced copy is gone. Your library on this computer is never affected.
-          </p>
+          <p>{t("sync.intro")}</p>
+          <p className="muted-note">{t("sync.privacy")}</p>
           <details className="sync-server">
-            <summary>Sync server{state.serverUrl ? `: ${state.serverUrl}` : " (not set)"}</summary>
+            <summary>{state.serverUrl ? t("sync.server.summary", { url: state.serverUrl }) : t("sync.server.summaryUnset")}</summary>
             <p className="muted-note">
               {state.defaultServer && state.serverUrl
-                ? "This is the server built into this version of Lumen. You can run your own and enter its address here."
-                : "Enter the address of a Lumen sync server. It must start with https://."}
+                ? t("sync.server.builtIn")
+                : t("sync.server.enter")}
             </p>
-            <label htmlFor="sync-server-url">Server address</label>
+            <label htmlFor="sync-server-url">{t("sync.server.label")}</label>
             <input
               id="sync-server-url"
               type="url"
               value={serverText}
-              placeholder="https://sync.example.com"
+              placeholder={t("sync.server.placeholder")}
               disabled={busy}
               onChange={(event) => setServerText(event.target.value)}
             />
             <div className="settings-actions">
               <button className="secondary-button" disabled={busy} onClick={() => void saveServer()}>
-                Save server address
+                {t("sync.server.save")}
               </button>
             </div>
           </details>
@@ -157,27 +151,25 @@ export function SyncSettings() {
 
       {state?.enabled && (
         <>
-          <p>Sync is on. Your profiles, My List and watch progress follow you across the devices that have your key.</p>
+          <p>{t("sync.on")}</p>
           {sync && <p className="muted-note">{describeSync(sync)}</p>}
-          {state.serverUrl && <p className="muted-note">Server: {state.serverUrl}</p>}
+          {state.serverUrl && <p className="muted-note">{t("sync.serverLine", { url: state.serverUrl })}</p>}
           {warning && <div className="dialog-error" role="alert">{warning}</div>}
         </>
       )}
 
       {shownKey && (
-        <div className="sync-key-panel" role="region" aria-label="Your sync key">
+        <div className="sync-key-panel" role="region" aria-label={t("sync.key.region")}>
           <p className="sync-key" data-testid="sync-key">{shownKey}</p>
           <p className="muted-note">
-            {keyIsNew
-              ? "Write this key down or save it in a password manager now. You need it to add another device, and it cannot be recovered if you lose it."
-              : "Anyone with this key can read and change your synced data. Only enter it on your own devices."}
+            {keyIsNew ? t("sync.key.new") : t("sync.key.existing")}
           </p>
           <div className="settings-actions">
             <button className="secondary-button" onClick={() => void copyKey()}>
-              {copied ? "Copied" : "Copy key"}
+              {copied ? t("sync.key.copied") : t("sync.key.copy")}
             </button>
             <button className="secondary-button" onClick={() => setShownKey(null)}>
-              {keyIsNew ? "I have saved it" : "Hide key"}
+              {keyIsNew ? t("sync.key.saved") : t("sync.key.hide")}
             </button>
           </div>
         </div>
@@ -185,12 +177,12 @@ export function SyncSettings() {
 
       {mode === "join" && state && !state.enabled && (
         <div className="sync-join">
-          <label htmlFor="sync-join-key">Sync key from your other device</label>
+          <label htmlFor="sync-join-key">{t("sync.join.label")}</label>
           <input
             id="sync-join-key"
             type="text"
             value={joinText}
-            placeholder="XXXX-XXXX-XXXX-…"
+            placeholder={t("sync.join.placeholder")}
             autoComplete="off"
             autoCapitalize="characters"
             spellCheck={false}
@@ -199,37 +191,31 @@ export function SyncSettings() {
           />
           <div className="settings-actions">
             <button className="primary-button" disabled={busy || joinText.trim() === ""} onClick={() => void join()}>
-              {busy ? "Joining…" : "Add this device"}
+              {busy ? t("sync.join.joining") : t("sync.addDevice")}
             </button>
             <button className="secondary-button" disabled={busy} onClick={() => { setMode("idle"); setJoinText(""); }}>
-              Cancel
+              {t("common.cancel")}
             </button>
           </div>
         </div>
       )}
 
       {mode === "confirm-off" && (
-        <div className="sync-confirm" role="alertdialog" aria-label="Turn off sync">
-          <p>
-            Turn off sync on this device? Your library, My List and history stay here. The synced copy stays on the
-            server for your other devices, and you can join again with the key.
-          </p>
+        <div className="sync-confirm" role="alertdialog" aria-label={t("sync.turnOffSync")}>
+          <p>{t("sync.turnOffConfirm")}</p>
           <div className="settings-actions">
-            <button className="secondary-button" disabled={busy} onClick={() => void turnOff(false)}>Turn off sync</button>
-            <button className="secondary-button" disabled={busy} onClick={() => setMode("idle")}>Cancel</button>
+            <button className="secondary-button" disabled={busy} onClick={() => void turnOff(false)}>{t("sync.turnOffSync")}</button>
+            <button className="secondary-button" disabled={busy} onClick={() => setMode("idle")}>{t("common.cancel")}</button>
           </div>
         </div>
       )}
 
       {mode === "confirm-delete" && (
-        <div className="sync-confirm" role="alertdialog" aria-label="Delete synced data">
-          <p>
-            Delete the synced copy from the server for every device, and turn sync off here? Your other devices keep
-            their own local data but stop syncing. This cannot be undone.
-          </p>
+        <div className="sync-confirm" role="alertdialog" aria-label={t("sync.deleteData")}>
+          <p>{t("sync.deleteConfirm")}</p>
           <div className="settings-actions">
-            <button className="danger-button" disabled={busy} onClick={() => void turnOff(true)}>Delete synced data</button>
-            <button className="secondary-button" disabled={busy} onClick={() => setMode("idle")}>Cancel</button>
+            <button className="danger-button" disabled={busy} onClick={() => void turnOff(true)}>{t("sync.deleteData")}</button>
+            <button className="secondary-button" disabled={busy} onClick={() => setMode("idle")}>{t("common.cancel")}</button>
           </div>
         </div>
       )}
@@ -241,21 +227,21 @@ export function SyncSettings() {
           {state.enabled ? (
             <>
               <button className="secondary-button" disabled={busy} onClick={() => void syncAction()}>
-                {busy ? "Working…" : "Sync now"}
+                {busy ? t("sync.working") : t("sync.syncNow")}
               </button>
-              <button className="secondary-button" disabled={busy} onClick={() => void showKey()}>Show key</button>
-              <button className="secondary-button" disabled={busy} onClick={() => setMode("confirm-off")}>Turn off</button>
+              <button className="secondary-button" disabled={busy} onClick={() => void showKey()}>{t("sync.showKey")}</button>
+              <button className="secondary-button" disabled={busy} onClick={() => setMode("confirm-off")}>{t("sync.turnOff")}</button>
               <button className="danger-button" disabled={busy} onClick={() => setMode("confirm-delete")}>
-                Delete synced data
+                {t("sync.deleteData")}
               </button>
             </>
           ) : (
             <>
               <button className="primary-button" disabled={busy || !state.serverUrl} onClick={() => void turnOn()}>
-                {busy ? "Turning on…" : "Turn on sync"}
+                {busy ? t("sync.turningOn") : t("sync.turnOn")}
               </button>
               <button className="secondary-button" disabled={busy || !state.serverUrl} onClick={() => setMode("join")}>
-                Add this device
+                {t("sync.addDevice")}
               </button>
             </>
           )}
