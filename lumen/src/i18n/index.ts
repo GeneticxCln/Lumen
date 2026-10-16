@@ -43,6 +43,12 @@ export function setLocale(code: string): void {
   const found = locales[wanted] ? wanted : wanted.split("-")[0];
   active = locales[found] ?? en;
   activeCode = locales[found] ? found : "en";
+  if (typeof document !== "undefined") document.documentElement.lang = activeCode;
+}
+
+/** The code of the language in use (`en`, `de`). */
+export function currentLocale(): string {
+  return activeCode;
 }
 
 function fill(message: string, values?: Record<string, string | number>): string {

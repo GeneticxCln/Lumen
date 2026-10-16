@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { addLocale, availableLocales, setLocale, splitRich, t, tn, tRich } from "./index.ts";
 import type { Catalog } from "./index.ts";
 import { en } from "./en.ts";
+import { detectLocale } from "./locale.ts";
 
 // Interpolation.
 assert.equal(t("common.cancel"), "Cancel");
@@ -64,5 +65,12 @@ for (const key of keys) {
   const text = (en as Record<string, string>)[key];
   assert.equal(text.replace(/\{\w+\}/g, "").match(/[{}]/), null, `${key} has an unmatched brace`);
 }
+
+// The system's language picks the catalog: exact, then main part, then English.
+assert.equal(detectLocale(["en", "de"], ["de-AT", "en-US"]), "de");
+assert.equal(detectLocale(["en", "de"], ["fr-FR", "de"]), "de", "the first language that exists wins");
+assert.equal(detectLocale(["en", "pt-br"], ["pt-BR"]), "pt-br");
+assert.equal(detectLocale(["en"], ["ja-JP"]), "en");
+assert.equal(detectLocale(["en", "de"], []), "en");
 
 console.log("i18n.test.ts: ok");

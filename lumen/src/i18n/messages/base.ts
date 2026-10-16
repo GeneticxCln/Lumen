@@ -168,6 +168,10 @@ export const base = {
   "player.playNextNow": "Play now",
   "player.cancelNext": "Cancel",
 
+  "language.label": "Language",
+  "language.description": "The language of menus and buttons. The page reloads when you change it.",
+  "language.system": "Follow the system",
+
   "player.region": "Video player",
   "player.buffering": "Buffering…",
   "player.bufferingLabel": "Buffering",

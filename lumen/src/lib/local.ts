@@ -1,6 +1,8 @@
 // Helpers for the media that lives on this computer. Pure functions only, so the Discovery
 // page stays a presentational component and these can be checked without a DOM.
 
+import { t } from "../i18n/index.ts";
+
 export type MediaKind = "video" | "audio" | "playlist" | "other";
 
 const VIDEO_EXT = ["mp4", "mkv", "avi", "mov", "webm", "ts", "m2ts"];
@@ -16,12 +18,12 @@ export const MAX_SUBDIRS = 8;
 
 /** Poster frame times the backends accept. Settings and the per-file picker both read this list. */
 export const POSTER_FRAME_OPTIONS: { seconds: number; label: string }[] = [
-  { seconds: 0, label: "Start of video" },
-  { seconds: 2, label: "2 seconds (default)" },
-  { seconds: 5, label: "5 seconds" },
-  { seconds: 10, label: "10 seconds" },
-  { seconds: 30, label: "30 seconds" },
-  { seconds: 60, label: "1 minute" },
+  { seconds: 0, get label() { return t("lib.posterFrame.start"); } },
+  { seconds: 2, get label() { return t("lib.posterFrame.2"); } },
+  { seconds: 5, get label() { return t("lib.posterFrame.5"); } },
+  { seconds: 10, get label() { return t("lib.posterFrame.10"); } },
+  { seconds: 30, get label() { return t("lib.posterFrame.30"); } },
+  { seconds: 60, get label() { return t("lib.posterFrame.60"); } },
 ];
 
 export function extensionOf(name: string): string {
