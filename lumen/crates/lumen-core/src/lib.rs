@@ -21,6 +21,7 @@ pub mod sync;
 pub mod sync_crypto;
 pub mod sync_keys;
 pub mod tmdb;
+pub mod update;
 
 #[cfg(test)]
 mod sync_tests;

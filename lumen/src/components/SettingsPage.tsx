@@ -10,6 +10,7 @@ import { SyncSettings } from "./SyncSettings";
 import { PlayerPrefsSettings } from "./PlayerPrefsSettings";
 import { OnlineSubtitlesSettings } from "./OnlineSubtitlesSettings";
 import { LanguageSetting } from "./LanguageSetting";
+import { UpdateSettings } from "./UpdateSettings";
 import { EpisodeAlertsSetting } from "./EpisodeAlertsSetting";
 import { EmbeddedPlayerToggle } from "./EmbeddedPlayerToggle";
 import { LanSourcesToggle } from "./LanSourcesToggle";
@@ -672,6 +673,7 @@ export function SettingsPage({
             {toggle("reduceMotion", t("settings.appearance.reduceMotionLabel"), t("settings.appearance.reduceMotionDescription"))}
             {toggle("personalizedRows", t("settings.appearance.personalizedLabel"), t("settings.appearance.personalizedDescription"))}
             {toggle("hideUnavailable", t("settings.appearance.hideUnavailableLabel"), t("settings.appearance.hideUnavailableDescription"))}
+            <UpdateSettings />
           </>
         )}
 

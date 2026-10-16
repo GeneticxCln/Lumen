@@ -351,3 +351,35 @@ export interface CastState {
   title: string;
   status: CastStatus | null;
 }
+
+export type UpdateMode = "auto" | "notify" | "off";
+
+export interface UpdateState {
+  current: string;
+  mode: UpdateMode;
+  /** `appImage` can be replaced by Lumen; `managed` is updated by the system that installed it. */
+  kind: "appImage" | "managed";
+  /** Seconds since the epoch. */
+  lastChecked: number | null;
+  /** The tag of a release that was installed and waits for a restart. */
+  installed: string | null;
+}
+
+export interface UpdatePackage {
+  name: string;
+  size: number;
+  sha256: string;
+}
+
+/** A newer release. `package` is missing when there is nothing verified to install. */
+export interface UpdateAvailable {
+  tag: string;
+  page: string;
+  package: UpdatePackage | null;
+}
+
+/** What the `update://ready` and `update://available` events carry. */
+export interface UpdateEventPayload {
+  tag: string;
+  page: string;
+}

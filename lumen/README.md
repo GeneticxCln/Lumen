@@ -61,6 +61,17 @@ In the player's settings, **Cast…** lists TVs, receivers and speakers on your 
 - Devices must be on the local network: anything that announces a public address is ignored, and addresses on your network are only used as sources if you turned on local-network sources in Settings.
 - Chromecast and AirPlay are different protocols and are not supported. Subtitles added in Lumen are not sent to the device.
 
+## Updates
+
+Lumen updates itself from its own GitHub releases; there is no signing key and no update server. At start (after about 20 seconds, then every few hours, at most once a day) it asks GitHub for the latest published release. If that release has a higher version than the running one:
+
+- **AppImage**: the AppImage for this machine is downloaded next to the running file, checked against the release's `SHA256SUMS`, and swapped in with one rename. A banner asks to restart; the running copy keeps working until then.
+- **Anything else** (a `.deb`, a Flatpak, a build you made): Lumen only says that a newer version exists. The system that installed it does the updating.
+
+**Settings → Appearance → Updates** switches between *install automatically* (the default), *only tell me* and *never look*, and has a *Check now* button. Only the release's own files are fetched, from `github.com` and GitHub's file hosts; a file that does not match its checksum, is larger than announced or is not a program is deleted and nothing is replaced. Drafts and pre-releases are never offered, so a release reaches users when it is published, not when its tag is pushed.
+
+The checksum protects against a damaged or truncated download. It does not prove who published the file: whoever can publish a release to the repository can publish an update, because the checksums come from the same place as the files.
+
 ## Sync
 
 Sync is optional and there are no accounts. The library, files, and playback all work without it.

@@ -15,6 +15,7 @@ mod launch;
 mod mpris;
 mod playback;
 mod sync;
+mod updater;
 
 use crate::commands::*;
 use crate::db::*;
@@ -47,6 +48,7 @@ pub fn run() {
                         eprintln!("Failed to init database: {}", e);
                     } else if let Ok(pool) = ensure_db(&app_handle).await {
                         sync::start(pool);
+                        updater::start(app_handle.clone());
                     }
                 }
             });
@@ -67,6 +69,11 @@ pub fn run() {
             sync::sync_join,
             sync::sync_show_key,
             sync::sync_disable,
+            updater::update_state_cmd,
+            updater::update_set_mode_cmd,
+            updater::update_check_cmd,
+            updater::update_install_cmd,
+            updater::update_restart_cmd,
             cast::cast_discover_cmd,
             cast::cast_start_cmd,
             cast::cast_control_cmd,

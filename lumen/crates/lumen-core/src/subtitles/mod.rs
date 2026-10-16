@@ -29,7 +29,7 @@ pub mod service;
 pub mod store;
 
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 
 /// How long one provider gets to answer a search.
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(10);

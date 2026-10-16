@@ -19,9 +19,9 @@ import { LocalDevicePage } from "./components/LocalDevicePage";
 import { SearchEnginePage } from "./components/SearchEnginePage";
 import { usePlayer } from "./hooks/usePlayer";
 import { useChannels } from "./hooks/useChannels";
-import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, getPlayerPrefs, listProfiles, setPlayerFullscreen, tmdbStatus } from "./lib/tauri";
+import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, getPlayerPrefs, listProfiles, setPlayerFullscreen, tmdbStatus, updateRestart } from "./lib/tauri";
 import type { BrowseTitle } from "./lib/types";
-import type { CastState, Channel, HistoryEntry, PlayerPrefs, Profile } from "./lib/types";
+import type { CastState, Channel, HistoryEntry, PlayerPrefs, Profile, UpdateEventPayload } from "./lib/types";
 import { readPreferences, recommendChannels, catalogShelves, contentKind, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
 import { isLocalPath } from "./lib/local";
 import { nextEpisode } from "./lib/episodes";
@@ -255,6 +255,20 @@ function App() {
       if (disposed) off(); else unlisten = off;
     }).catch(() => {});
     return () => { disposed = true; unlisten?.(); };
+  }, []);
+
+  // An update installed in the background waits for a restart; a newer release that is not
+  // installed automatically is mentioned once.
+  const [updateReady, setUpdateReady] = useState<string | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    const offs: Array<() => void> = [];
+    import("@tauri-apps/api/event").then(async ({ listen }) => {
+      const ready = await listen<UpdateEventPayload>("update://ready", (event) => setUpdateReady(event.payload.tag));
+      const available = await listen<UpdateEventPayload>("update://available", (event) => setNotice(t("update.notice.available", { tag: event.payload.tag })));
+      if (disposed) { ready(); available(); } else offs.push(ready, available);
+    }).catch(() => {});
+    return () => { disposed = true; offs.forEach((off) => off()); };
   }, []);
 
   // Dropping files on the window opens them the same way.
@@ -673,6 +687,13 @@ function App() {
       onClose={() => setCastOpen(false)}
     />
     {cast && <CastBar cast={cast} seekStep={seekStep} onEnded={() => setCast(null)} onError={setNotice} />}
+    {updateReady && (
+      <div className="update-banner" role="status">
+        <span>{t("update.notice.ready", { tag: updateReady })}</span>
+        <button className="primary-button" onClick={() => void run(updateRestart)}>{t("update.restart")}</button>
+        <button className="secondary-button" onClick={() => setUpdateReady(null)}>{t("update.later")}</button>
+      </div>
+    )}
     {locked && <ProfileGate profiles={profiles} initialProfileId={activeProfileId} onUnlocked={handleProfilesChanged} />}
   </>;
 }
