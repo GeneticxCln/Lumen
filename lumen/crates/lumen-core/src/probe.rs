@@ -43,9 +43,7 @@ fn effective_port(url: &Url) -> Option<u16> {
 }
 
 fn same_origin_host_port(a: &Url, b: &Url) -> bool {
-    a.host_str().is_some()
-        && a.host_str() == b.host_str()
-        && effective_port(a) == effective_port(b)
+    a.host_str().is_some() && a.host_str() == b.host_str() && effective_port(a) == effective_port(b)
 }
 
 fn build_header_map(extra: &HashMap<String, String>) -> HeaderMap {
@@ -229,7 +227,7 @@ where
         return vec![None; total];
     };
     let targets = Arc::new(targets);
-    let next_idx = Arc::new( std::sync::atomic::AtomicUsize::new(0) );
+    let next_idx = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let worker_count = total.min(MAX_CONCURRENT_PROBES);
     let (tx, mut rx) = mpsc::unbounded_channel::<(usize, ProbeResult)>();
     let mut handles = Vec::with_capacity(worker_count);
@@ -321,11 +319,18 @@ mod tests {
         let server = tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
                 hits_clone.fetch_add(1, Ordering::SeqCst);
-                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    .await;
             }
         });
 
-        let res = probe_single(&format!("http://127.0.0.1:{port}/live.m3u8"), &HashMap::new(), false).await;
+        let res = probe_single(
+            &format!("http://127.0.0.1:{port}/live.m3u8"),
+            &HashMap::new(),
+            false,
+        )
+        .await;
         assert!(!res.live);
         assert_eq!(res.status, None);
         assert_eq!(hits.load(Ordering::SeqCst), 0);
@@ -338,12 +343,18 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
             loop {
-                let Ok((mut stream, _)) = listener.accept().await else { break };
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
                 let mut buf = [0u8; 2048];
                 let n = stream.read(&mut buf).await.unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
-                let has_custom_referer = req.lines().any(|l| l.eq_ignore_ascii_case("referer: https://custom.example/"));
-                let has_custom_ua = req.lines().any(|l| l.eq_ignore_ascii_case("user-agent: CustomAgent/2.0"));
+                let has_custom_referer = req
+                    .lines()
+                    .any(|l| l.eq_ignore_ascii_case("referer: https://custom.example/"));
+                let has_custom_ua = req
+                    .lines()
+                    .any(|l| l.eq_ignore_ascii_case("user-agent: CustomAgent/2.0"));
                 if req.starts_with("HEAD ") {
                     let _ = stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
                 } else if has_custom_referer && has_custom_ua {
@@ -359,15 +370,28 @@ mod tests {
         headers.insert("User-Agent".into(), "CustomAgent/2.0".into());
 
         // Without headers -> 403
-        let without = probe_single(&format!("http://127.0.0.1:{port}/stream.m3u8"), &HashMap::new(), true).await;
+        let without = probe_single(
+            &format!("http://127.0.0.1:{port}/stream.m3u8"),
+            &HashMap::new(),
+            true,
+        )
+        .await;
         assert!(!without.live);
         assert_eq!(without.status, Some(403));
 
         // With per-channel headers (B7) -> 200 + content_type
-        let with_hdrs = probe_single(&format!("http://127.0.0.1:{port}/stream.m3u8"), &headers, true).await;
+        let with_hdrs = probe_single(
+            &format!("http://127.0.0.1:{port}/stream.m3u8"),
+            &headers,
+            true,
+        )
+        .await;
         assert!(with_hdrs.live);
         assert_eq!(with_hdrs.status, Some(200));
-        assert_eq!(with_hdrs.content_type.as_deref(), Some("application/vnd.apple.mpegurl"));
+        assert_eq!(
+            with_hdrs.content_type.as_deref(),
+            Some("application/vnd.apple.mpegurl")
+        );
 
         server.abort();
     }
@@ -394,22 +418,29 @@ mod tests {
         });
 
         let targets = vec![
-            ProbeTarget { url: format!("http://127.0.0.1:{fast_port}/ok.ts"), headers: HashMap::new() },
-            ProbeTarget { url: format!("http://127.0.0.1:{hang_port}/hang.ts"), headers: HashMap::new() },
+            ProbeTarget {
+                url: format!("http://127.0.0.1:{fast_port}/ok.ts"),
+                headers: HashMap::new(),
+            },
+            ProbeTarget {
+                url: format!("http://127.0.0.1:{hang_port}/hang.ts"),
+                headers: HashMap::new(),
+            },
         ];
 
         let mut streamed = Vec::new();
-        let outcomes = probe_targets_bounded(
-            targets,
-            true,
-            Duration::from_millis(400),
-            |idx, res| streamed.push((idx, res.live)),
-        )
-        .await;
+        let outcomes =
+            probe_targets_bounded(targets, true, Duration::from_millis(400), |idx, res| {
+                streamed.push((idx, res.live))
+            })
+            .await;
 
         assert_eq!(streamed, vec![(0, true)]);
         assert!(outcomes[0].as_ref().unwrap().live);
-        assert!(outcomes[1].is_none(), "hanging host timed out by overall deadline");
+        assert!(
+            outcomes[1].is_none(),
+            "hanging host timed out by overall deadline"
+        );
 
         fast_srv.abort();
         hang_srv.abort();

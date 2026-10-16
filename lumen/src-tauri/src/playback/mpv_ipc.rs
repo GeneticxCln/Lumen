@@ -5,14 +5,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as MpvValue;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio::time::{timeout, Duration};
+use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::time::{Duration, timeout};
 
 #[derive(Debug, Serialize)]
 struct MpvRequest {
@@ -88,7 +88,11 @@ fn private_socket_dir() -> Result<std::path::PathBuf> {
     match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(PlayerError::Mpv(format!("Could not create the player socket directory: {error}"))),
+        Err(error) => {
+            return Err(PlayerError::Mpv(format!(
+                "Could not create the player socket directory: {error}"
+            )));
+        }
     }
     // A directory made by someone else, or readable by others, is not private: refuse it rather
     // than trust it.
@@ -104,7 +108,10 @@ fn private_socket_dir() -> Result<std::path::PathBuf> {
 }
 
 fn mpv_id(value: &MpvValue) -> Option<String> {
-    value.as_i64().map(|id| id.to_string()).or_else(|| value.as_str().map(ToOwned::to_owned))
+    value
+        .as_i64()
+        .map(|id| id.to_string())
+        .or_else(|| value.as_str().map(ToOwned::to_owned))
 }
 
 fn mpv_track(track: &MpvValue) -> Option<PlayerTrack> {
@@ -115,16 +122,38 @@ fn mpv_track(track: &MpvValue) -> Option<PlayerTrack> {
         _ => return None,
     };
     let id = mpv_id(track.get("id")?)?;
-    let language = track.get("lang").and_then(MpvValue::as_str).filter(|lang| !lang.is_empty()).map(ToOwned::to_owned);
-    let title = track.get("title").and_then(MpvValue::as_str).filter(|title| !title.is_empty());
-    let codec = track.get("codec").and_then(MpvValue::as_str).filter(|codec| !codec.is_empty());
-    let label = title.map(ToOwned::to_owned).or_else(|| language.clone()).or_else(|| codec.map(ToOwned::to_owned)).unwrap_or_else(|| format!("{} track {id}", if kind == "audio" { "Audio" } else { "Subtitle" }));
+    let language = track
+        .get("lang")
+        .and_then(MpvValue::as_str)
+        .filter(|lang| !lang.is_empty())
+        .map(ToOwned::to_owned);
+    let title = track
+        .get("title")
+        .and_then(MpvValue::as_str)
+        .filter(|title| !title.is_empty());
+    let codec = track
+        .get("codec")
+        .and_then(MpvValue::as_str)
+        .filter(|codec| !codec.is_empty());
+    let label = title
+        .map(ToOwned::to_owned)
+        .or_else(|| language.clone())
+        .or_else(|| codec.map(ToOwned::to_owned))
+        .unwrap_or_else(|| {
+            format!(
+                "{} track {id}",
+                if kind == "audio" { "Audio" } else { "Subtitle" }
+            )
+        });
     Some(PlayerTrack {
         id,
         kind: kind.into(),
         label,
         language,
-        selected: track.get("selected").and_then(MpvValue::as_bool).unwrap_or(false),
+        selected: track
+            .get("selected")
+            .and_then(MpvValue::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -138,13 +167,20 @@ impl MpvIpcBackend {
         let unique_id = uuid::Uuid::new_v4().simple().to_string();
         let socket_dir = private_socket_dir()?;
         let socket_path = socket_dir
-            .join(format!("mpv-{}-{}.sock", std::process::id(), &unique_id[..8]))
+            .join(format!(
+                "mpv-{}-{}.sock",
+                std::process::id(),
+                &unique_id[..8]
+            ))
             .to_string_lossy()
             .into_owned();
 
         let _ = std::fs::remove_file(&socket_path);
 
-        let hwdec_arg = format!("--hwdec={}", if hwdec.is_empty() { "auto-safe" } else { hwdec });
+        let hwdec_arg = format!(
+            "--hwdec={}",
+            if hwdec.is_empty() { "auto-safe" } else { hwdec }
+        );
         let cache_arg = format!("--cache={}", if cache.is_empty() { "yes" } else { cache });
 
         let mut mpv_cmd = Command::new("mpv");
@@ -183,10 +219,11 @@ impl MpvIpcBackend {
         let mut connected_stream = None;
         for _ in 0..60 {
             if Path::new(&socket_path).exists()
-                && let Ok(s) = UnixStream::connect(&socket_path).await {
-                    connected_stream = Some(s);
-                    break;
-                }
+                && let Ok(s) = UnixStream::connect(&socket_path).await
+            {
+                connected_stream = Some(s);
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(75)).await;
         }
 
@@ -225,19 +262,20 @@ impl MpvIpcBackend {
                         if let Ok(msg) = serde_json::from_str::<MpvMessage>(&line) {
                             // 1. Handle command response if request_id matches
                             if let Some(req_id) = msg.request_id
-                                && req_id > 0 {
-                                    let mut map = pending_reader.lock().await;
-                                    if let Some(responder) = map.remove(&req_id) {
-                                        let err_str = msg.error.unwrap_or_else(|| "success".into());
-                                        if err_str == "success" {
-                                            let _ = responder
-                                                .send(Ok(msg.data.unwrap_or(MpvValue::Null)));
-                                        } else {
-                                            let _ = responder.send(Err(PlayerError::Mpv(err_str)));
-                                        }
-                                        continue;
+                                && req_id > 0
+                            {
+                                let mut map = pending_reader.lock().await;
+                                if let Some(responder) = map.remove(&req_id) {
+                                    let err_str = msg.error.unwrap_or_else(|| "success".into());
+                                    if err_str == "success" {
+                                        let _ =
+                                            responder.send(Ok(msg.data.unwrap_or(MpvValue::Null)));
+                                    } else {
+                                        let _ = responder.send(Err(PlayerError::Mpv(err_str)));
                                     }
+                                    continue;
                                 }
+                            }
 
                             // 2. Handle mpv events & property-change notifications
                             if let Some(ev) = msg.event.as_deref() {
@@ -261,8 +299,11 @@ impl MpvIpcBackend {
                                                         msg.data.as_ref().and_then(|v| v.as_f64())
                                                     {
                                                         st.time = t;
-                                                        if last_time_emit.elapsed() >= TIME_EMIT_INTERVAL {
-                                                            last_time_emit = std::time::Instant::now();
+                                                        if last_time_emit.elapsed()
+                                                            >= TIME_EMIT_INTERVAL
+                                                        {
+                                                            last_time_emit =
+                                                                std::time::Instant::now();
                                                             changed = true;
                                                         }
                                                     }
@@ -281,10 +322,10 @@ impl MpvIpcBackend {
                                                             .data
                                                             .as_ref()
                                                             .and_then(|v| v.as_bool())
-                                                        {
-                                                            st.buffering = b;
-                                                            changed = true;
-                                                        }
+                                                    {
+                                                        st.buffering = b;
+                                                        changed = true;
+                                                    }
                                                 }
                                                 "media-title" => {
                                                     if let Some(title) =
@@ -295,15 +336,58 @@ impl MpvIpcBackend {
                                                     }
                                                 }
                                                 "track-list" => {
-                                                    if let Some(tracks) = msg.data.as_ref().and_then(|value| value.as_array()) {
-                                                        st.tracks = tracks.iter().filter_map(mpv_track).collect();
-                                                        st.audio_track = tracks.iter().find(|track| track.get("type").and_then(|kind| kind.as_str()) == Some("audio") && track.get("selected").and_then(|value| value.as_bool()) == Some(true)).and_then(|track| track.get("id")).and_then(mpv_id).unwrap_or_else(|| "auto".into());
-                                                        st.subtitle_track = tracks.iter().find(|track| track.get("type").and_then(|kind| kind.as_str()) == Some("sub") && track.get("selected").and_then(|value| value.as_bool()) == Some(true)).and_then(|track| track.get("id")).and_then(mpv_id).unwrap_or_else(|| "off".into());
+                                                    if let Some(tracks) = msg
+                                                        .data
+                                                        .as_ref()
+                                                        .and_then(|value| value.as_array())
+                                                    {
+                                                        st.tracks = tracks
+                                                            .iter()
+                                                            .filter_map(mpv_track)
+                                                            .collect();
+                                                        st.audio_track = tracks
+                                                            .iter()
+                                                            .find(|track| {
+                                                                track
+                                                                    .get("type")
+                                                                    .and_then(|kind| kind.as_str())
+                                                                    == Some("audio")
+                                                                    && track
+                                                                        .get("selected")
+                                                                        .and_then(|value| {
+                                                                            value.as_bool()
+                                                                        })
+                                                                        == Some(true)
+                                                            })
+                                                            .and_then(|track| track.get("id"))
+                                                            .and_then(mpv_id)
+                                                            .unwrap_or_else(|| "auto".into());
+                                                        st.subtitle_track = tracks
+                                                            .iter()
+                                                            .find(|track| {
+                                                                track
+                                                                    .get("type")
+                                                                    .and_then(|kind| kind.as_str())
+                                                                    == Some("sub")
+                                                                    && track
+                                                                        .get("selected")
+                                                                        .and_then(|value| {
+                                                                            value.as_bool()
+                                                                        })
+                                                                        == Some(true)
+                                                            })
+                                                            .and_then(|track| track.get("id"))
+                                                            .and_then(mpv_id)
+                                                            .unwrap_or_else(|| "off".into());
                                                         changed = true;
                                                     }
                                                 }
                                                 "hls-bitrate" => {
-                                                    if let Some(quality) = msg.data.as_ref().and_then(|value| value.as_str()) {
+                                                    if let Some(quality) = msg
+                                                        .data
+                                                        .as_ref()
+                                                        .and_then(|value| value.as_str())
+                                                    {
                                                         st.quality = quality.to_string();
                                                         changed = true;
                                                     }
@@ -335,15 +419,16 @@ impl MpvIpcBackend {
                                         // `redirect` means mpv is moving on to another entry, so the load is
                                         // still going. Any other end before `file-loaded` means this load
                                         // did not succeed, including Stop and an empty file reaching EOF.
-                                        if *load_state_reader.borrow() == 1 && msg.reason.as_deref() != Some("redirect") {
+                                        if *load_state_reader.borrow() == 1
+                                            && msg.reason.as_deref() != Some("redirect")
+                                        {
                                             let _ = load_state_reader.send_replace(3);
                                         }
                                         if msg.reason.as_deref() == Some("error") {
-                                            st.error = Some(
-                                                msg.file_error.unwrap_or_else(|| {
+                                            st.error =
+                                                Some(msg.file_error.unwrap_or_else(|| {
                                                     "Playback failed".to_string()
-                                                }),
-                                            );
+                                                }));
                                             st.paused = true;
                                         }
                                         changed = true;
@@ -351,10 +436,9 @@ impl MpvIpcBackend {
                                     _ => {}
                                 }
 
-                                if changed
-                                    && let Some(ref handle) = app_reader {
-                                        let _ = handle.emit("player://state", st.clone());
-                                    }
+                                if changed && let Some(ref handle) = app_reader {
+                                    let _ = handle.emit("player://state", st.clone());
+                                }
                             }
                         }
                     }
@@ -386,7 +470,9 @@ impl MpvIpcBackend {
                 if writer_half.write_all(data.as_bytes()).await.is_err() {
                     let mut map = pending_writer.lock().await;
                     if let Some(r) = map.remove(&req_id) {
-                        let _ = r.send(Err(PlayerError::Mpv("Failed to write to mpv socket".into())));
+                        let _ = r.send(Err(PlayerError::Mpv(
+                            "Failed to write to mpv socket".into(),
+                        )));
                     }
                     break;
                 }
@@ -431,7 +517,10 @@ impl MpvIpcBackend {
         if self.closing.load(Ordering::SeqCst) {
             return false;
         }
-        let mut process = self.mpv_process.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut process = self
+            .mpv_process
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         match process.as_mut() {
             Some(child) => matches!(child.try_wait(), Ok(None)),
             None => false,
@@ -470,7 +559,12 @@ impl MpvIpcBackend {
 
 #[async_trait]
 impl PlaybackBackend for MpvIpcBackend {
-    async fn load(&self, url: &str, headers: Option<&[(&str, &str)]>, audio_url: Option<&str>) -> Result<()> {
+    async fn load(
+        &self,
+        url: &str,
+        headers: Option<&[(&str, &str)]>,
+        audio_url: Option<&str>,
+    ) -> Result<()> {
         if self.closing.load(Ordering::SeqCst) {
             return Err(PlayerError::Mpv(CANCELLED_MESSAGE.into()));
         }
@@ -482,7 +576,10 @@ impl PlaybackBackend for MpvIpcBackend {
                 .await;
         } else {
             let _ = self
-                .set_property("http-header-fields", serde_json::json!(Vec::<String>::new()))
+                .set_property(
+                    "http-header-fields",
+                    serde_json::json!(Vec::<String>::new()),
+                )
                 .await;
         }
 
@@ -521,7 +618,11 @@ impl PlaybackBackend for MpvIpcBackend {
                 }
                 match *load_state_rx.borrow_and_update() {
                     2 => return Ok(()),
-                    3 => return Err(PlayerError::Mpv("mpv failed to load the requested media".into())),
+                    3 => {
+                        return Err(PlayerError::Mpv(
+                            "mpv failed to load the requested media".into(),
+                        ));
+                    }
                     _ => {}
                 }
                 if load_state_rx.changed().await.is_err() {
@@ -533,7 +634,11 @@ impl PlaybackBackend for MpvIpcBackend {
 
         match wait_result {
             Ok(result) => result?,
-            Err(_) => return Err(PlayerError::Mpv("Timed out waiting for mpv to load the requested media".into())),
+            Err(_) => {
+                return Err(PlayerError::Mpv(
+                    "Timed out waiting for mpv to load the requested media".into(),
+                ));
+            }
         }
 
         self.set_property("pause", serde_json::json!(false)).await?;
@@ -570,8 +675,6 @@ impl PlaybackBackend for MpvIpcBackend {
         Ok(())
     }
 
-
-
     async fn volume(&self) -> Option<f64> {
         MpvIpcBackend::volume(self).await
     }
@@ -597,7 +700,8 @@ impl PlaybackBackend for MpvIpcBackend {
     }
 
     async fn set_fullscreen(&self, enabled: bool) -> Result<()> {
-        self.set_property("fullscreen", serde_json::json!(enabled)).await
+        self.set_property("fullscreen", serde_json::json!(enabled))
+            .await
     }
 
     fn is_alive(&self) -> bool {
@@ -623,14 +727,15 @@ impl MpvIpcBackend {
         ])
         .await?;
         if name == "hls-bitrate"
-            && let Some(app) = self.app.as_ref() {
-                let snapshot = {
-                    let mut st = self.state.lock().await;
-                    st.quality = quality;
-                    st.clone()
-                };
-                let _ = app.emit("player://state", snapshot);
-            }
+            && let Some(app) = self.app.as_ref()
+        {
+            let snapshot = {
+                let mut st = self.state.lock().await;
+                st.quality = quality;
+                st.clone()
+            };
+            let _ = app.emit("player://state", snapshot);
+        }
         Ok(())
     }
 
@@ -639,14 +744,31 @@ impl MpvIpcBackend {
             "audio" if track_id == "auto" => ("aid", MpvValue::String("auto".into())),
             "subtitle" if track_id == "off" => ("sid", MpvValue::String("no".into())),
             "audio" | "subtitle" => {
-                let id = track_id.parse::<i64>().map_err(|_| PlayerError::InvalidArg("Invalid track id".into()))?;
-                let track_list = self.send_command(vec![MpvValue::String("get_property".into()), MpvValue::String("track-list".into())]).await?;
-                let exists = track_list.as_array().is_some_and(|tracks| tracks.iter().any(|track| {
-                    track.get("id").and_then(|value| value.as_i64()) == Some(id)
-                        && track.get("type").and_then(|value| value.as_str()) == Some(if kind == "audio" { "audio" } else { "sub" })
-                }));
-                if !exists { return Err(PlayerError::InvalidArg("Track is no longer available".into())); }
-                (if kind == "audio" { "aid" } else { "sid" }, MpvValue::Number(id.into()))
+                let id = track_id
+                    .parse::<i64>()
+                    .map_err(|_| PlayerError::InvalidArg("Invalid track id".into()))?;
+                let track_list = self
+                    .send_command(vec![
+                        MpvValue::String("get_property".into()),
+                        MpvValue::String("track-list".into()),
+                    ])
+                    .await?;
+                let exists = track_list.as_array().is_some_and(|tracks| {
+                    tracks.iter().any(|track| {
+                        track.get("id").and_then(|value| value.as_i64()) == Some(id)
+                            && track.get("type").and_then(|value| value.as_str())
+                                == Some(if kind == "audio" { "audio" } else { "sub" })
+                    })
+                });
+                if !exists {
+                    return Err(PlayerError::InvalidArg(
+                        "Track is no longer available".into(),
+                    ));
+                }
+                (
+                    if kind == "audio" { "aid" } else { "sid" },
+                    MpvValue::Number(id.into()),
+                )
             }
             _ => return Err(PlayerError::InvalidArg("Unknown player track kind".into())),
         };
@@ -655,9 +777,12 @@ impl MpvIpcBackend {
 
     async fn set_quality(&self, quality: &str) -> Result<()> {
         if !matches!(quality, "max" | "min") {
-            return Err(PlayerError::InvalidArg("Unsupported mpv HLS bitrate preference".into()));
+            return Err(PlayerError::InvalidArg(
+                "Unsupported mpv HLS bitrate preference".into(),
+            ));
         }
-        self.set_property("hls-bitrate", MpvValue::String(quality.into())).await
+        self.set_property("hls-bitrate", MpvValue::String(quality.into()))
+            .await
     }
 
     /// Applies a profile's audio and subtitle preferences. Done before each load (with
@@ -673,16 +798,20 @@ impl MpvIpcBackend {
 
     /// mpv's current volume (0 to 150, 100 being unamplified), or `None` if it cannot be read.
     async fn volume(&self) -> Option<f64> {
-        self.send_command(vec![MpvValue::String("get_property".into()), MpvValue::String("volume".into())])
-            .await
-            .ok()
-            .and_then(|value| value.as_f64())
+        self.send_command(vec![
+            MpvValue::String("get_property".into()),
+            MpvValue::String("volume".into()),
+        ])
+        .await
+        .ok()
+        .and_then(|value| value.as_f64())
     }
 
     /// Shifts the subtitles of the current file by `seconds` (positive shows them later).
     async fn set_subtitle_delay(&self, seconds: f64) -> Result<f64> {
         let delay = lumen_core::player_prefs::clamp_delay(seconds)?;
-        self.set_property("sub-delay", serde_json::json!(delay)).await?;
+        self.set_property("sub-delay", serde_json::json!(delay))
+            .await?;
         Ok(delay)
     }
 
@@ -701,7 +830,10 @@ impl MpvIpcBackend {
 
 impl Drop for MpvIpcBackend {
     fn drop(&mut self) {
-        let process = self.mpv_process.get_mut().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let process = self
+            .mpv_process
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(mut process) = process.take() {
             let _ = process.start_kill();
         }
@@ -778,10 +910,16 @@ mod tests {
             .expect("mpv should start and expose its IPC socket");
 
         let url = path.to_string_lossy().to_string();
-        backend.load(&url, None, None).await.expect("initial load should succeed");
+        backend
+            .load(&url, None, None)
+            .await
+            .expect("initial load should succeed");
         // Replacing a playing item emits `end-file` for the old entry before the new entry's
         // `start-file`; that old end event must not release the readiness wait early.
-        backend.load(&url, None, None).await.expect("replacement load should succeed");
+        backend
+            .load(&url, None, None)
+            .await
+            .expect("replacement load should succeed");
 
         // `play_url` seeks to the saved position as soon as `load` returns.
         backend
@@ -844,7 +982,10 @@ mod tests {
         };
 
         tokio::time::sleep(Duration::from_millis(800)).await;
-        assert!(!loading.is_finished(), "the load should still be waiting on the silent server");
+        assert!(
+            !loading.is_finished(),
+            "the load should still be waiting on the silent server"
+        );
 
         let started = std::time::Instant::now();
         backend.stop().await.unwrap();
@@ -854,7 +995,10 @@ mod tests {
             .expect("load task should not panic");
         assert!(started.elapsed() < Duration::from_secs(3));
         let error = outcome.expect_err("an interrupted load is an error");
-        assert!(error.to_string().contains("stopped"), "unexpected error: {error}");
+        assert!(
+            error.to_string().contains("stopped"),
+            "unexpected error: {error}"
+        );
         held.abort();
     }
 
@@ -877,7 +1021,10 @@ mod tests {
 
     async fn property(backend: &MpvIpcBackend, name: &str) -> serde_json::Value {
         backend
-            .send_command(vec![MpvValue::String("get_property".into()), MpvValue::String(name.into())])
+            .send_command(vec![
+                MpvValue::String("get_property".into()),
+                MpvValue::String(name.into()),
+            ])
             .await
             .unwrap_or(serde_json::Value::Null)
     }
@@ -892,16 +1039,52 @@ mod tests {
         let out = dir.join("episode.mkv");
         let status = std::process::Command::new("ffmpeg")
             .current_dir(dir)
-            .args(["-v", "error", "-y",
-                "-f", "lavfi", "-i", "color=c=black:s=64x64:d=3",
-                "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
-                "-f", "lavfi", "-i", "sine=frequency=880:duration=3",
-                "-i", "en.srt", "-i", "es.srt",
-                "-map", "0", "-map", "1", "-map", "2", "-map", "3", "-map", "4",
-                "-c:v", "libx264", "-c:a", "aac", "-c:s", "srt",
-                "-metadata:s:a:0", "language=eng", "-metadata:s:a:1", "language=jpn",
-                "-metadata:s:s:0", "language=eng", "-metadata:s:s:1", "language=spa",
-                "-shortest"])
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=3",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=3",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=880:duration=3",
+                "-i",
+                "en.srt",
+                "-i",
+                "es.srt",
+                "-map",
+                "0",
+                "-map",
+                "1",
+                "-map",
+                "2",
+                "-map",
+                "3",
+                "-map",
+                "4",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+                "-c:s",
+                "srt",
+                "-metadata:s:a:0",
+                "language=eng",
+                "-metadata:s:a:1",
+                "language=jpn",
+                "-metadata:s:s:0",
+                "language=eng",
+                "-metadata:s:s:1",
+                "language=spa",
+                "-shortest",
+            ])
             .arg(&out)
             .status()
             .expect("ffmpeg should run");
@@ -917,22 +1100,36 @@ mod tests {
             return;
         }
         use lumen_core::player_prefs::PlayerPrefs;
-        let dir = std::env::temp_dir().join(format!("lumen-subs-{}", uuid::Uuid::new_v4().simple()));
+        let dir =
+            std::env::temp_dir().join(format!("lumen-subs-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         let video = write_multilingual_fixture(&dir);
         let url = video.to_string_lossy().to_string();
-        let backend = MpvIpcBackend::new(None, "no", "no", headless_backend_args()).await.expect("mpv starts");
+        let backend = MpvIpcBackend::new(None, "no", "no", headless_backend_args())
+            .await
+            .expect("mpv starts");
 
         // Default: mpv's own choice (first audio track).
         backend.apply_prefs(&PlayerPrefs::default(), true).await;
         backend.load(&url, None, None).await.expect("load");
-        assert_eq!(property(&backend, "aid").await, serde_json::json!(1), "first audio track by default");
+        assert_eq!(
+            property(&backend, "aid").await,
+            serde_json::json!(1),
+            "first audio track by default"
+        );
 
         // The sidecar file beside the video was found by name and selected: a file the user put next
         // to the video wins over embedded tracks (mpv's rule, kept on purpose).
         let tracks = property(&backend, "track-list").await;
-        let sidecar = tracks.as_array().unwrap().iter().find(|t| t["type"] == "sub" && t["external"] == true);
-        assert!(sidecar.is_some_and(|t| t["selected"] == true), "episode.srt beside episode.mkv is loaded and selected: {tracks}");
+        let sidecar = tracks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["type"] == "sub" && t["external"] == true);
+        assert!(
+            sidecar.is_some_and(|t| t["selected"] == true),
+            "episode.srt beside episode.mkv is loaded and selected: {tracks}"
+        );
 
         // Japanese audio and Spanish subtitles, on a copy with no sidecar so the embedded tracks decide.
         let plain_dir = dir.join("plain");
@@ -940,28 +1137,74 @@ mod tests {
         let plain = plain_dir.join("episode.mkv");
         std::fs::copy(&video, &plain).unwrap();
         let plain_url = plain.to_string_lossy().to_string();
-        let prefs = PlayerPrefs { audio_lang: "ja".into(), subtitles: "es".into(), ..Default::default() };
+        let prefs = PlayerPrefs {
+            audio_lang: "ja".into(),
+            subtitles: "es".into(),
+            ..Default::default()
+        };
         backend.apply_prefs(&prefs, true).await;
         backend.load(&plain_url, None, None).await.expect("load");
-        assert_eq!(property(&backend, "aid").await, serde_json::json!(2), "Japanese audio is the second track");
-        let sid = property(&backend, "sid").await.as_i64().expect("a subtitle track is selected");
+        assert_eq!(
+            property(&backend, "aid").await,
+            serde_json::json!(2),
+            "Japanese audio is the second track"
+        );
+        let sid = property(&backend, "sid")
+            .await
+            .as_i64()
+            .expect("a subtitle track is selected");
         let tracks = property(&backend, "track-list").await;
-        let selected = tracks.as_array().unwrap().iter().find(|t| t["type"] == "sub" && t["id"] == sid).expect("selected sub exists");
-        assert_eq!(selected["lang"], "spa", "the Spanish subtitle is chosen: {selected}");
-        assert_eq!(property(&backend, "sub-visibility").await, serde_json::json!(true));
+        let selected = tracks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["type"] == "sub" && t["id"] == sid)
+            .expect("selected sub exists");
+        assert_eq!(
+            selected["lang"], "spa",
+            "the Spanish subtitle is chosen: {selected}"
+        );
+        assert_eq!(
+            property(&backend, "sub-visibility").await,
+            serde_json::json!(true)
+        );
 
         // English subtitles instead.
-        backend.apply_prefs(&PlayerPrefs { subtitles: "en".into(), ..Default::default() }, true).await;
+        backend
+            .apply_prefs(
+                &PlayerPrefs {
+                    subtitles: "en".into(),
+                    ..Default::default()
+                },
+                true,
+            )
+            .await;
         backend.load(&plain_url, None, None).await.expect("load");
-        let sid = property(&backend, "sid").await.as_i64().expect("a subtitle track is selected");
+        let sid = property(&backend, "sid")
+            .await
+            .as_i64()
+            .expect("a subtitle track is selected");
         let tracks = property(&backend, "track-list").await;
-        let selected = tracks.as_array().unwrap().iter().find(|t| t["type"] == "sub" && t["id"] == sid).unwrap();
+        let selected = tracks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["type"] == "sub" && t["id"] == sid)
+            .unwrap();
         assert_eq!(selected["lang"], "eng");
 
         // Subtitles off hides them; size and position are applied.
-        let off = PlayerPrefs { subtitles: "off".into(), sub_scale: 1.5, sub_pos: 90, ..Default::default() };
+        let off = PlayerPrefs {
+            subtitles: "off".into(),
+            sub_scale: 1.5,
+            sub_pos: 90,
+            ..Default::default()
+        };
         backend.apply_prefs(&off, true).await;
-        assert_eq!(property(&backend, "sub-visibility").await, serde_json::json!(false));
+        assert_eq!(
+            property(&backend, "sub-visibility").await,
+            serde_json::json!(false)
+        );
         assert_eq!(property(&backend, "sub-scale").await.as_f64(), Some(1.5));
         assert_eq!(property(&backend, "sub-pos").await.as_f64(), Some(90.0));
 
@@ -970,14 +1213,29 @@ mod tests {
         assert_eq!(property(&backend, "sub-delay").await.as_f64(), Some(1.3));
         backend.apply_prefs(&PlayerPrefs::default(), true).await;
         backend.load(&url, None, None).await.expect("load");
-        assert_eq!(property(&backend, "sub-delay").await.as_f64(), Some(0.0), "delay does not carry to the next file");
+        assert_eq!(
+            property(&backend, "sub-delay").await.as_f64(),
+            Some(0.0),
+            "delay does not carry to the next file"
+        );
 
         // A subtitle file added by hand becomes a selected track; junk is refused before mpv sees it.
-        let before = property(&backend, "track-list").await.as_array().unwrap().len();
+        let before = property(&backend, "track-list")
+            .await
+            .as_array()
+            .unwrap()
+            .len();
         let extra = dir.join("extra.srt");
         std::fs::write(&extra, "1\n00:00:00,500 --> 00:00:01,500\nExtra\n").unwrap();
-        backend.add_subtitle_file(extra.to_str().unwrap()).await.expect("subtitle added");
-        let after = property(&backend, "track-list").await.as_array().unwrap().len();
+        backend
+            .add_subtitle_file(extra.to_str().unwrap())
+            .await
+            .expect("subtitle added");
+        let after = property(&backend, "track-list")
+            .await
+            .as_array()
+            .unwrap()
+            .len();
         assert_eq!(after, before + 1, "one track was added");
         assert!(backend.add_subtitle_file("/etc/passwd").await.is_err());
 

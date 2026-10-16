@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use lumen_core::launch::{classify_arguments, OpenTarget};
+use lumen_core::launch::{OpenTarget, classify_arguments};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub const OPEN_EVENT: &str = "launch://open";
@@ -21,7 +21,10 @@ pub struct PendingLaunch {
 
 impl PendingLaunch {
     fn push(&self, mut targets: Vec<OpenTarget>) {
-        self.targets.lock().unwrap_or_else(|p| p.into_inner()).append(&mut targets);
+        self.targets
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .append(&mut targets);
     }
 }
 

@@ -9,7 +9,9 @@ use url::Url;
 
 use crate::netguard;
 
-const VIDEO_EXT: [&str; 11] = ["mp4", "m4v", "mkv", "avi", "mov", "webm", "ts", "m2ts", "mpg", "mpeg", "ogv"];
+const VIDEO_EXT: [&str; 11] = [
+    "mp4", "m4v", "mkv", "avi", "mov", "webm", "ts", "m2ts", "mpg", "mpeg", "ogv",
+];
 const AUDIO_EXT: [&str; 7] = ["mp3", "flac", "wav", "ogg", "opus", "m4a", "aac"];
 const PLAYLIST_EXT: [&str; 2] = ["m3u", "m3u8"];
 const SUBTITLE_EXT: [&str; 5] = ["srt", "ass", "ssa", "vtt", "sub"];
@@ -32,12 +34,20 @@ pub enum OpenTarget {
 }
 
 fn extension(path: &Path) -> String {
-    path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default()
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default()
 }
 
 fn classify_file(path: &Path) -> Option<OpenTarget> {
     let ext = extension(path);
-    let path = path.canonicalize().ok().filter(|p| p.is_file())?.to_string_lossy().into_owned();
+    let path = path
+        .canonicalize()
+        .ok()
+        .filter(|p| p.is_file())?
+        .to_string_lossy()
+        .into_owned();
     if VIDEO_EXT.contains(&ext.as_str()) || AUDIO_EXT.contains(&ext.as_str()) {
         Some(OpenTarget::Media { path })
     } else if PLAYLIST_EXT.contains(&ext.as_str()) {
@@ -56,7 +66,9 @@ fn classify_stream(raw: &str) -> Option<OpenTarget> {
     if !matches!(url.scheme(), "http" | "https") || netguard::check_url(&url, false).is_err() {
         return None;
     }
-    Some(OpenTarget::Stream { url: url.to_string() })
+    Some(OpenTarget::Stream {
+        url: url.to_string(),
+    })
 }
 
 fn classify_one(arg: &str, cwd: Option<&Path>) -> Option<OpenTarget> {
@@ -70,7 +82,11 @@ fn classify_one(arg: &str, cwd: Option<&Path>) -> Option<OpenTarget> {
         if parsed.host_str() != Some("play") {
             return None;
         }
-        let target = parsed.query_pairs().find(|(key, _)| key == "url")?.1.into_owned();
+        let target = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "url")?
+            .1
+            .into_owned();
         return classify_stream(&target);
     }
     if arg.starts_with("http://") || arg.starts_with("https://") {
@@ -114,9 +130,16 @@ mod tests {
     use super::*;
 
     fn fixture_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("lumen-launch-{}", uuid::Uuid::new_v4().simple()));
+        let dir =
+            std::env::temp_dir().join(format!("lumen-launch-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
-        for name in ["Movie.MKV", "song.flac", "list.m3u8", "Movie.srt", "notes.txt"] {
+        for name in [
+            "Movie.MKV",
+            "song.flac",
+            "list.m3u8",
+            "Movie.srt",
+            "notes.txt",
+        ] {
             std::fs::write(dir.join(name), "x").unwrap();
         }
         std::fs::create_dir_all(dir.join("folder.mp4")).unwrap();
@@ -130,18 +153,40 @@ mod tests {
     #[test]
     fn files_are_sorted_into_media_playlists_and_subtitles() {
         let dir = fixture_dir();
-        let path = |name: &str| dir.join(name).canonicalize().unwrap().to_string_lossy().into_owned();
-        let given: Vec<String> = ["Movie.MKV", "song.flac", "list.m3u8", "Movie.srt", "notes.txt", "missing.mp4", "folder.mp4"]
-            .iter()
-            .map(|n| dir.join(n).to_string_lossy().into_owned())
-            .collect();
+        let path = |name: &str| {
+            dir.join(name)
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let given: Vec<String> = [
+            "Movie.MKV",
+            "song.flac",
+            "list.m3u8",
+            "Movie.srt",
+            "notes.txt",
+            "missing.mp4",
+            "folder.mp4",
+        ]
+        .iter()
+        .map(|n| dir.join(n).to_string_lossy().into_owned())
+        .collect();
         assert_eq!(
             classify_arguments(&given, None),
             vec![
-                OpenTarget::Media { path: path("Movie.MKV") },
-                OpenTarget::Media { path: path("song.flac") },
-                OpenTarget::Playlist { path: path("list.m3u8") },
-                OpenTarget::Subtitle { path: path("Movie.srt") },
+                OpenTarget::Media {
+                    path: path("Movie.MKV")
+                },
+                OpenTarget::Media {
+                    path: path("song.flac")
+                },
+                OpenTarget::Playlist {
+                    path: path("list.m3u8")
+                },
+                OpenTarget::Subtitle {
+                    path: path("Movie.srt")
+                },
             ],
             "notes, a missing file and a folder named like a video are left out"
         );
@@ -151,9 +196,21 @@ mod tests {
     #[test]
     fn relative_paths_resolve_against_the_launch_directory_and_file_urls_work() {
         let dir = fixture_dir();
-        let expected = OpenTarget::Media { path: dir.join("Movie.MKV").canonicalize().unwrap().to_string_lossy().into_owned() };
-        assert_eq!(classify_arguments(&args(&["Movie.MKV"]), Some(&dir)), vec![expected.clone()]);
-        let url = Url::from_file_path(dir.join("Movie.MKV")).unwrap().to_string();
+        let expected = OpenTarget::Media {
+            path: dir
+                .join("Movie.MKV")
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        assert_eq!(
+            classify_arguments(&args(&["Movie.MKV"]), Some(&dir)),
+            vec![expected.clone()]
+        );
+        let url = Url::from_file_path(dir.join("Movie.MKV"))
+            .unwrap()
+            .to_string();
         assert_eq!(classify_arguments(&[url], None), vec![expected]);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -162,25 +219,35 @@ mod tests {
     fn web_addresses_and_lumen_links_are_played_only_when_public_http() {
         assert_eq!(
             classify_arguments(&args(&["https://cdn.example.com/live/a.m3u8?x=1"]), None),
-            vec![OpenTarget::Stream { url: "https://cdn.example.com/live/a.m3u8?x=1".into() }]
+            vec![OpenTarget::Stream {
+                url: "https://cdn.example.com/live/a.m3u8?x=1".into()
+            }]
         );
         assert_eq!(
-            classify_arguments(&args(&["lumen://play?url=https%3A%2F%2Fcdn.example.com%2Fa.m3u8"]), None),
-            vec![OpenTarget::Stream { url: "https://cdn.example.com/a.m3u8".into() }]
+            classify_arguments(
+                &args(&["lumen://play?url=https%3A%2F%2Fcdn.example.com%2Fa.m3u8"]),
+                None
+            ),
+            vec![OpenTarget::Stream {
+                url: "https://cdn.example.com/a.m3u8".into()
+            }]
         );
         for refused in [
-            "lumen://play?url=http%3A%2F%2F192.168.1.1%2Fadmin",   // local network: not through a link
+            "lumen://play?url=http%3A%2F%2F192.168.1.1%2Fadmin", // local network: not through a link
             "lumen://play?url=http%3A%2F%2F127.0.0.1%3A8080%2F",
             "lumen://play?url=file%3A%2F%2F%2Fetc%2Fpasswd",
             "lumen://play?url=javascript%3Aalert(1)",
-            "lumen://play",                                       // no address
-            "lumen://delete?url=https%3A%2F%2Fexample.com",        // not an action we have
+            "lumen://play",                                 // no address
+            "lumen://delete?url=https%3A%2F%2Fexample.com", // not an action we have
             "http://localhost:9000/x",
             "ftp://example.com/a.mp4",
             "javascript:alert(1)",
             "data:text/html,hi",
         ] {
-            assert!(classify_arguments(&args(&[refused]), None).is_empty(), "{refused} must not be opened");
+            assert!(
+                classify_arguments(&args(&[refused]), None).is_empty(),
+                "{refused} must not be opened"
+            );
         }
     }
 
@@ -189,7 +256,9 @@ mod tests {
         assert!(classify_arguments(&args(&["--flag", "-x", ""]), None).is_empty());
         let same = "https://cdn.example.com/a.m3u8";
         assert_eq!(classify_arguments(&args(&[same, same]), None).len(), 1);
-        let many: Vec<String> = (0..100).map(|i| format!("https://cdn.example.com/{i}.m3u8")).collect();
+        let many: Vec<String> = (0..100)
+            .map(|i| format!("https://cdn.example.com/{i}.m3u8"))
+            .collect();
         assert_eq!(classify_arguments(&many, None).len(), MAX_TARGETS);
     }
 }

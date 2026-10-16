@@ -27,7 +27,11 @@ pub struct AttemptLimiter {
 impl AttemptLimiter {
     /// `Err(remaining)` while the profile is locked out.
     pub fn check(&self, profile_id: i64, now: Instant) -> Result<(), Duration> {
-        match self.entries.get(&profile_id).and_then(|entry| entry.locked_until) {
+        match self
+            .entries
+            .get(&profile_id)
+            .and_then(|entry| entry.locked_until)
+        {
             Some(until) if until > now => Err(until - now),
             _ => Ok(()),
         }
@@ -55,17 +59,23 @@ static LIMITER: LazyLock<Mutex<AttemptLimiter>> = LazyLock::new(Default::default
 
 /// Seconds a caller must wait before the next guess, or `None` when a guess is allowed.
 pub fn locked_out_for(profile_id: i64) -> Option<Duration> {
-    let limiter = LIMITER.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let limiter = LIMITER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     limiter.check(profile_id, Instant::now()).err()
 }
 
 pub fn record_failure(profile_id: i64) {
-    let mut limiter = LIMITER.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut limiter = LIMITER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     limiter.record_failure(profile_id, Instant::now());
 }
 
 pub fn record_success(profile_id: i64) {
-    let mut limiter = LIMITER.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut limiter = LIMITER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     limiter.record_success(profile_id);
 }
 
@@ -79,7 +89,10 @@ mod tests {
         let now = Instant::now();
         for _ in 0..FREE_ATTEMPTS - 1 {
             limiter.record_failure(1, now);
-            assert!(limiter.check(1, now).is_ok(), "still within the free attempts");
+            assert!(
+                limiter.check(1, now).is_ok(),
+                "still within the free attempts"
+            );
         }
         limiter.record_failure(1, now);
         assert_eq!(limiter.check(1, now), Err(BASE_LOCKOUT));
@@ -116,10 +129,16 @@ mod tests {
         for _ in 0..FREE_ATTEMPTS {
             limiter.record_failure(1, now);
         }
-        assert!(limiter.check(2, now).is_ok(), "another profile is unaffected");
+        assert!(
+            limiter.check(2, now).is_ok(),
+            "another profile is unaffected"
+        );
         limiter.record_success(1);
         assert!(limiter.check(1, now).is_ok());
         limiter.record_failure(1, now);
-        assert!(limiter.check(1, now).is_ok(), "the count restarted from zero");
+        assert!(
+            limiter.check(1, now).is_ok(),
+            "the count restarted from zero"
+        );
     }
 }

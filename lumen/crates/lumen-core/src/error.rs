@@ -1,5 +1,5 @@
-use thiserror::Error;
 use serde::Serialize;
+use thiserror::Error;
 
 #[derive(Error, Debug, Serialize)]
 pub enum PlayerError {
@@ -92,6 +92,9 @@ mod tests {
             .await
             .expect_err("closed port");
         let text = String::from(PlayerError::from(again));
-        assert!(!text.contains("abc123"), "the From impl redacts too: {text}");
+        assert!(
+            !text.contains("abc123"),
+            "the From impl redacts too: {text}"
+        );
     }
 }

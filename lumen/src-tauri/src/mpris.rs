@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use mpris_server::zbus::fdo;
 use mpris_server::{
-    LoopStatus, Metadata, PlaybackRate, PlaybackStatus, PlayerInterface, Property, RootInterface, Server, Time,
-    TrackId, Volume,
+    LoopStatus, Metadata, PlaybackRate, PlaybackStatus, PlayerInterface, Property, RootInterface,
+    Server, Time, TrackId, Volume,
 };
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Listener, Manager};
@@ -37,10 +37,25 @@ pub struct Snapshot {
 
 /// Reads a `player://state` event. Nothing loaded (no title and no duration) is "stopped".
 pub fn snapshot_from_event(payload: &Value) -> Snapshot {
-    let title = payload.get("title").and_then(Value::as_str).filter(|t| !t.is_empty()).map(str::to_string);
-    let length_secs = payload.get("duration").and_then(Value::as_f64).unwrap_or(0.0).max(0.0);
-    let position_secs = payload.get("time").and_then(Value::as_f64).unwrap_or(0.0).max(0.0);
-    let paused = payload.get("paused").and_then(Value::as_bool).unwrap_or(true);
+    let title = payload
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
+    let length_secs = payload
+        .get("duration")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+        .max(0.0);
+    let position_secs = payload
+        .get("time")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+        .max(0.0);
+    let paused = payload
+        .get("paused")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     let status = if title.is_none() && length_secs <= 0.0 {
         Status::Stopped
     } else if paused {
@@ -48,7 +63,12 @@ pub fn snapshot_from_event(payload: &Value) -> Snapshot {
     } else {
         Status::Playing
     };
-    Snapshot { status, title, length_secs, position_secs }
+    Snapshot {
+        status,
+        title,
+        length_secs,
+        position_secs,
+    }
 }
 
 fn playback_status(status: Status) -> PlaybackStatus {
@@ -60,13 +80,17 @@ fn playback_status(status: Status) -> PlaybackStatus {
 }
 
 fn metadata_of(snapshot: &Snapshot) -> Metadata {
-    let mut metadata = Metadata::builder().trackid(TrackId::try_from(TRACK_ID).expect("a valid object path")).build();
+    let mut metadata = Metadata::builder()
+        .trackid(TrackId::try_from(TRACK_ID).expect("a valid object path"))
+        .build();
     if snapshot.status == Status::Stopped {
         return metadata;
     }
     metadata.set_title(snapshot.title.clone());
     if snapshot.length_secs > 0.0 {
-        metadata.set_length(Some(Time::from_micros((snapshot.length_secs * 1_000_000.0) as i64)));
+        metadata.set_length(Some(Time::from_micros(
+            (snapshot.length_secs * 1_000_000.0) as i64,
+        )));
     }
     metadata
 }
@@ -82,7 +106,10 @@ fn changes(old: &Snapshot, new: &Snapshot) -> Vec<Property> {
         changed.push(Property::CanPause(active));
         changed.push(Property::CanSeek(active));
     }
-    if old.title != new.title || (old.length_secs - new.length_secs).abs() > 0.5 || old.status != new.status {
+    if old.title != new.title
+        || (old.length_secs - new.length_secs).abs() > 0.5
+        || old.status != new.status
+    {
         changed.push(Property::Metadata(metadata_of(new)));
     }
     changed
@@ -111,7 +138,10 @@ struct LumenMpris<C: Controls> {
 
 impl<C: Controls> LumenMpris<C> {
     fn now(&self) -> Snapshot {
-        self.snapshot.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.snapshot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     fn failed(message: String) -> fdo::Error {
@@ -127,7 +157,10 @@ impl<C: Controls> LumenMpris<C> {
         Fut: std::future::Future<Output = Result<T, String>> + Send + 'static,
     {
         let controls = self.controls.clone();
-        self.runtime.spawn(async move { f(controls).await }).await.map_err(|error| error.to_string())?
+        self.runtime
+            .spawn(async move { f(controls).await })
+            .await
+            .map_err(|error| error.to_string())?
     }
 }
 
@@ -180,13 +213,17 @@ impl<C: Controls> PlayerInterface for LumenMpris<C> {
     }
     async fn pause(&self) -> fdo::Result<()> {
         if self.now().status == Status::Playing {
-            self.call(|c| async move { c.toggle_pause().await }).await.map_err(Self::failed)?;
+            self.call(|c| async move { c.toggle_pause().await })
+                .await
+                .map_err(Self::failed)?;
         }
         Ok(())
     }
     async fn play_pause(&self) -> fdo::Result<()> {
         if self.now().status != Status::Stopped {
-            self.call(|c| async move { c.toggle_pause().await }).await.map_err(Self::failed)?;
+            self.call(|c| async move { c.toggle_pause().await })
+                .await
+                .map_err(Self::failed)?;
         }
         Ok(())
     }
@@ -196,7 +233,9 @@ impl<C: Controls> PlayerInterface for LumenMpris<C> {
     }
     async fn play(&self) -> fdo::Result<()> {
         if self.now().status == Status::Paused {
-            self.call(|c| async move { c.toggle_pause().await }).await.map_err(Self::failed)?;
+            self.call(|c| async move { c.toggle_pause().await })
+                .await
+                .map_err(Self::failed)?;
         }
         Ok(())
     }
@@ -206,8 +245,14 @@ impl<C: Controls> PlayerInterface for LumenMpris<C> {
             return Ok(());
         }
         let target = (current.position_secs + offset.as_micros() as f64 / 1_000_000.0).max(0.0);
-        let target = if current.length_secs > 0.0 { target.min(current.length_secs) } else { target };
-        self.call(move |c| async move { c.seek_to(target).await }).await.map_err(Self::failed)
+        let target = if current.length_secs > 0.0 {
+            target.min(current.length_secs)
+        } else {
+            target
+        };
+        self.call(move |c| async move { c.seek_to(target).await })
+            .await
+            .map_err(Self::failed)
     }
     async fn set_position(&self, track_id: TrackId, position: Time) -> fdo::Result<()> {
         // A position for a track that is no longer the current one must be ignored (MPRIS spec).
@@ -215,7 +260,9 @@ impl<C: Controls> PlayerInterface for LumenMpris<C> {
             return Ok(());
         }
         let target = (position.as_micros() as f64 / 1_000_000.0).max(0.0);
-        self.call(move |c| async move { c.seek_to(target).await }).await.map_err(Self::failed)
+        self.call(move |c| async move { c.seek_to(target).await })
+            .await
+            .map_err(Self::failed)
     }
     async fn open_uri(&self, _uri: String) -> fdo::Result<()> {
         Ok(()) // opening addresses goes through the app's own confirmation, not a media widget
@@ -245,17 +292,26 @@ impl<C: Controls> PlayerInterface for LumenMpris<C> {
         Ok(metadata_of(&self.now()))
     }
     async fn volume(&self) -> fdo::Result<Volume> {
-        Ok(self.call(|c| async move { Ok(c.volume().await) }).await.ok().flatten().unwrap_or(1.0))
+        Ok(self
+            .call(|c| async move { Ok(c.volume().await) })
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(1.0))
     }
     async fn set_volume(&self, volume: Volume) -> mpris_server::zbus::Result<()> {
         if !volume.is_finite() {
             return Ok(());
         }
         let level = volume.clamp(0.0, 1.5);
-        self.call(move |c| async move { c.set_volume(level).await }).await.map_err(|m| fdo::Error::Failed(m).into())
+        self.call(move |c| async move { c.set_volume(level).await })
+            .await
+            .map_err(|m| fdo::Error::Failed(m).into())
     }
     async fn position(&self) -> fdo::Result<Time> {
-        Ok(Time::from_micros((self.now().position_secs * 1_000_000.0) as i64))
+        Ok(Time::from_micros(
+            (self.now().position_secs * 1_000_000.0) as i64,
+        ))
     }
     async fn minimum_rate(&self) -> fdo::Result<PlaybackRate> {
         Ok(1.0)
@@ -284,11 +340,21 @@ impl<C: Controls> PlayerInterface for LumenMpris<C> {
 }
 
 /// Serves MPRIS until `updates` closes, publishing property changes as snapshots arrive.
-pub async fn run<C: Controls>(controls: C, mut updates: mpsc::UnboundedReceiver<Snapshot>) -> Result<(), String> {
+pub async fn run<C: Controls>(
+    controls: C,
+    mut updates: mpsc::UnboundedReceiver<Snapshot>,
+) -> Result<(), String> {
     let snapshot = Arc::new(Mutex::new(Snapshot::default()));
-    let server = Server::new(BUS_NAME_SUFFIX, LumenMpris { controls: Arc::new(controls), snapshot: snapshot.clone(), runtime: tokio::runtime::Handle::current() })
-        .await
-        .map_err(|error| error.to_string())?;
+    let server = Server::new(
+        BUS_NAME_SUFFIX,
+        LumenMpris {
+            controls: Arc::new(controls),
+            snapshot: snapshot.clone(),
+            runtime: tokio::runtime::Handle::current(),
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let mut last = Snapshot::default();
     while let Some(next) = updates.recv().await {
         let changed = changes(&last, &next);
@@ -311,11 +377,15 @@ struct AppControls {
 #[async_trait]
 impl Controls for AppControls {
     async fn toggle_pause(&self) -> Result<(), String> {
-        let backend = crate::commands::current_backend().await.map_err(String::from)?;
+        let backend = crate::commands::current_backend()
+            .await
+            .map_err(String::from)?;
         backend.pause().await.map_err(String::from)
     }
     async fn seek_to(&self, seconds: f64) -> Result<(), String> {
-        let backend = crate::commands::current_backend().await.map_err(String::from)?;
+        let backend = crate::commands::current_backend()
+            .await
+            .map_err(String::from)?;
         backend.seek(seconds).await.map_err(String::from)
     }
     async fn volume(&self) -> Option<f64> {
@@ -323,8 +393,13 @@ impl Controls for AppControls {
         backend.volume().await.map(|v| v / 100.0)
     }
     async fn set_volume(&self, volume: f64) -> Result<(), String> {
-        let backend = crate::commands::current_backend().await.map_err(String::from)?;
-        backend.set_volume((volume * 100.0).round() as i64).await.map_err(String::from)
+        let backend = crate::commands::current_backend()
+            .await
+            .map_err(String::from)?;
+        backend
+            .set_volume((volume * 100.0).round() as i64)
+            .await
+            .map_err(String::from)
     }
     fn raise(&self) {
         if let Some(window) = self.app.get_webview_window("main") {
@@ -361,32 +436,97 @@ mod tests {
 
     #[test]
     fn player_events_become_mpris_snapshots() {
-        let playing = snapshot_from_event(&json!({"title": "Heat", "duration": 7200.0, "time": 12.5, "paused": false}));
-        assert_eq!(playing, Snapshot { status: Status::Playing, title: Some("Heat".into()), length_secs: 7200.0, position_secs: 12.5 });
-        assert_eq!(snapshot_from_event(&json!({"title": "Heat", "duration": 7200.0, "paused": true})).status, Status::Paused);
-        assert_eq!(snapshot_from_event(&json!({"title": null, "duration": 0.0, "paused": true})).status, Status::Stopped, "nothing loaded");
+        let playing = snapshot_from_event(
+            &json!({"title": "Heat", "duration": 7200.0, "time": 12.5, "paused": false}),
+        );
+        assert_eq!(
+            playing,
+            Snapshot {
+                status: Status::Playing,
+                title: Some("Heat".into()),
+                length_secs: 7200.0,
+                position_secs: 12.5
+            }
+        );
+        assert_eq!(
+            snapshot_from_event(&json!({"title": "Heat", "duration": 7200.0, "paused": true}))
+                .status,
+            Status::Paused
+        );
+        assert_eq!(
+            snapshot_from_event(&json!({"title": null, "duration": 0.0, "paused": true})).status,
+            Status::Stopped,
+            "nothing loaded"
+        );
         assert_eq!(snapshot_from_event(&json!({})).status, Status::Stopped);
         // A stream still buffering has a title but no duration yet: it is not "stopped".
-        assert_eq!(snapshot_from_event(&json!({"title": "Live", "duration": 0.0, "paused": false})).status, Status::Playing);
-        assert_eq!(snapshot_from_event(&json!({"title": "x", "duration": -5.0, "time": -1.0, "paused": false})).length_secs, 0.0);
+        assert_eq!(
+            snapshot_from_event(&json!({"title": "Live", "duration": 0.0, "paused": false})).status,
+            Status::Playing
+        );
+        assert_eq!(
+            snapshot_from_event(
+                &json!({"title": "x", "duration": -5.0, "time": -1.0, "paused": false})
+            )
+            .length_secs,
+            0.0
+        );
     }
 
     #[test]
     fn only_real_changes_are_published_and_position_is_not_one() {
-        let playing = Snapshot { status: Status::Playing, title: Some("Heat".into()), length_secs: 100.0, position_secs: 1.0 };
-        assert!(changes(&playing, &Snapshot { position_secs: 50.0, ..playing.clone() }).is_empty(), "a tick of the clock is not a change");
-        let paused = Snapshot { status: Status::Paused, ..playing.clone() };
+        let playing = Snapshot {
+            status: Status::Playing,
+            title: Some("Heat".into()),
+            length_secs: 100.0,
+            position_secs: 1.0,
+        };
+        assert!(
+            changes(
+                &playing,
+                &Snapshot {
+                    position_secs: 50.0,
+                    ..playing.clone()
+                }
+            )
+            .is_empty(),
+            "a tick of the clock is not a change"
+        );
+        let paused = Snapshot {
+            status: Status::Paused,
+            ..playing.clone()
+        };
         let changed = changes(&playing, &paused);
-        assert!(changed.iter().any(|p| matches!(p, Property::PlaybackStatus(PlaybackStatus::Paused))));
-        let renamed = Snapshot { title: Some("Ronin".into()), ..playing.clone() };
-        assert!(changes(&playing, &renamed).iter().any(|p| matches!(p, Property::Metadata(_))));
+        assert!(
+            changed
+                .iter()
+                .any(|p| matches!(p, Property::PlaybackStatus(PlaybackStatus::Paused)))
+        );
+        let renamed = Snapshot {
+            title: Some("Ronin".into()),
+            ..playing.clone()
+        };
+        assert!(
+            changes(&playing, &renamed)
+                .iter()
+                .any(|p| matches!(p, Property::Metadata(_)))
+        );
         let stopped = Snapshot::default();
-        assert!(changes(&playing, &stopped).iter().any(|p| matches!(p, Property::CanPlay(false))));
+        assert!(
+            changes(&playing, &stopped)
+                .iter()
+                .any(|p| matches!(p, Property::CanPlay(false)))
+        );
     }
 
     #[test]
     fn metadata_carries_the_title_and_length_only_while_something_is_loaded() {
-        let loaded = metadata_of(&Snapshot { status: Status::Playing, title: Some("Heat".into()), length_secs: 90.0, position_secs: 0.0 });
+        let loaded = metadata_of(&Snapshot {
+            status: Status::Playing,
+            title: Some("Heat".into()),
+            length_secs: 90.0,
+            position_secs: 0.0,
+        });
         assert_eq!(loaded.title(), Some("Heat"));
         assert_eq!(loaded.length(), Some(Time::from_secs(90)));
         assert_eq!(loaded.trackid().unwrap().as_str(), TRACK_ID);
@@ -443,7 +583,11 @@ mod tests {
             .output()
             .await
             .expect("busctl runs");
-        assert!(output.status.success(), "busctl {args:?} failed: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "busctl {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
@@ -461,7 +605,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn desktop_clients_can_read_and_control_playback_over_a_real_dbus_session() {
         let tools = ["dbus-daemon", "busctl"].iter().all(|tool| {
-            std::process::Command::new(tool).arg("--version").output().is_ok_and(|o| o.status.success())
+            std::process::Command::new(tool)
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success())
         });
         if !tools {
             eprintln!("skipped: dbus-daemon or busctl is not installed");
@@ -475,7 +622,11 @@ mod tests {
             .spawn()
             .expect("a private session bus starts");
         let mut lines = BufReader::new(bus.stdout.take().unwrap()).lines();
-        let address = lines.next_line().await.unwrap().expect("the bus prints its address");
+        let address = lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("the bus prints its address");
         // The server connects to "the session bus"; point it at the private one. Nothing else in
         // this test binary reads this variable.
         unsafe { std::env::set_var("DBUS_SESSION_BUS_ADDRESS", &address) };
@@ -486,7 +637,12 @@ mod tests {
         // Wait for the name to appear on the bus.
         let mut up = false;
         for _ in 0..50 {
-            let out = tokio::process::Command::new("busctl").arg(format!("--address={address}")).args(["list", "--no-pager"]).output().await.unwrap();
+            let out = tokio::process::Command::new("busctl")
+                .arg(format!("--address={address}"))
+                .args(["list", "--no-pager"])
+                .output()
+                .await
+                .unwrap();
             if String::from_utf8_lossy(&out.stdout).contains(DEST) {
                 up = true;
                 break;
@@ -497,50 +653,139 @@ mod tests {
         use std::time::Duration;
 
         // Identity, and that nothing is playing yet.
-        assert_eq!(property(&address, "org.mpris.MediaPlayer2", "Identity").await, "Lumen");
-        assert_eq!(property(&address, "org.mpris.MediaPlayer2", "DesktopEntry").await, "lumen");
-        assert_eq!(property(&address, PLAYER, "PlaybackStatus").await, "Stopped");
+        assert_eq!(
+            property(&address, "org.mpris.MediaPlayer2", "Identity").await,
+            "Lumen"
+        );
+        assert_eq!(
+            property(&address, "org.mpris.MediaPlayer2", "DesktopEntry").await,
+            "lumen"
+        );
+        assert_eq!(
+            property(&address, PLAYER, "PlaybackStatus").await,
+            "Stopped"
+        );
         assert_eq!(property(&address, PLAYER, "CanPlay").await, false);
 
         // A movie starts playing: status, title, length and position are visible to the client.
-        tx.send(Snapshot { status: Status::Playing, title: Some("Heat".into()), length_secs: 7200.0, position_secs: 100.0 }).unwrap();
+        tx.send(Snapshot {
+            status: Status::Playing,
+            title: Some("Heat".into()),
+            length_secs: 7200.0,
+            position_secs: 100.0,
+        })
+        .unwrap();
         for _ in 0..50 {
             if property(&address, PLAYER, "PlaybackStatus").await == "Playing" {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert_eq!(property(&address, PLAYER, "PlaybackStatus").await, "Playing");
+        assert_eq!(
+            property(&address, PLAYER, "PlaybackStatus").await,
+            "Playing"
+        );
         assert_eq!(property(&address, PLAYER, "CanPause").await, true);
         let metadata = property(&address, PLAYER, "Metadata").await;
         assert_eq!(metadata["xesam:title"]["data"], "Heat", "{metadata}");
-        assert_eq!(metadata["mpris:length"]["data"], 7_200_000_000_i64, "{metadata}");
+        assert_eq!(
+            metadata["mpris:length"]["data"], 7_200_000_000_i64,
+            "{metadata}"
+        );
         assert_eq!(metadata["mpris:trackid"]["data"], TRACK_ID);
-        assert_eq!(property(&address, PLAYER, "Position").await, 100_000_000_i64);
+        assert_eq!(
+            property(&address, PLAYER, "Position").await,
+            100_000_000_i64
+        );
         assert_eq!(property(&address, PLAYER, "Volume").await, 0.8);
 
         // Media keys: PlayPause toggles; Play does nothing while playing; Pause toggles once.
         busctl(&address, &["call", DEST, PATH, PLAYER, "PlayPause"]).await;
         busctl(&address, &["call", DEST, PATH, PLAYER, "Play"]).await;
         busctl(&address, &["call", DEST, PATH, PLAYER, "Pause"]).await;
-        assert_eq!(recorder.calls(), vec!["toggle", "toggle"], "PlayPause and Pause act; Play on a playing title does not");
+        assert_eq!(
+            recorder.calls(),
+            vec!["toggle", "toggle"],
+            "PlayPause and Pause act; Play on a playing title does not"
+        );
 
         // Seeking: relative from the current position, absolute for SetPosition, never past the end or before zero.
-        busctl(&address, &["call", DEST, PATH, PLAYER, "Seek", "x", "30000000"]).await;
-        busctl(&address, &["call", DEST, PATH, PLAYER, "Seek", "x", "-500000000"]).await;
-        busctl(&address, &["call", DEST, PATH, PLAYER, "SetPosition", "ox", TRACK_ID, "42000000"]).await;
-        busctl(&address, &["call", DEST, PATH, PLAYER, "SetPosition", "ox", "/dev/lumen/track/old", "9000000"]).await;
-        busctl(&address, &["set-property", DEST, PATH, PLAYER, "Volume", "d", "0.5"]).await;
+        busctl(
+            &address,
+            &["call", DEST, PATH, PLAYER, "Seek", "x", "30000000"],
+        )
+        .await;
+        busctl(
+            &address,
+            &["call", DEST, PATH, PLAYER, "Seek", "x", "-500000000"],
+        )
+        .await;
+        busctl(
+            &address,
+            &[
+                "call",
+                DEST,
+                PATH,
+                PLAYER,
+                "SetPosition",
+                "ox",
+                TRACK_ID,
+                "42000000",
+            ],
+        )
+        .await;
+        busctl(
+            &address,
+            &[
+                "call",
+                DEST,
+                PATH,
+                PLAYER,
+                "SetPosition",
+                "ox",
+                "/dev/lumen/track/old",
+                "9000000",
+            ],
+        )
+        .await;
+        busctl(
+            &address,
+            &["set-property", DEST, PATH, PLAYER, "Volume", "d", "0.5"],
+        )
+        .await;
         busctl(&address, &["call", DEST, PATH, PLAYER, "Stop"]).await;
-        busctl(&address, &["call", DEST, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2", "Raise"]).await;
+        busctl(
+            &address,
+            &[
+                "call",
+                DEST,
+                "/org/mpris/MediaPlayer2",
+                "org.mpris.MediaPlayer2",
+                "Raise",
+            ],
+        )
+        .await;
         assert_eq!(
             recorder.calls()[2..],
-            ["seek 130.0", "seek 0.0", "seek 42.0", "volume 0.50", "stop", "raise"],
+            [
+                "seek 130.0",
+                "seek 0.0",
+                "seek 42.0",
+                "volume 0.50",
+                "stop",
+                "raise"
+            ],
             "a position for an old track is ignored"
         );
 
         // Pausing from the app is reflected for the clients, and the title going away stops it.
-        tx.send(Snapshot { status: Status::Paused, title: Some("Heat".into()), length_secs: 7200.0, position_secs: 130.0 }).unwrap();
+        tx.send(Snapshot {
+            status: Status::Paused,
+            title: Some("Heat".into()),
+            length_secs: 7200.0,
+            position_secs: 130.0,
+        })
+        .unwrap();
         for _ in 0..50 {
             if property(&address, PLAYER, "PlaybackStatus").await == "Paused" {
                 break;
@@ -549,7 +794,11 @@ mod tests {
         }
         assert_eq!(property(&address, PLAYER, "PlaybackStatus").await, "Paused");
         busctl(&address, &["call", DEST, PATH, PLAYER, "Play"]).await;
-        assert_eq!(recorder.calls().last().map(String::as_str), Some("toggle"), "Play resumes a paused title");
+        assert_eq!(
+            recorder.calls().last().map(String::as_str),
+            Some("toggle"),
+            "Play resumes a paused title"
+        );
         tx.send(Snapshot::default()).unwrap();
         for _ in 0..50 {
             if property(&address, PLAYER, "PlaybackStatus").await == "Stopped" {
@@ -557,7 +806,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert_eq!(property(&address, PLAYER, "PlaybackStatus").await, "Stopped");
+        assert_eq!(
+            property(&address, PLAYER, "PlaybackStatus").await,
+            "Stopped"
+        );
         assert_eq!(property(&address, PLAYER, "CanSeek").await, false);
 
         drop(tx);

@@ -5,10 +5,10 @@
 use crate::error::{PlayerError, Result};
 use crate::netguard;
 use crate::playlist::import::read_capped_body;
-use crate::probe::{probe_targets_bounded, ProbeTarget};
+use crate::probe::{ProbeTarget, probe_targets_bounded};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -360,9 +360,8 @@ pub fn validate_provider_config(config: &Value) -> Result<ValidatedProviderConfi
         let label = if name.is_empty() { "Provider" } else { &name };
         PlayerError::InvalidArg(format!("{label}: {e}"))
     })?;
-    let parsed = Url::parse(&validated_endpoint).map_err(|_| {
-        PlayerError::InvalidArg("Endpoint is not a valid URL".into())
-    })?;
+    let parsed = Url::parse(&validated_endpoint)
+        .map_err(|_| PlayerError::InvalidArg("Endpoint is not a valid URL".into()))?;
     if !parsed.username().is_empty() || parsed.password().is_some() || parsed.fragment().is_some() {
         let label = if name.is_empty() { "Provider" } else { &name };
         return Err(PlayerError::InvalidArg(format!(
@@ -454,11 +453,7 @@ pub fn search_library(entries: &[Value], query: &str) -> Vec<SearchResultItem> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim();
-        let url = obj
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim();
+        let url = obj.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
         if title.is_empty() || url.is_empty() {
             continue;
         }
@@ -705,7 +700,12 @@ async fn query_user_json_provider(
         }
         let body = read_capped_body(resp, MAX_API_RESPONSE_BYTES)
             .await
-            .map_err(|_| ("error".to_string(), "Provider response too large".to_string()))?;
+            .map_err(|_| {
+                (
+                    "error".to_string(),
+                    "Provider response too large".to_string(),
+                )
+            })?;
         let payload: Value = serde_json::from_str(&body)
             .map_err(|_| ("error".to_string(), "Invalid provider JSON".to_string()))?;
         parse_user_json_provider_payload(cfg, &payload)
@@ -916,11 +916,11 @@ pub fn deduplicate_results(
         if !dup.provider_sources.contains(&source) {
             dup.provider_sources.push(source);
         }
-        for (raw_alias, norm_alias) in item
-            .aliases
-            .iter()
-            .zip(item.normalized_aliases.iter().chain(std::iter::repeat(&String::new())))
-        {
+        for (raw_alias, norm_alias) in item.aliases.iter().zip(
+            item.normalized_aliases
+                .iter()
+                .chain(std::iter::repeat(&String::new())),
+        ) {
             if dup.aliases.len() < 30 && !dup.aliases.contains(raw_alias) {
                 dup.aliases.push(raw_alias.clone());
             }
@@ -1030,7 +1030,7 @@ struct CacheEntry {
     response: SearchResponse,
 }
 
-static SEARCH_CACHE: LazyLock<Mutex< Vec<(String, CacheEntry)> >> =
+static SEARCH_CACHE: LazyLock<Mutex<Vec<(String, CacheEntry)>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 static SEARCH_SLOTS: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_SEARCHES));
@@ -1040,7 +1040,11 @@ fn cache_key(req: &SearchRequest, preferred: Option<&str>) -> String {
     let mut hasher = Sha256::new();
     hasher.update(normalize_text(&req.query).as_bytes());
     hasher.update(b":");
-    hasher.update(serde_json::to_string(&req.providers).unwrap_or_default().as_bytes());
+    hasher.update(
+        serde_json::to_string(&req.providers)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     hasher.update(b":");
     hasher.update(req.library.len().to_le_bytes());
     if let Some(first) = req.library.first() {
@@ -1240,18 +1244,22 @@ mod tests {
 
     #[test]
     fn provider_config_requires_safe_http_endpoint_and_validates_limits() {
-        assert!(validate_provider_config(&json!({
-            "id": "bad",
-            "name": "Bad",
-            "endpoint": "file:///etc/passwd"
-        }))
-        .is_err());
-        assert!(validate_provider_config(&json!({
-            "id": "bad",
-            "name": "Bad",
-            "endpoint": "https://user:pass@example.com/search"
-        }))
-        .is_err());
+        assert!(
+            validate_provider_config(&json!({
+                "id": "bad",
+                "name": "Bad",
+                "endpoint": "file:///etc/passwd"
+            }))
+            .is_err()
+        );
+        assert!(
+            validate_provider_config(&json!({
+                "id": "bad",
+                "name": "Bad",
+                "endpoint": "https://user:pass@example.com/search"
+            }))
+            .is_err()
+        );
 
         let valid = validate_provider_config(&json!({
             "id": "json",
@@ -1426,7 +1434,10 @@ mod tests {
         assert_eq!(normalize_language(Some("English")).as_deref(), Some("en"));
         assert_eq!(normalize_language(Some("en-US")).as_deref(), Some("en"));
         assert_eq!(normalize_language(Some("fre")).as_deref(), Some("fr"));
-        assert_eq!(normalize_language(Some("English (US)")).as_deref(), Some("en"));
+        assert_eq!(
+            normalize_language(Some("English (US)")).as_deref(),
+            Some("en")
+        );
         assert_eq!(normalize_language(Some("pt_BR")).as_deref(), Some("pt"));
         assert_eq!(normalize_language(Some("")), None);
         assert_eq!(normalize_language(None), None);
@@ -1477,7 +1488,11 @@ mod tests {
                 id: format!("prov:{i}"),
                 title,
                 url: format!("https://cdn.example.org/stream/{i}.m3u8"),
-                provider: if i < 2500 { "Library".into() } else { "Remote".into() },
+                provider: if i < 2500 {
+                    "Library".into()
+                } else {
+                    "Remote".into()
+                },
                 providers: Vec::new(),
                 provider_sources: Vec::new(),
                 aliases: Vec::new(),
@@ -1581,7 +1596,10 @@ mod tests {
         assert_eq!(resp.results[0]["quality"], json!("adaptive"));
         // Unresponsive streams timed out at the overall deadline and have available = null.
         assert!(
-            resp.results.iter().skip(1).any(|r| r["available"].is_null()),
+            resp.results
+                .iter()
+                .skip(1)
+                .any(|r| r["available"].is_null()),
             "unresponsive hosts should return available = null"
         );
 

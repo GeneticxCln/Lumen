@@ -49,11 +49,18 @@ impl Default for PlayerStateEvent {
             audio_track: "auto".into(),
             subtitle_track: "off".into(),
             quality_levels: vec![
-                PlayerQuality { id: "max".into(), label: "Highest bitrate".into() },
-                PlayerQuality { id: "min".into(), label: "Lowest bitrate".into() },
+                PlayerQuality {
+                    id: "max".into(),
+                    label: "Highest bitrate".into(),
+                },
+                PlayerQuality {
+                    id: "min".into(),
+                    label: "Lowest bitrate".into(),
+                },
             ],
             quality: "max".into(),
-            quality_help: "mpv HLS bitrate preference; the stream determines available resolutions".into(),
+            quality_help: "mpv HLS bitrate preference; the stream determines available resolutions"
+                .into(),
         }
     }
 }
@@ -63,7 +70,12 @@ impl Default for PlayerStateEvent {
 /// engine embedded in the window, only has to provide these operations.
 #[async_trait]
 pub trait PlaybackBackend: Send + Sync {
-    async fn load(&self, url: &str, headers: Option<&[(&str, &str)]>, audio_url: Option<&str>) -> Result<()>;
+    async fn load(
+        &self,
+        url: &str,
+        headers: Option<&[(&str, &str)]>,
+        audio_url: Option<&str>,
+    ) -> Result<()>;
     /// Toggles between playing and paused.
     async fn pause(&self) -> Result<()>;
     /// Jumps to an absolute position in seconds.

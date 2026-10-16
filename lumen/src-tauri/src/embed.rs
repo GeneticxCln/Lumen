@@ -36,13 +36,17 @@ pub struct Support {
 
 /// Records what kind of display this is. Call on the main thread (the `setup` hook).
 pub fn detect_display() {
-    let x11 = gtk::gdk::Display::default().is_some_and(|display| display.is::<gdkx11::X11Display>());
+    let x11 =
+        gtk::gdk::Display::default().is_some_and(|display| display.is::<gdkx11::X11Display>());
     X11_SESSION.store(x11, Ordering::SeqCst);
 }
 
 pub fn support() -> Support {
     if X11_SESSION.load(Ordering::SeqCst) {
-        Support { supported: true, reason: None }
+        Support {
+            supported: true,
+            reason: None,
+        }
     } else {
         Support {
             supported: false,
@@ -64,7 +68,9 @@ pub fn set_in_use(value: bool) {
 }
 
 fn build(window: &tauri::WebviewWindow) -> Result<u64, String> {
-    let vbox = window.default_vbox().map_err(|error| format!("The window layout is not available: {error}"))?;
+    let vbox = window
+        .default_vbox()
+        .map_err(|error| format!("The window layout is not available: {error}"))?;
     let area = gtk::DrawingArea::new();
     // Hidden and empty until the page asks for room.
     area.set_size_request(-1, 0);
@@ -74,9 +80,9 @@ fn build(window: &tauri::WebviewWindow) -> Result<u64, String> {
     // Realizing creates the X window mpv will draw into.
     area.realize();
     let gdk_window = area.window().ok_or("The video area has no window")?;
-    let x11 = gdk_window
-        .downcast::<gdkx11::X11Window>()
-        .map_err(|_| "The video area is not an X11 window (run Lumen with GDK_BACKEND=x11)".to_string())?;
+    let x11 = gdk_window.downcast::<gdkx11::X11Window>().map_err(|_| {
+        "The video area is not an X11 window (run Lumen with GDK_BACKEND=x11)".to_string()
+    })?;
     // An X11 window id is `c_ulong`: 64 bits here, 32 on 32-bit systems.
     #[allow(clippy::unnecessary_cast)]
     let xid = x11.xid() as u64;
@@ -92,7 +98,9 @@ pub async fn ensure_area(app: &AppHandle) -> Result<u64, String> {
     if !X11_SESSION.load(Ordering::SeqCst) {
         return Err(support().reason.unwrap_or_default());
     }
-    let window = app.get_webview_window("main").ok_or("The main window is not available")?;
+    let window = app
+        .get_webview_window("main")
+        .ok_or("The main window is not available")?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let on_main = window.clone();
     window
@@ -100,14 +108,18 @@ pub async fn ensure_area(app: &AppHandle) -> Result<u64, String> {
             let _ = tx.send(build(&on_main));
         })
         .map_err(|error| error.to_string())?;
-    let xid = rx.await.map_err(|_| "The window did not answer".to_string())??;
+    let xid = rx
+        .await
+        .map_err(|_| "The window did not answer".to_string())??;
     let _ = VIDEO_XID.set(xid);
     Ok(xid)
 }
 
 /// Shows the area at `height` pixels (full width, above the page), or hides it.
 pub fn set_visible(app: &AppHandle, visible: bool, height: i32) -> Result<(), String> {
-    let window = app.get_webview_window("main").ok_or("The main window is not available")?;
+    let window = app
+        .get_webview_window("main")
+        .ok_or("The main window is not available")?;
     window
         .run_on_main_thread(move || {
             AREA.with(|slot| {
@@ -127,7 +139,9 @@ pub fn set_visible(app: &AppHandle, visible: bool, height: i32) -> Result<(), St
 
 /// mpv arguments that make it draw into the area and leave the controls to the page.
 pub fn mpv_args(xid: u64) -> String {
-    format!("--wid={xid} --osc=no --no-input-default-bindings --input-vo-keyboard=no --input-cursor=no --cursor-autohide=no")
+    format!(
+        "--wid={xid} --osc=no --no-input-default-bindings --input-vo-keyboard=no --input-cursor=no --cursor-autohide=no"
+    )
 }
 
 #[cfg(test)]
@@ -138,7 +152,11 @@ mod tests {
     fn mpv_is_pointed_at_the_area_and_its_own_controls_are_off() {
         let args = mpv_args(12345);
         assert!(args.starts_with("--wid=12345 "));
-        for flag in ["--osc=no", "--no-input-default-bindings", "--input-vo-keyboard=no"] {
+        for flag in [
+            "--osc=no",
+            "--no-input-default-bindings",
+            "--input-vo-keyboard=no",
+        ] {
             assert!(args.contains(flag), "{flag}");
         }
     }

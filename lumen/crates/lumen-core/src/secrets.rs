@@ -28,7 +28,9 @@ fn entry(service: &str, provider_id: &str) -> Result<keyring::Entry> {
 pub fn provider_id(provider: &Value) -> Result<String> {
     match provider.get("id").and_then(Value::as_str).map(str::trim) {
         Some(id) if !id.is_empty() => Ok(id.to_string()),
-        _ => Err(PlayerError::InvalidArg("Each search provider needs a non-empty id".into())),
+        _ => Err(PlayerError::InvalidArg(
+            "Each search provider needs a non-empty id".into(),
+        )),
     }
 }
 
@@ -36,12 +38,16 @@ pub fn provider_id(provider: &Value) -> Result<String> {
 /// decide where it goes. A missing field returns `None`; a non-string value is rejected.
 pub fn take_token(provider: &mut Value) -> Result<Option<String>> {
     let Some(object) = provider.as_object_mut() else {
-        return Err(PlayerError::InvalidArg("Each search provider must be an object".into()));
+        return Err(PlayerError::InvalidArg(
+            "Each search provider must be an object".into(),
+        ));
     };
     match object.remove("token") {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(token)) => Ok(Some(token)),
-        Some(_) => Err(PlayerError::InvalidArg("A provider token must be a string".into())),
+        Some(_) => Err(PlayerError::InvalidArg(
+            "A provider token must be a string".into(),
+        )),
     }
 }
 
@@ -51,7 +57,9 @@ pub fn store_token(provider_id: &str, token: &str) -> Result<()> {
 }
 
 fn store_token_in(service: &str, provider_id: &str, token: &str) -> Result<()> {
-    entry(service, provider_id)?.set_password(token).map_err(keychain_error)
+    entry(service, provider_id)?
+        .set_password(token)
+        .map_err(keychain_error)
 }
 
 pub fn load_token(provider_id: &str) -> Result<Option<String>> {
@@ -109,7 +117,10 @@ mod tests {
     #[test]
     fn take_token_removes_the_field_and_returns_it() {
         let mut provider = json!({"id": "catalog", "token": "secret"});
-        assert_eq!(take_token(&mut provider).unwrap().as_deref(), Some("secret"));
+        assert_eq!(
+            take_token(&mut provider).unwrap().as_deref(),
+            Some("secret")
+        );
         assert!(provider.get("token").is_none());
     }
 
@@ -165,7 +176,9 @@ mod tests {
 
         store_token_in(TEST_KEYCHAIN_SERVICE, &id, "round-trip-token").expect("keychain write");
         assert_eq!(
-            load_token_in(TEST_KEYCHAIN_SERVICE, &id).expect("keychain read").as_deref(),
+            load_token_in(TEST_KEYCHAIN_SERVICE, &id)
+                .expect("keychain read")
+                .as_deref(),
             Some("round-trip-token")
         );
 
@@ -174,6 +187,7 @@ mod tests {
             load_token_in(TEST_KEYCHAIN_SERVICE, &id).expect("keychain read after delete"),
             None
         );
-        delete_token_in(TEST_KEYCHAIN_SERVICE, &id).expect("deleting a missing entry is not an error");
+        delete_token_in(TEST_KEYCHAIN_SERVICE, &id)
+            .expect("deleting a missing entry is not an error");
     }
 }

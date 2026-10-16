@@ -1,5 +1,5 @@
 use crate::error::{PlayerError, Result};
-pub use crate::playlist::m3u::{parse_m3u, Channel, ParsedPlaylist, Playlist};
+pub use crate::playlist::m3u::{Channel, ParsedPlaylist, Playlist, parse_m3u};
 use chrono::Utc;
 use std::path::{Path, PathBuf};
 use url::Url;
@@ -35,7 +35,11 @@ fn parse_into_channels(
             eprintln!(
                 "lumen: {} is an HLS {} playlist ({} variant(s), {} segment(s)); importing it as a single playable entry",
                 origin,
-                if manifest.is_master() { "master" } else { "media" },
+                if manifest.is_master() {
+                    "master"
+                } else {
+                    "media"
+                },
                 manifest.variants.len(),
                 manifest.segments.len(),
             );
@@ -63,8 +67,8 @@ pub async fn import_m3u_file(path: &str, name: Option<String>) -> Result<(Playli
     let name_owned = name.clone();
 
     tokio::task::spawn_blocking(move || {
-        let content = std::fs::read_to_string(&path_owned)
-            .map_err(|e| PlayerError::Io(e.to_string()))?;
+        let content =
+            std::fs::read_to_string(&path_owned).map_err(|e| PlayerError::Io(e.to_string()))?;
         let source_path = PathBuf::from(&path_owned);
         let playlist_name = name_owned.unwrap_or_else(|| {
             source_path
@@ -139,7 +143,11 @@ pub async fn read_capped_body(mut response: reqwest::Response, limit: usize) -> 
 /// Fetches and parses a playlist. The address is checked before the request, at every redirect
 /// and when the name resolves (see `netguard`); `allow_lan` is the user's opt-in for sources on
 /// their own network.
-pub async fn import_m3u_url(url: &str, name: Option<String>, allow_lan: bool) -> Result<(Playlist, Vec<Channel>)> {
+pub async fn import_m3u_url(
+    url: &str,
+    name: Option<String>,
+    allow_lan: bool,
+) -> Result<(Playlist, Vec<Channel>)> {
     let target = crate::netguard::validate_url(url, allow_lan)?;
 
     let client = crate::netguard::guarded_client(allow_lan)
@@ -268,7 +276,11 @@ mod tests {
         assert_eq!(channels.len(), 2);
         assert_eq!(
             channels[0].url,
-            fixture.dir.join("clips/one.mp4").to_string_lossy().to_string()
+            fixture
+                .dir
+                .join("clips/one.mp4")
+                .to_string_lossy()
+                .to_string()
         );
         assert_eq!(channels[0].group_title.as_deref(), Some("Local"));
         assert_eq!(channels[1].url, "https://example.com/two.m3u8");
@@ -296,8 +308,8 @@ mod tests {
 #[cfg(test)]
 mod network_guard_tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -321,7 +333,10 @@ mod network_guard_tests {
 
     fn ok_playlist() -> String {
         let body = "#EXTM3U\n#EXTINF:-1,One\nhttps://example.com/one.m3u8\n";
-        format!("HTTP/1.1 200 OK\r\nContent-Type: audio/mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: audio/mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
     }
 
     #[tokio::test]
@@ -330,16 +345,24 @@ mod network_guard_tests {
         let error = import_m3u_url(&format!("http://127.0.0.1:{port}/list.m3u"), None, false)
             .await
             .expect_err("loopback must be refused by default");
-        assert!(String::from(error).contains("local"), "the message explains why");
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "the server was never contacted");
+        assert!(
+            String::from(error).contains("local"),
+            "the message explains why"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "the server was never contacted"
+        );
     }
 
     #[tokio::test]
     async fn local_network_sources_work_once_the_user_allows_them() {
         let (port, hits) = serve(ok_playlist()).await;
-        let (_, channels) = import_m3u_url(&format!("http://127.0.0.1:{port}/list.m3u"), None, true)
-            .await
-            .expect("allowed in LAN mode");
+        let (_, channels) =
+            import_m3u_url(&format!("http://127.0.0.1:{port}/list.m3u"), None, true)
+                .await
+                .expect("allowed in LAN mode");
         assert_eq!(channels.len(), 1);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
     }

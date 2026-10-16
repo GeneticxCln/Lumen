@@ -14,8 +14,8 @@ use crate::secrets;
 use chrono::Utc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 use sqlx::{Pool, Sqlite};
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -261,11 +261,12 @@ async fn read_capped_json(
     limit: usize,
 ) -> std::result::Result<serde_json::Value, TmdbFailure> {
     if let Some(len) = response.content_length()
-        && len > limit as u64 {
-            return Err(TmdbFailure::Other(format!(
-                "TMDB response is {len} bytes, over the {limit} byte limit"
-            )));
-        }
+        && len > limit as u64
+    {
+        return Err(TmdbFailure::Other(format!(
+            "TMDB response is {len} bytes, over the {limit} byte limit"
+        )));
+    }
     let mut buffer: Vec<u8> = Vec::new();
     while let Some(chunk) = response
         .chunk()
@@ -306,10 +307,7 @@ async fn search(
 
     let mut top: Option<(i64, String)> = None;
     for item in parsed.results {
-        let label = item
-            .title
-            .or(item.name)
-            .unwrap_or_default();
+        let label = item.title.or(item.name).unwrap_or_default();
         if titles_match(guess, &label) {
             return Ok(Some(item.id));
         }
@@ -321,7 +319,8 @@ async fn search(
     // Containment is only trusted for the top hit, and only for a usefully long query.
     if let Some((id, label)) = top {
         let guess_norm = normalize_title(guess);
-        if guess_norm.chars().count() >= 4 && normalize_title(&label).contains(guess_norm.as_str()) {
+        if guess_norm.chars().count() >= 4 && normalize_title(&label).contains(guess_norm.as_str())
+        {
             return Ok(Some(id));
         }
     }
@@ -336,14 +335,7 @@ async fn details(
     id: i64,
     requests: &mut i64,
 ) -> std::result::Result<DetailsResponse, TmdbFailure> {
-    let payload = tmdb_get(
-        http,
-        key,
-        &format!("/{}/{}", media_type, id),
-        &[],
-        requests,
-    )
-    .await?;
+    let payload = tmdb_get(http, key, &format!("/{}/{}", media_type, id), &[], requests).await?;
     serde_json::from_value(payload).map_err(|e| TmdbFailure::Other(e.to_string()))
 }
 
@@ -409,15 +401,17 @@ async fn enrich_one(
         backdrop_path: detail.backdrop_path,
         overview: detail.overview.filter(|text| !text.trim().is_empty()),
         release_year,
-        rating: detail.vote_average.map(|value| (value * 10.0).round() / 10.0),
+        rating: detail
+            .vote_average
+            .map(|value| (value * 10.0).round() / 10.0),
         genre_names,
     }))
 }
 
 pub async fn enrich(pool: &Pool<Sqlite>, limit: i64, force: bool) -> Result<EnrichOutcome> {
-    let (key, _source) = api_key(pool).await?.ok_or_else(|| {
-        PlayerError::InvalidArg("TMDB API key not configured".into())
-    })?;
+    let (key, _source) = api_key(pool)
+        .await?
+        .ok_or_else(|| PlayerError::InvalidArg("TMDB API key not configured".into()))?;
 
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
@@ -493,10 +487,11 @@ pub async fn enrich(pool: &Pool<Sqlite>, limit: i64, force: bool) -> Result<Enri
             .map_err(|e| PlayerError::Sql(e.to_string()))?;
     }
 
-    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE enriched_at IS NULL")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE enriched_at IS NULL")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
     Ok(EnrichOutcome {
         enriched: matched,
@@ -525,10 +520,11 @@ pub async fn counts(pool: &Pool<Sqlite>) -> Result<(i64, i64)> {
         .fetch_one(pool)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
-    let enriched: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE tmdb_id IS NOT NULL")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let enriched: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE tmdb_id IS NOT NULL")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
     Ok((enriched, total))
 }
 
@@ -639,7 +635,11 @@ fn browse_rows(
         } else {
             (item.first_air_date.as_deref(), item.release_date.as_deref())
         };
-        let names = if media_type == "movie" { &movie_names } else { &tv_names };
+        let names = if media_type == "movie" {
+            &movie_names
+        } else {
+            &tv_names
+        };
         let genres: Vec<&str> = item
             .genre_ids
             .iter()
@@ -655,7 +655,11 @@ fn browse_rows(
             overview: item.overview.filter(|text| !text.is_empty()),
             release_year: year_from(primary.or(fallback)),
             rating: item.vote_average.map(|vote| (vote * 10.0).round() / 10.0),
-            genre_names: if genres.is_empty() { None } else { Some(genres.join(";")) },
+            genre_names: if genres.is_empty() {
+                None
+            } else {
+                Some(genres.join(";"))
+            },
         });
     }
     rows
@@ -690,7 +694,8 @@ pub async fn browse(key: &str) -> Result<Vec<BrowseTitle>> {
         .map_err(|e| PlayerError::Http(e.to_string()))?;
     let mut requests = 0_i64;
 
-    let trending: ListResponse = browse_list(&http, key, "/trending/all/week", &mut requests).await?;
+    let trending: ListResponse =
+        browse_list(&http, key, "/trending/all/week", &mut requests).await?;
     let movies: ListResponse = browse_list(&http, key, "/movie/top_rated", &mut requests).await?;
     let shows: ListResponse = browse_list(&http, key, "/tv/top_rated", &mut requests).await?;
     let movie_genres: GenreListResponse =
@@ -745,7 +750,9 @@ pub async fn refresh_airing(pool: &Pool<Sqlite>, profile_id: i64, limit: i64) ->
                 refreshed += 1;
             }
             Err(TmdbFailure::Unauthorized) => {
-                return Err(PlayerError::InvalidArg("TMDB rejected the API key (HTTP 401)".into()));
+                return Err(PlayerError::InvalidArg(
+                    "TMDB rejected the API key (HTTP 401)".into(),
+                ));
             }
             // Offline or a single bad id must not stop the rest, and must not be retried at once.
             Err(TmdbFailure::Other(_)) => {}
@@ -761,9 +768,8 @@ mod tests {
 
     #[test]
     fn browse_rows_orders_dedupes_skips_and_limits() {
-        let parse = |value: serde_json::Value| -> ListResponse {
-            serde_json::from_value(value).unwrap()
-        };
+        let parse =
+            |value: serde_json::Value| -> ListResponse { serde_json::from_value(value).unwrap() };
         let trending = parse(serde_json::json!({"results": [
             {"id": 1, "media_type": "movie", "title": "Alpha", "release_date": "2024-03-01",
              "vote_average": 7.456, "genre_ids": [28, 999], "overview": "Trending film"},
@@ -785,7 +791,8 @@ mod tests {
             serde_json::from_value(value).unwrap()
         };
         let movie_genres = genres(serde_json::json!({"genres": [{"id": 28, "name": "Action"}]}));
-        let tv_genres = genres(serde_json::json!({"genres": [{"id": 10759, "name": "Action & Adventure"}]}));
+        let tv_genres =
+            genres(serde_json::json!({"genres": [{"id": 10759, "name": "Action & Adventure"}]}));
 
         let rows = browse_rows(trending, movies, shows, movie_genres, tv_genres, 10);
         let keys: Vec<(&str, i64)> = rows.iter().map(|r| (r.tmdb_type, r.tmdb_id)).collect();
@@ -807,7 +814,8 @@ mod tests {
     fn browse_rows_respects_limit() {
         let movies: ListResponse = serde_json::from_value(serde_json::json!({"results": [
             {"id": 1, "title": "One"}, {"id": 2, "title": "Two"}, {"id": 3, "title": "Three"},
-        ]})).unwrap();
+        ]}))
+        .unwrap();
         let rows = browse_rows(
             ListResponse::default(),
             movies,
@@ -828,7 +836,10 @@ mod tests {
 
     #[test]
     fn test_guess_title_strips_qualifiers_and_resolution() {
-        assert_eq!(guess_title("BFM Business (1080p)").as_deref(), Some("BFM Business"));
+        assert_eq!(
+            guess_title("BFM Business (1080p)").as_deref(),
+            Some("BFM Business")
+        );
         assert_eq!(
             guess_title("Big Buck Bunny (Open Movie HLS)").as_deref(),
             Some("Big Buck Bunny")
@@ -841,16 +852,29 @@ mod tests {
             guess_title("Online TV Nusantara (720p) [Not 24/7]").as_deref(),
             Some("Online TV Nusantara")
         );
-        assert_eq!(guess_title("HD").as_deref(), None, "quality-only names are not searchable");
+        assert_eq!(
+            guess_title("HD").as_deref(),
+            None,
+            "quality-only names are not searchable"
+        );
     }
 
     #[test]
     fn test_titles_match_requires_a_defensible_match() {
         assert!(titles_match("Big Buck Bunny", "Big Buck Bunny"));
         assert!(titles_match("Tears of Steel", "tears of steel"));
-        assert!(titles_match("Big Buck Bunny", "Big Buck Bunny 2"), "superset passes containment");
-        assert!(!titles_match("BFM Business", "The Business"), "unrelated titles do not match");
-        assert!(!titles_match("DW", "DW News"), "queries shorter than 4 chars need an exact hit");
+        assert!(
+            titles_match("Big Buck Bunny", "Big Buck Bunny 2"),
+            "superset passes containment"
+        );
+        assert!(
+            !titles_match("BFM Business", "The Business"),
+            "unrelated titles do not match"
+        );
+        assert!(
+            !titles_match("DW", "DW News"),
+            "queries shorter than 4 chars need an exact hit"
+        );
         assert!(!titles_match("NHK", "NHK World"));
     }
 

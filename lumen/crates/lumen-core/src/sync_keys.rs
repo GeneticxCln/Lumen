@@ -57,7 +57,9 @@ impl RootStore for KeyringStore {
     }
 
     fn save(&self, root: &[u8; 32]) -> Result<()> {
-        entry()?.set_password(&sync_crypto::format_key(root)).map_err(keychain_error)
+        entry()?
+            .set_password(&sync_crypto::format_key(root))
+            .map_err(keychain_error)
     }
 
     fn clear(&self) -> Result<()> {
@@ -111,13 +113,21 @@ pub struct SyncState {
 /// to this address, so it must be https; plain http is allowed only to this machine, for a
 /// development server.
 pub fn parse_server_url(raw: &str) -> Result<String> {
-    let invalid = |why: &str| PlayerError::InvalidArg(format!("That sync server address is not valid: {why}"));
+    let invalid = |why: &str| {
+        PlayerError::InvalidArg(format!("That sync server address is not valid: {why}"))
+    };
     let url = url::Url::parse(raw.trim()).map_err(|_| invalid("it is not a web address"))?;
-    if url.query().is_some() || url.fragment().is_some() || !url.username().is_empty() || url.password().is_some() {
+    if url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
         return Err(invalid("remove anything after the host name"));
     }
     if url.path() != "/" {
-        return Err(invalid("use just the host name, such as https://sync.example.com"));
+        return Err(invalid(
+            "use just the host name, such as https://sync.example.com",
+        ));
     }
     let loopback = match url.host() {
         Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
@@ -135,7 +145,10 @@ pub fn parse_server_url(raw: &str) -> Result<String> {
 }
 
 async fn server_url(pool: &Pool<Sqlite>) -> Result<(Option<String>, bool)> {
-    if let Some(saved) = get_setting(pool, SERVER_SETTING).await?.filter(|value| !value.is_empty()) {
+    if let Some(saved) = get_setting(pool, SERVER_SETTING)
+        .await?
+        .filter(|value| !value.is_empty())
+    {
         return Ok((Some(saved), false));
     }
     Ok((DEFAULT_SERVER.map(str::to_string), true))
@@ -143,7 +156,9 @@ async fn server_url(pool: &Pool<Sqlite>) -> Result<(Option<String>, bool)> {
 
 async fn require_server(pool: &Pool<Sqlite>) -> Result<String> {
     server_url(pool).await?.0.ok_or_else(|| {
-        PlayerError::InvalidArg("No sync server is set. Enter the address of a Lumen sync server first".into())
+        PlayerError::InvalidArg(
+            "No sync server is set. Enter the address of a Lumen sync server first".into(),
+        )
     })
 }
 
@@ -153,7 +168,11 @@ pub async fn state(pool: &Pool<Sqlite>) -> Result<SyncState> {
 
 pub(crate) async fn state_with(pool: &Pool<Sqlite>, store: &dyn RootStore) -> Result<SyncState> {
     let (server_url, default_server) = server_url(pool).await?;
-    Ok(SyncState { enabled: store.load()?.is_some(), server_url, default_server })
+    Ok(SyncState {
+        enabled: store.load()?.is_some(),
+        server_url,
+        default_server,
+    })
 }
 
 /// Saves the server address (an empty string goes back to the default). Refused while sync is on:
@@ -162,9 +181,15 @@ pub async fn set_server(pool: &Pool<Sqlite>, raw: &str) -> Result<SyncState> {
     set_server_with(pool, &KeyringStore, raw).await
 }
 
-pub(crate) async fn set_server_with(pool: &Pool<Sqlite>, store: &dyn RootStore, raw: &str) -> Result<SyncState> {
+pub(crate) async fn set_server_with(
+    pool: &Pool<Sqlite>,
+    store: &dyn RootStore,
+    raw: &str,
+) -> Result<SyncState> {
     if store.load()?.is_some() {
-        return Err(PlayerError::InvalidArg("Turn sync off before changing the sync server".into()));
+        return Err(PlayerError::InvalidArg(
+            "Turn sync off before changing the sync server".into(),
+        ));
     }
     if raw.trim().is_empty() {
         delete_setting(pool, SERVER_SETTING).await?;
@@ -190,7 +215,11 @@ pub async fn enable(pool: &Pool<Sqlite>) -> Result<String> {
     enable_with(pool, &KeyringStore, sync_crypto::POW_BITS).await
 }
 
-pub(crate) async fn enable_with(pool: &Pool<Sqlite>, store: &dyn RootStore, pow_bits: u32) -> Result<String> {
+pub(crate) async fn enable_with(
+    pool: &Pool<Sqlite>,
+    store: &dyn RootStore,
+    pow_bits: u32,
+) -> Result<String> {
     if store.load()?.is_some() {
         return Err(PlayerError::InvalidArg("Sync is already on".into()));
     }
@@ -210,7 +239,11 @@ pub async fn join(pool: &Pool<Sqlite>, key_text: &str) -> Result<()> {
     join_with(pool, &KeyringStore, key_text).await
 }
 
-pub(crate) async fn join_with(pool: &Pool<Sqlite>, store: &dyn RootStore, key_text: &str) -> Result<()> {
+pub(crate) async fn join_with(
+    pool: &Pool<Sqlite>,
+    store: &dyn RootStore,
+    key_text: &str,
+) -> Result<()> {
     if store.load()?.is_some() {
         return Err(PlayerError::InvalidArg("Sync is already on".into()));
     }
@@ -233,7 +266,9 @@ pub fn show_key() -> Result<String> {
 }
 
 pub(crate) fn show_key_with(store: &dyn RootStore) -> Result<String> {
-    let root = store.load()?.ok_or_else(|| PlayerError::InvalidArg("Sync is off".into()))?;
+    let root = store
+        .load()?
+        .ok_or_else(|| PlayerError::InvalidArg("Sync is off".into()))?;
     Ok(sync_crypto::format_key(&root))
 }
 
@@ -245,10 +280,12 @@ pub async fn disable(pool: &Pool<Sqlite>, delete_remote: bool) -> Result<()> {
     disable_with(pool, &KeyringStore, delete_remote).await
 }
 
-pub(crate) async fn disable_with(pool: &Pool<Sqlite>, store: &dyn RootStore, delete_remote: bool) -> Result<()> {
-    if delete_remote
-        && let Some(remote) = remote(pool, store).await?
-    {
+pub(crate) async fn disable_with(
+    pool: &Pool<Sqlite>,
+    store: &dyn RootStore,
+    delete_remote: bool,
+) -> Result<()> {
+    if delete_remote && let Some(remote) = remote(pool, store).await? {
         remote.delete_group().await?;
     }
     store.clear()?;
@@ -261,15 +298,36 @@ mod tests {
 
     #[test]
     fn server_addresses_must_be_https_except_on_this_machine() {
-        assert_eq!(parse_server_url("https://sync.example.com").unwrap(), "https://sync.example.com");
-        assert_eq!(parse_server_url("  https://sync.example.com/ ").unwrap(), "https://sync.example.com");
-        assert_eq!(parse_server_url("http://127.0.0.1:8787").unwrap(), "http://127.0.0.1:8787");
-        assert_eq!(parse_server_url("http://localhost:8787").unwrap(), "http://localhost:8787");
-        assert!(parse_server_url("http://sync.example.com").is_err(), "the bearer token must not cross plain http");
-        assert!(parse_server_url("http://192.168.1.5").is_err(), "a LAN address is not this machine");
+        assert_eq!(
+            parse_server_url("https://sync.example.com").unwrap(),
+            "https://sync.example.com"
+        );
+        assert_eq!(
+            parse_server_url("  https://sync.example.com/ ").unwrap(),
+            "https://sync.example.com"
+        );
+        assert_eq!(
+            parse_server_url("http://127.0.0.1:8787").unwrap(),
+            "http://127.0.0.1:8787"
+        );
+        assert_eq!(
+            parse_server_url("http://localhost:8787").unwrap(),
+            "http://localhost:8787"
+        );
+        assert!(
+            parse_server_url("http://sync.example.com").is_err(),
+            "the bearer token must not cross plain http"
+        );
+        assert!(
+            parse_server_url("http://192.168.1.5").is_err(),
+            "a LAN address is not this machine"
+        );
         assert!(parse_server_url("ftp://sync.example.com").is_err());
         assert!(parse_server_url("sync.example.com").is_err());
-        assert!(parse_server_url("https://user:pw@sync.example.com").is_err(), "no credentials in the address");
+        assert!(
+            parse_server_url("https://user:pw@sync.example.com").is_err(),
+            "no credentials in the address"
+        );
         assert!(parse_server_url("https://sync.example.com/api?x=1").is_err());
         assert!(parse_server_url("https://sync.example.com/api").is_err());
     }

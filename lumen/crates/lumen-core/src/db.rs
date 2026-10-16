@@ -1,12 +1,12 @@
 use crate::auth;
-use crate::content_key::{parse_season_episode, ContentKey};
+use crate::content_key::{ContentKey, parse_season_episode};
 use crate::error::{PlayerError, Result};
 use crate::pin_guard;
-use crate::playlist::import::{import_m3u_file, Channel, Playlist};
+use crate::playlist::import::{Channel, Playlist, import_m3u_file};
 use crate::sync;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sqlx::{sqlite::SqlitePoolOptions, Pool, QueryBuilder, Row, Sqlite, SqliteConnection};
+use sqlx::{Pool, QueryBuilder, Row, Sqlite, SqliteConnection, sqlite::SqlitePoolOptions};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -109,7 +109,11 @@ const CHANNEL_LANGUAGE_BACKFILL_SETTING: &str = "channel_language_backfill_v1";
 /// `tvg-language` onto them, matched by stream URL. Remote playlists are not fetched. The setting
 /// is written only when every such file was read, so a missing file is retried on the next start.
 pub async fn backfill_channel_languages(pool: &Pool<Sqlite>) -> Result<()> {
-    if get_setting(pool, CHANNEL_LANGUAGE_BACKFILL_SETTING).await?.as_deref() == Some("done") {
+    if get_setting(pool, CHANNEL_LANGUAGE_BACKFILL_SETTING)
+        .await?
+        .as_deref()
+        == Some("done")
+    {
         return Ok(());
     }
 
@@ -133,7 +137,10 @@ pub async fn backfill_channel_languages(pool: &Pool<Sqlite>) -> Result<()> {
             Ok((_, channels)) => channels,
             Err(e) => {
                 complete = false;
-                eprintln!("lumen: could not re-read {} for language labels: {}", path, e);
+                eprintln!(
+                    "lumen: could not re-read {} for language labels: {}",
+                    path, e
+                );
                 continue;
             }
         };
@@ -149,13 +156,17 @@ pub async fn backfill_channel_languages(pool: &Pool<Sqlite>) -> Result<()> {
         }
 
         // Match in memory by URL: one pass over the playlist's rows instead of a scan per channel.
-        let unlabeled = sqlx::query("SELECT id, url FROM channels WHERE playlist_id = ? AND language IS NULL")
-            .bind(playlist_id)
-            .fetch_all(pool)
+        let unlabeled =
+            sqlx::query("SELECT id, url FROM channels WHERE playlist_id = ? AND language IS NULL")
+                .bind(playlist_id)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+        let mut tx = pool
+            .begin()
             .await
             .map_err(|e| PlayerError::Sql(e.to_string()))?;
-
-        let mut tx = pool.begin().await.map_err(|e| PlayerError::Sql(e.to_string()))?;
         for row in unlabeled {
             let url: String = row.get("url");
             if let Some(language) = labels.get(&url) {
@@ -167,7 +178,9 @@ pub async fn backfill_channel_languages(pool: &Pool<Sqlite>) -> Result<()> {
                     .map_err(|e| PlayerError::Sql(e.to_string()))?;
             }
         }
-        tx.commit().await.map_err(|e| PlayerError::Sql(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
     }
 
     if complete {
@@ -196,7 +209,10 @@ pub async fn backfill_titles_and_sources(pool: &Pool<Sqlite>) -> Result<()> {
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
     let now = Utc::now().timestamp_millis();
-    let mut tx = pool.begin().await.map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
     for row in &channels {
         let channel_id: i64 = row.get("id");
@@ -282,12 +298,14 @@ pub async fn backfill_titles_and_sources(pool: &Pool<Sqlite>) -> Result<()> {
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
         // Backfill content_key into favorites matching this url
-        sqlx::query("UPDATE favorites SET content_key = ? WHERE channel_url = ? AND content_key IS NULL")
-            .bind(&content_key)
-            .bind(&url)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        sqlx::query(
+            "UPDATE favorites SET content_key = ? WHERE channel_url = ? AND content_key IS NULL",
+        )
+        .bind(&content_key)
+        .bind(&url)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
         // Backfill content_key into history matching this url or channel_id
         sqlx::query("UPDATE history SET content_key = ? WHERE (path = ? OR channel_id = ?) AND content_key IS NULL")
@@ -320,7 +338,9 @@ pub async fn backfill_titles_and_sources(pool: &Pool<Sqlite>) -> Result<()> {
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    tx.commit().await.map_err(|e| PlayerError::Sql(e.to_string()))?;
+    tx.commit()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
     set_setting(pool, TITLES_BACKFILL_SETTING, "done").await?;
     Ok(())
 }
@@ -351,10 +371,13 @@ pub async fn migrate_tmdb_columns(pool: &Pool<Sqlite>) -> Result<()> {
     for (name, kind) in TMDB_COLUMNS {
         if !existing.iter().any(|column| column == name) {
             // `name`/`kind` come from the fixed TMDB_COLUMNS constant, never from user input.
-            sqlx::query(sqlx::AssertSqlSafe(format!("ALTER TABLE channels ADD COLUMN {} {}", name, kind)))
-                .execute(pool)
-                .await
-                .map_err(|e| PlayerError::Sql(e.to_string()))?;
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE channels ADD COLUMN {} {}",
+                name, kind
+            )))
+            .execute(pool)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
         }
     }
 
@@ -374,7 +397,10 @@ pub async fn import_playlist(
     playlist: &Playlist,
     channels: &[Channel],
 ) -> Result<i64> {
-    let mut tx = pool.begin().await.map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
     let row = sqlx::query(
         r#"
@@ -978,13 +1004,12 @@ pub async fn delete_profile(pool: &Pool<Sqlite>, profile_id: i64) -> Result<()> 
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    let sync_key: Option<String> =
-        sqlx::query_scalar("SELECT sync_key FROM profiles WHERE id = ?")
-            .bind(profile_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| PlayerError::Sql(e.to_string()))?
-            .flatten();
+    let sync_key: Option<String> = sqlx::query_scalar("SELECT sync_key FROM profiles WHERE id = ?")
+        .bind(profile_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?
+        .flatten();
 
     let result = sqlx::query("DELETE FROM profiles WHERE id = ?")
         .bind(profile_id)
@@ -1033,11 +1058,7 @@ pub async fn set_profile_pin(
 
 /// Verify a PIN for a profile. A profile without a PIN verifies for any input, so callers can
 /// treat "no PIN" and "correct PIN" the same way.
-pub async fn verify_profile_pin(
-    pool: &Pool<Sqlite>,
-    profile_id: i64,
-    pin: &str,
-) -> Result<bool> {
+pub async fn verify_profile_pin(pool: &Pool<Sqlite>, profile_id: i64, pin: &str) -> Result<bool> {
     let row = sqlx::query("SELECT pin_hash FROM profiles WHERE id = ?")
         .bind(profile_id)
         .fetch_optional(pool)
@@ -1069,7 +1090,9 @@ pub async fn authorize_profile(
         Ok(())
     } else {
         pin_guard::record_failure(profile_id);
-        Err(PlayerError::InvalidArg("That PIN is not correct".to_string()))
+        Err(PlayerError::InvalidArg(
+            "That PIN is not correct".to_string(),
+        ))
     }
 }
 
@@ -1095,18 +1118,17 @@ pub async fn set_active_profile(pool: &Pool<Sqlite>, profile_id: i64) -> Result<
 pub async fn active_profile_id(pool: &Pool<Sqlite>) -> Result<i64> {
     if let Some(stored) = get_setting(pool, ACTIVE_PROFILE_KEY).await?
         && let Ok(id) = stored.parse::<i64>()
-            && profile_exists(pool, id).await? {
-                return Ok(id);
-            }
+        && profile_exists(pool, id).await?
+    {
+        return Ok(id);
+    }
 
     let row = sqlx::query("SELECT id FROM profiles ORDER BY created_at, id LIMIT 1")
         .fetch_optional(pool)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    Ok(row
-        .map(|row| row.get("id"))
-        .unwrap_or(DEFAULT_PROFILE_ID))
+    Ok(row.map(|row| row.get("id")).unwrap_or(DEFAULT_PROFILE_ID))
 }
 
 /// History is a "recently watched" list, not an append-only log: every write replaces the
@@ -1164,7 +1186,8 @@ async fn prune_history_with(
             continue;
         }
 
-        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("DELETE FROM history WHERE profile_id = ");
+        let mut qb: QueryBuilder<Sqlite> =
+            QueryBuilder::new("DELETE FROM history WHERE profile_id = ");
         qb.push_bind(profile_id);
         qb.push(" AND path NOT IN (");
         {
@@ -1251,7 +1274,11 @@ pub async fn add_history(
             } else {
                 position
             },
-            if duration <= 0.0 && prev_duration > 0.0 { prev_duration } else { duration },
+            if duration <= 0.0 && prev_duration > 0.0 {
+                prev_duration
+            } else {
+                duration
+            },
         ),
         None => (channel_id, position, duration),
     };
@@ -1278,7 +1305,16 @@ pub async fn add_history(
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    sync::queue_progress(&mut tx, profile_id, &content_key, path, position, duration, now).await?;
+    sync::queue_progress(
+        &mut tx,
+        profile_id,
+        &content_key,
+        path,
+        position,
+        duration,
+        now,
+    )
+    .await?;
 
     prune_history_with(&mut tx, DEFAULT_HISTORY_RETENTION).await?;
 
@@ -1355,7 +1391,10 @@ pub async fn get_resume_position(
 /// Such an entry's stream link is resolved when it is played: links expire and often carry tokens.
 /// Entries saved by older versions hold a stream link as their URL, and still resolve from the
 /// source's origin.
-pub async fn extract_origin_for_channel(pool: &Pool<Sqlite>, channel_id: i64) -> Result<Option<String>> {
+pub async fn extract_origin_for_channel(
+    pool: &Pool<Sqlite>,
+    channel_id: i64,
+) -> Result<Option<String>> {
     let origin: Option<Option<String>> = sqlx::query_scalar(
         "SELECT p.origin FROM channels c JOIN playlists p ON p.id = c.playlist_id \
          WHERE c.id = ? AND p.source = 'extract'",
@@ -1486,30 +1525,86 @@ mod tests {
         let now = 1_700_000_000;
         let make = |name: &str, source: &str, origin: Option<&str>, url: &str| {
             (
-                Playlist { id: None, name: name.into(), source: source.into(), origin: origin.map(String::from), created_at: now, updated_at: now },
+                Playlist {
+                    id: None,
+                    name: name.into(),
+                    source: source.into(),
+                    origin: origin.map(String::from),
+                    created_at: now,
+                    updated_at: now,
+                },
                 Channel {
-                    id: None, playlist_id: 0, name: name.into(), url: url.into(), group_title: None, tvg_id: None,
-                    tvg_logo: None, language: None, extra_headers: None, last_ok: None, last_error: None, is_live: None,
+                    id: None,
+                    playlist_id: 0,
+                    name: name.into(),
+                    url: url.into(),
+                    group_title: None,
+                    tvg_id: None,
+                    tvg_logo: None,
+                    language: None,
+                    extra_headers: None,
+                    last_ok: None,
+                    last_error: None,
+                    is_live: None,
                 },
             )
         };
-        let (extract_pl, extract_ch) = make("Clip", "extract", Some("https://video.example/watch?v=1"), "https://video.example/watch?v=1");
-        let (legacy_pl, legacy_ch) = make("Old clip", "extract", Some("https://video.example/watch?v=2"), "https://cdn.example/expired.mp4?sig=x");
-        let (m3u_pl, m3u_ch) = make("Playlist", "url", Some("https://lists.example/a.m3u"), "https://cdn.example/live.m3u8");
+        let (extract_pl, extract_ch) = make(
+            "Clip",
+            "extract",
+            Some("https://video.example/watch?v=1"),
+            "https://video.example/watch?v=1",
+        );
+        let (legacy_pl, legacy_ch) = make(
+            "Old clip",
+            "extract",
+            Some("https://video.example/watch?v=2"),
+            "https://cdn.example/expired.mp4?sig=x",
+        );
+        let (m3u_pl, m3u_ch) = make(
+            "Playlist",
+            "url",
+            Some("https://lists.example/a.m3u"),
+            "https://cdn.example/live.m3u8",
+        );
         let mut ids = Vec::new();
-        for (playlist, channel) in [(extract_pl, extract_ch), (legacy_pl, legacy_ch), (m3u_pl, m3u_ch)] {
+        for (playlist, channel) in [
+            (extract_pl, extract_ch),
+            (legacy_pl, legacy_ch),
+            (m3u_pl, m3u_ch),
+        ] {
             let playlist_id = import_playlist(&pool, &playlist, &[channel]).await.unwrap();
-            let id: i64 = sqlx::query_scalar("SELECT id FROM channels WHERE playlist_id = ?").bind(playlist_id).fetch_one(&pool).await.unwrap();
+            let id: i64 = sqlx::query_scalar("SELECT id FROM channels WHERE playlist_id = ?")
+                .bind(playlist_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
             ids.push(id);
         }
-        assert_eq!(extract_origin_for_channel(&pool, ids[0]).await.unwrap().as_deref(), Some("https://video.example/watch?v=1"));
         assert_eq!(
-            extract_origin_for_channel(&pool, ids[1]).await.unwrap().as_deref(),
+            extract_origin_for_channel(&pool, ids[0])
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("https://video.example/watch?v=1")
+        );
+        assert_eq!(
+            extract_origin_for_channel(&pool, ids[1])
+                .await
+                .unwrap()
+                .as_deref(),
             Some("https://video.example/watch?v=2"),
             "an entry saved by an older version holds a stream link, but still resolves from its page"
         );
-        assert_eq!(extract_origin_for_channel(&pool, ids[2]).await.unwrap(), None, "playlist entries play their own URL");
-        assert_eq!(extract_origin_for_channel(&pool, 9_999).await.unwrap(), None);
+        assert_eq!(
+            extract_origin_for_channel(&pool, ids[2]).await.unwrap(),
+            None,
+            "playlist entries play their own URL"
+        );
+        assert_eq!(
+            extract_origin_for_channel(&pool, 9_999).await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -1541,22 +1636,32 @@ mod tests {
         let next = next_ranked_source_after(&pool, "https://a.example/hd.m3u8")
             .await
             .unwrap();
-        assert_eq!(next.map(|(url, _, _)| url), Some("https://b.example/sd.m3u8".to_string()));
+        assert_eq!(
+            next.map(|(url, _, _)| url),
+            Some("https://b.example/sd.m3u8".to_string())
+        );
 
         let next = next_ranked_source_after(&pool, "https://b.example/sd.m3u8")
             .await
             .unwrap();
-        assert_eq!(next.map(|(url, _, _)| url), Some("https://c.example/lo.m3u8".to_string()));
+        assert_eq!(
+            next.map(|(url, _, _)| url),
+            Some("https://c.example/lo.m3u8".to_string())
+        );
 
         // The lowest-ranked source has nothing below it, and unknown URLs have no title.
-        assert!(next_ranked_source_after(&pool, "https://c.example/lo.m3u8")
-            .await
-            .unwrap()
-            .is_none());
-        assert!(next_ranked_source_after(&pool, "https://unknown.example/x.m3u8")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            next_ranked_source_after(&pool, "https://c.example/lo.m3u8")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            next_ranked_source_after(&pool, "https://unknown.example/x.m3u8")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn playlist(name: &str) -> Playlist {
@@ -1590,7 +1695,8 @@ mod tests {
     #[tokio::test]
     async fn test_backfill_recovers_language_labels_from_local_playlist_files() {
         let pool = test_pool().await;
-        let dir = std::env::temp_dir().join(format!("lumen-language-backfill-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("lumen-language-backfill-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("list.m3u");
@@ -1626,13 +1732,22 @@ mod tests {
         assert_eq!(
             labels,
             vec![
-                ("https://example.com/one.m3u8".to_string(), Some("English".to_string())),
+                (
+                    "https://example.com/one.m3u8".to_string(),
+                    Some("English".to_string())
+                ),
                 ("https://example.com/three.m3u8".to_string(), None),
-                ("https://example.com/two.m3u8".to_string(), Some("French".to_string())),
+                (
+                    "https://example.com/two.m3u8".to_string(),
+                    Some("French".to_string())
+                ),
             ]
         );
         assert_eq!(
-            get_setting(&pool, CHANNEL_LANGUAGE_BACKFILL_SETTING).await.unwrap().as_deref(),
+            get_setting(&pool, CHANNEL_LANGUAGE_BACKFILL_SETTING)
+                .await
+                .unwrap()
+                .as_deref(),
             Some("done")
         );
 
@@ -1644,14 +1759,23 @@ mod tests {
         let pool = test_pool().await;
         let mut gone = playlist("gone");
         gone.origin = Some("/nonexistent/lumen-missing-playlist.m3u".to_string());
-        import_playlist(&pool, &gone, &[channel(0, "One", "https://example.com/gone.m3u8")])
-            .await
-            .unwrap();
+        import_playlist(
+            &pool,
+            &gone,
+            &[channel(0, "One", "https://example.com/gone.m3u8")],
+        )
+        .await
+        .unwrap();
 
         backfill_channel_languages(&pool).await.unwrap();
 
         // Not recorded as done, so a later start tries the file again.
-        assert_eq!(get_setting(&pool, CHANNEL_LANGUAGE_BACKFILL_SETTING).await.unwrap(), None);
+        assert_eq!(
+            get_setting(&pool, CHANNEL_LANGUAGE_BACKFILL_SETTING)
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -1660,7 +1784,9 @@ mod tests {
         let discovered = playlist("Harvested: example.org");
 
         assert_eq!(
-            import_playlist_if_nonempty(&pool, &discovered, &[]).await.unwrap(),
+            import_playlist_if_nonempty(&pool, &discovered, &[])
+                .await
+                .unwrap(),
             None
         );
         assert!(list_playlists(&pool).await.unwrap().is_empty());
@@ -1684,7 +1810,11 @@ mod tests {
                 &format!("Channel {:03}", idx),
                 &format!("https://example.com/stream/{}.m3u8", idx),
             );
-            chan.group_title = Some(if idx % 2 == 0 { "News".into() } else { "Sports".into() });
+            chan.group_title = Some(if idx % 2 == 0 {
+                "News".into()
+            } else {
+                "Sports".into()
+            });
             chans.push(chan);
         }
         let pid = import_playlist(&pool, &playlist("Test 250 Channels"), &chans)
@@ -1698,12 +1828,20 @@ mod tests {
         assert_eq!(news.len(), 125);
 
         let first_id = all[0].channel.id.unwrap();
-        assert!(toggle_favorite(&pool, DEFAULT_PROFILE_ID, first_id).await.unwrap());
+        assert!(
+            toggle_favorite(&pool, DEFAULT_PROFILE_ID, first_id)
+                .await
+                .unwrap()
+        );
         assert_eq!(
             list_favorites(&pool, DEFAULT_PROFILE_ID).await.unwrap(),
             vec![first_id]
         );
-        assert!(!toggle_favorite(&pool, DEFAULT_PROFILE_ID, first_id).await.unwrap());
+        assert!(
+            !toggle_favorite(&pool, DEFAULT_PROFILE_ID, first_id)
+                .await
+                .unwrap()
+        );
 
         set_setting(&pool, "hwdec", "vaapi").await.unwrap();
         assert_eq!(
@@ -1742,7 +1880,10 @@ mod tests {
             &[channel(9999, "Orphan", "https://example.com/orphan.m3u8")],
         )
         .await;
-        assert!(orphan.is_err(), "foreign key violation should fail the insert");
+        assert!(
+            orphan.is_err(),
+            "foreign key violation should fail the insert"
+        );
         tx.rollback().await.unwrap();
         assert!(list_playlists(&pool).await.unwrap().is_empty());
 
@@ -1774,7 +1915,12 @@ mod tests {
 
         // Deleting the source removes its channels; history keeps the entry, unlinked.
         delete_playlist(&pool, pid).await.unwrap();
-        assert!(list_channels(&pool, pid, None, None).await.unwrap().is_empty());
+        assert!(
+            list_channels(&pool, pid, None, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         let history = get_history(&pool, DEFAULT_PROFILE_ID, 10).await.unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].channel_id, None);
@@ -1851,7 +1997,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            get_history(&pool, DEFAULT_PROFILE_ID, 50).await.unwrap().len(),
+            get_history(&pool, DEFAULT_PROFILE_ID, 50)
+                .await
+                .unwrap()
+                .len(),
             1
         );
         assert_eq!(
@@ -1871,7 +2020,10 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(
-            get_history(&pool, DEFAULT_PROFILE_ID, 50).await.unwrap().len(),
+            get_history(&pool, DEFAULT_PROFILE_ID, 50)
+                .await
+                .unwrap()
+                .len(),
             3
         );
 
@@ -1904,13 +2056,17 @@ mod tests {
         .await
         .unwrap();
 
-        let deleted = prune_history(&pool, DEFAULT_HISTORY_RETENTION).await.unwrap();
-        assert_eq!(deleted, 1);
-        assert!(!get_history(&pool, DEFAULT_PROFILE_ID, 50)
+        let deleted = prune_history(&pool, DEFAULT_HISTORY_RETENTION)
             .await
-            .unwrap()
-            .iter()
-            .any(|entry| entry.path == "/media/old.mkv"));
+            .unwrap();
+        assert_eq!(deleted, 1);
+        assert!(
+            !get_history(&pool, DEFAULT_PROFILE_ID, 50)
+                .await
+                .unwrap()
+                .iter()
+                .any(|entry| entry.path == "/media/old.mkv")
+        );
     }
 
     #[tokio::test]
@@ -1934,7 +2090,11 @@ mod tests {
         }
 
         let rows = get_history(&pool, DEFAULT_PROFILE_ID, 50).await.unwrap();
-        assert_eq!(rows.len(), 1, "legacy duplicate rows are collapsed when read");
+        assert_eq!(
+            rows.len(),
+            1,
+            "legacy duplicate rows are collapsed when read"
+        );
         assert_eq!(rows[0].position, 77.0);
         assert_eq!(
             get_resume_position(&pool, DEFAULT_PROFILE_ID, "/media/legacy.mkv")
@@ -1946,14 +2106,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_concurrent_history_writes_keep_one_row_per_path() {
-        let dir = std::env::temp_dir().join(format!(
-            "lumen-db-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let dir = std::env::temp_dir().join(format!("lumen-db-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
-            .connect(&format!("sqlite://{}?mode=rwc", dir.join("lumen.db").display()))
+            .connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.join("lumen.db").display()
+            ))
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
@@ -1982,7 +2142,10 @@ mod tests {
         }
 
         assert_eq!(
-            get_history(&pool, DEFAULT_PROFILE_ID, 50).await.unwrap().len(),
+            get_history(&pool, DEFAULT_PROFILE_ID, 50)
+                .await
+                .unwrap()
+                .len(),
             8,
             "every path keeps exactly one row"
         );
@@ -2078,7 +2241,12 @@ mod tests {
             get_history(&pool, DEFAULT_PROFILE_ID, 50).await.unwrap()[0].channel_id,
             None
         );
-        assert!(list_favorites(&pool, DEFAULT_PROFILE_ID).await.unwrap().is_empty());
+        assert!(
+            list_favorites(&pool, DEFAULT_PROFILE_ID)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -2096,7 +2264,9 @@ mod tests {
             .id
             .unwrap();
 
-        let second = create_profile(&pool, "  Sam  ", Some("teal")).await.unwrap();
+        let second = create_profile(&pool, "  Sam  ", Some("teal"))
+            .await
+            .unwrap();
         assert_eq!(second.name, "Sam", "names are trimmed");
         assert!(!second.has_pin);
 
@@ -2114,13 +2284,9 @@ mod tests {
         toggle_favorite(&pool, second.id, channel_id).await.unwrap();
 
         assert_eq!(
-            get_resume_position(
-                &pool,
-                DEFAULT_PROFILE_ID,
-                "https://example.com/one.m3u8"
-            )
-            .await
-            .unwrap(),
+            get_resume_position(&pool, DEFAULT_PROFILE_ID, "https://example.com/one.m3u8")
+                .await
+                .unwrap(),
             Some(30.0)
         );
         assert_eq!(
@@ -2130,25 +2296,32 @@ mod tests {
             None,
             "another profile does not inherit a resume point"
         );
-        assert_eq!(list_favorites(&pool, second.id).await.unwrap(), vec![channel_id]);
-        assert!(list_favorites(&pool, DEFAULT_PROFILE_ID).await.unwrap().is_empty());
+        assert_eq!(
+            list_favorites(&pool, second.id).await.unwrap(),
+            vec![channel_id]
+        );
+        assert!(
+            list_favorites(&pool, DEFAULT_PROFILE_ID)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(get_history(&pool, second.id, 50).await.unwrap().is_empty());
 
         // Deleting a profile takes its history and My List with it, and leaves the rest alone.
         delete_profile(&pool, second.id).await.unwrap();
         assert!(list_favorites(&pool, second.id).await.unwrap().is_empty());
         assert_eq!(
-            get_history(&pool, DEFAULT_PROFILE_ID, 50).await.unwrap().len(),
+            get_history(&pool, DEFAULT_PROFILE_ID, 50)
+                .await
+                .unwrap()
+                .len(),
             1
         );
         assert_eq!(
-            get_resume_position(
-                &pool,
-                DEFAULT_PROFILE_ID,
-                "https://example.com/one.m3u8"
-            )
-            .await
-            .unwrap(),
+            get_resume_position(&pool, DEFAULT_PROFILE_ID, "https://example.com/one.m3u8")
+                .await
+                .unwrap(),
             Some(30.0)
         );
     }
@@ -2159,11 +2332,15 @@ mod tests {
         let profile = get_profile(&pool, DEFAULT_PROFILE_ID).await.unwrap();
         assert!(!profile.has_pin);
         assert!(
-            verify_profile_pin(&pool, profile.id, "anything").await.unwrap(),
+            verify_profile_pin(&pool, profile.id, "anything")
+                .await
+                .unwrap(),
             "a profile without a PIN is open"
         );
 
-        let locked = set_profile_pin(&pool, profile.id, Some("4821")).await.unwrap();
+        let locked = set_profile_pin(&pool, profile.id, Some("4821"))
+            .await
+            .unwrap();
         assert!(locked.has_pin);
         assert!(verify_profile_pin(&pool, profile.id, "4821").await.unwrap());
         assert!(!verify_profile_pin(&pool, profile.id, "1111").await.unwrap());
@@ -2181,11 +2358,19 @@ mod tests {
         assert!(!stored.contains("4821"));
 
         // A too-short PIN is rejected before anything is written.
-        assert!(set_profile_pin(&pool, profile.id, Some("12")).await.is_err());
+        assert!(
+            set_profile_pin(&pool, profile.id, Some("12"))
+                .await
+                .is_err()
+        );
 
         let cleared = set_profile_pin(&pool, profile.id, None).await.unwrap();
         assert!(!cleared.has_pin);
-        assert!(verify_profile_pin(&pool, profile.id, "anything").await.unwrap());
+        assert!(
+            verify_profile_pin(&pool, profile.id, "anything")
+                .await
+                .unwrap()
+        );
     }
 
     /// Only this test calls `authorize_profile`: the attempt limiter is process-wide and keyed by
@@ -2199,9 +2384,19 @@ mod tests {
             .await
             .expect("a profile without a PIN is open");
 
-        set_profile_pin(&pool, profile.id, Some("4821")).await.unwrap();
-        assert!(authorize_profile(&pool, profile.id, None).await.is_err(), "no PIN supplied");
-        assert!(authorize_profile(&pool, profile.id, Some("0000")).await.is_err(), "wrong PIN");
+        set_profile_pin(&pool, profile.id, Some("4821"))
+            .await
+            .unwrap();
+        assert!(
+            authorize_profile(&pool, profile.id, None).await.is_err(),
+            "no PIN supplied"
+        );
+        assert!(
+            authorize_profile(&pool, profile.id, Some("0000"))
+                .await
+                .is_err(),
+            "wrong PIN"
+        );
         authorize_profile(&pool, profile.id, Some("4821"))
             .await
             .expect("the right PIN is accepted");
@@ -2210,11 +2405,15 @@ mod tests {
         for _ in 0..5 {
             let _ = authorize_profile(&pool, profile.id, Some("0000")).await;
         }
-        let locked = authorize_profile(&pool, profile.id, Some("4821")).await.unwrap_err();
+        let locked = authorize_profile(&pool, profile.id, Some("4821"))
+            .await
+            .unwrap_err();
         assert!(String::from(locked).contains("Too many wrong PINs"));
 
         pin_guard::record_success(profile.id);
-        authorize_profile(&pool, profile.id, Some("4821")).await.unwrap();
+        authorize_profile(&pool, profile.id, Some("4821"))
+            .await
+            .unwrap();
         pin_guard::record_success(profile.id);
     }
 
@@ -2226,10 +2425,18 @@ mod tests {
         let mut film = channel(0, "Film", "http://x.example/film.mp4");
         film.is_live = Some(false);
         let unknown = channel(0, "Unknown", "http://x.example/unknown.m3u8");
-        let pid = import_playlist(&pool, &playlist("Flags"), &[live, film, unknown]).await.unwrap();
+        let pid = import_playlist(&pool, &playlist("Flags"), &[live, film, unknown])
+            .await
+            .unwrap();
 
         let rows = list_channels(&pool, pid, None, None).await.unwrap();
-        let flag = |name: &str| rows.iter().find(|row| row.channel.name == name).unwrap().channel.is_live;
+        let flag = |name: &str| {
+            rows.iter()
+                .find(|row| row.channel.name == name)
+                .unwrap()
+                .channel
+                .is_live
+        };
         assert_eq!(flag("Live"), Some(true));
         assert_eq!(flag("Film"), Some(false));
         assert_eq!(flag("Unknown"), None);
@@ -2256,9 +2463,18 @@ mod tests {
             names.sort();
             names
         };
-        assert_eq!(names(list_channels(&pool, pid, Some("100%"), None).await.unwrap()), vec!["100% Real"]);
-        assert_eq!(names(list_channels(&pool, pid, Some("a_b"), None).await.unwrap()), vec!["a_b"]);
-        assert_eq!(names(list_channels(&pool, pid, Some("real"), None).await.unwrap()), vec!["100 Really", "100% Real"]);
+        assert_eq!(
+            names(list_channels(&pool, pid, Some("100%"), None).await.unwrap()),
+            vec!["100% Real"]
+        );
+        assert_eq!(
+            names(list_channels(&pool, pid, Some("a_b"), None).await.unwrap()),
+            vec!["a_b"]
+        );
+        assert_eq!(
+            names(list_channels(&pool, pid, Some("real"), None).await.unwrap()),
+            vec!["100 Really", "100% Real"]
+        );
         assert_eq!(contains_pattern(r"50%_\"), r"%50\%\_\\%");
     }
 
@@ -2266,12 +2482,18 @@ mod tests {
     async fn test_profile_name_guards_and_last_profile_protection() {
         let pool = test_pool().await;
 
-        assert!(create_profile(&pool, "   ", None).await.is_err(), "empty name");
+        assert!(
+            create_profile(&pool, "   ", None).await.is_err(),
+            "empty name"
+        );
         assert!(
             create_profile(&pool, &"x".repeat(41), None).await.is_err(),
             "name too long"
         );
-        assert!(rename_profile(&pool, 9876, "Ghost").await.is_err(), "missing profile");
+        assert!(
+            rename_profile(&pool, 9876, "Ghost").await.is_err(),
+            "missing profile"
+        );
         assert!(set_profile_pin(&pool, 9876, Some("4821")).await.is_err());
         assert!(verify_profile_pin(&pool, 9876, "4821").await.is_err());
 
@@ -2299,7 +2521,10 @@ mod tests {
         assert_eq!(active_profile_id(&pool).await.unwrap(), second.id);
         assert!(get_profile(&pool, second.id).await.unwrap().last_used_at >= second.last_used_at);
 
-        assert!(set_active_profile(&pool, 9876).await.is_err(), "unknown profile");
+        assert!(
+            set_active_profile(&pool, 9876).await.is_err(),
+            "unknown profile"
+        );
 
         // Deleting the active profile must not leave the app pointing at nothing.
         delete_profile(&pool, second.id).await.unwrap();
@@ -2312,7 +2537,8 @@ mod tests {
     /// trying to create the schema at the same time.
     #[tokio::test]
     async fn test_concurrent_startup_initializes_once() {
-        let dir = std::env::temp_dir().join(format!("lumen-init-{}", uuid::Uuid::new_v4().simple()));
+        let dir =
+            std::env::temp_dir().join(format!("lumen-init-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(6));

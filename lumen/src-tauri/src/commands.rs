@@ -1,13 +1,13 @@
-use crate::embed;
-use crate::player_prefs;
 use crate::db::*;
+use crate::embed;
 use crate::error::{PlayerError, Result};
 use crate::extract::{self, ExtractorStatus};
 use crate::harvest::{self, HarvestResponse};
 use crate::media_tools::{cache_name, prune_cache, run_with_timeout};
 use crate::playback::mpv_ipc::MpvIpcBackend;
 use crate::playback::{PlaybackBackend, PlayerStateEvent};
-use crate::playlist::import::{import_m3u_file, import_m3u_url, Channel, Playlist};
+use crate::player_prefs;
+use crate::playlist::import::{Channel, Playlist, import_m3u_file, import_m3u_url};
 use crate::probe::{self, ProbeResponse, ProbeResult, ProbeTarget};
 use crate::search::{self, SearchRequest, SearchResponse};
 use crate::secrets;
@@ -106,14 +106,17 @@ async fn play_url_inner(
             // above the page. If that cannot be set up, the separate mpv window is used instead.
             let mut args = extra_args.clone();
             embed::set_in_use(false);
-            if matches!(get_setting(pool, EMBED_PLAYER_SETTING).await, Ok(Some(value)) if value == "true") {
+            if matches!(get_setting(pool, EMBED_PLAYER_SETTING).await, Ok(Some(value)) if value == "true")
+            {
                 match embed::ensure_area(&app).await {
                     Ok(xid) => {
                         // Last, so a user's own arguments cannot point mpv away from the area.
                         args = format!("{args} {}", embed::mpv_args(xid));
                         embed::set_in_use(true);
                     }
-                    Err(reason) => eprintln!("lumen: playing in the window is not available, using the mpv window: {reason}"),
+                    Err(reason) => eprintln!(
+                        "lumen: playing in the window is not available, using the mpv window: {reason}"
+                    ),
                 }
             }
             *guard = Some(Arc::new(
@@ -136,7 +139,8 @@ async fn play_url_inner(
         None => None,
     } {
         let allow_lan = allow_lan_sources(pool).await;
-        let resolved = extract::resolve_stream(&page, app.path().app_data_dir().ok(), allow_lan).await?;
+        let resolved =
+            extract::resolve_stream(&page, app.path().app_data_dir().ok(), allow_lan).await?;
         load_url = resolved.url;
         audio_url = resolved.audio_url;
         headers = Some(serde_json::to_value(resolved.headers)?);
@@ -151,7 +155,9 @@ async fn play_url_inner(
     });
 
     // This profile's audio and subtitle preferences, and a fresh subtitle delay for the new file.
-    let prefs = player_prefs::load(pool, profile_id).await.unwrap_or_default();
+    let prefs = player_prefs::load(pool, profile_id)
+        .await
+        .unwrap_or_default();
     backend.apply_prefs(&prefs, true).await;
 
     // Volume goes in before the file does, so playback never starts at mpv's default level.
@@ -164,9 +170,10 @@ async fn play_url_inner(
 
     // Check if there is a saved resume position for local files
     if let Ok(Some(resume_pos)) = get_resume_position(pool, profile_id, &url).await
-        && resume_pos > 1.0 {
-            let _ = backend.seek(resume_pos).await;
-        }
+        && resume_pos > 1.0
+    {
+        let _ = backend.seek(resume_pos).await;
+    }
 
     // Record history entry for the active profile
     let _ = add_history(pool, profile_id, channel_id, &url, 0.0, 0.0).await;
@@ -199,8 +206,12 @@ pub async fn set_volume(vol: i64) -> Result<()> {
 pub async fn set_fullscreen(enabled: bool, app: AppHandle) -> Result<()> {
     // Playing inside the window: the window goes fullscreen, and the page re-sizes the video.
     if embed::in_use() {
-        let window = app.get_webview_window("main").ok_or_else(|| PlayerError::Io("The main window is not available".into()))?;
-        return window.set_fullscreen(enabled).map_err(|error| PlayerError::Io(error.to_string()));
+        let window = app
+            .get_webview_window("main")
+            .ok_or_else(|| PlayerError::Io("The main window is not available".into()))?;
+        return window
+            .set_fullscreen(enabled)
+            .map_err(|error| PlayerError::Io(error.to_string()));
     }
     let backend = current_backend().await?;
     backend.set_fullscreen(enabled).await
@@ -241,7 +252,10 @@ pub async fn get_player_prefs_cmd(app: AppHandle) -> Result<player_prefs::Player
 /// Saves the preferences for the active profile and applies them to the player that is running,
 /// so a size or position change shows at once. Language choices take effect on the next file.
 #[tauri::command]
-pub async fn set_player_prefs_cmd(prefs: player_prefs::PlayerPrefs, app: AppHandle) -> Result<player_prefs::PlayerPrefs> {
+pub async fn set_player_prefs_cmd(
+    prefs: player_prefs::PlayerPrefs,
+    app: AppHandle,
+) -> Result<player_prefs::PlayerPrefs> {
     let pool = ensure_db(&app).await?;
     let profile_id = active_profile_id(pool).await?;
     let saved = player_prefs::save(pool, profile_id, &prefs).await?;
@@ -371,7 +385,16 @@ pub async fn set_episodes_watched_cmd(
 ) -> Result<()> {
     let pool = ensure_db(&app).await?;
     let profile_id = active_profile_id(pool).await?;
-    crate::series::set_episodes_watched(pool, profile_id, &series_key, season, &episodes, watched, Utc::now().timestamp_millis()).await?;
+    crate::series::set_episodes_watched(
+        pool,
+        profile_id,
+        &series_key,
+        season,
+        &episodes,
+        watched,
+        Utc::now().timestamp_millis(),
+    )
+    .await?;
     crate::sync::schedule(pool);
     Ok(())
 }
@@ -387,7 +410,10 @@ pub async fn list_episode_marks_cmd(app: AppHandle) -> Result<Vec<crate::series:
 /// last two weeks. With `refresh`, stale schedules are first re-read from TMDB (needs a key);
 /// without a key or without a network the stored schedules are returned as they are.
 #[tauri::command]
-pub async fn upcoming_episodes_cmd(refresh: Option<bool>, app: AppHandle) -> Result<Vec<crate::series::UpcomingSeries>> {
+pub async fn upcoming_episodes_cmd(
+    refresh: Option<bool>,
+    app: AppHandle,
+) -> Result<Vec<crate::series::UpcomingSeries>> {
     let pool = ensure_db(&app).await?;
     let profile_id = active_profile_id(pool).await?;
     if refresh.unwrap_or(false) {
@@ -398,7 +424,13 @@ pub async fn upcoming_episodes_cmd(refresh: Option<bool>, app: AppHandle) -> Res
     }
     let today = Utc::now().date_naive();
     let fmt = |date: chrono::NaiveDate| date.format("%Y-%m-%d").to_string();
-    crate::series::list_upcoming(pool, profile_id, &fmt(today), &fmt(today - chrono::Days::new(14))).await
+    crate::series::list_upcoming(
+        pool,
+        profile_id,
+        &fmt(today),
+        &fmt(today - chrono::Days::new(14)),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -473,7 +505,15 @@ pub async fn search_engine(
                 result.get("available").and_then(|value| value.as_bool()),
             ) {
                 let status = result.get("status").and_then(|value| value.as_i64());
-                let error = if available { None } else { Some(status.map(|code| format!("HTTP {code}")).unwrap_or_else(|| "Unreachable".into())) };
+                let error = if available {
+                    None
+                } else {
+                    Some(
+                        status
+                            .map(|code| format!("HTTP {code}"))
+                            .unwrap_or_else(|| "Unreachable".into()),
+                    )
+                };
                 let _ = update_channel_last_played(pool, id, available, error).await;
             }
         }
@@ -490,7 +530,9 @@ pub async fn get_search_providers(app: AppHandle) -> Result<Vec<serde_json::Valu
 /// Reads provider configuration from settings. Tokens never live there: any legacy
 /// plaintext token is moved into the OS keychain and removed from the stored copy.
 async fn load_stored_providers(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<Vec<serde_json::Value>> {
-    let raw = get_setting(pool, "search_providers").await?.unwrap_or_else(|| "[]".into());
+    let raw = get_setting(pool, "search_providers")
+        .await?
+        .unwrap_or_else(|| "[]".into());
     let mut providers: Vec<serde_json::Value> = serde_json::from_str(&raw)?;
     let mut migrated = false;
     for provider in &mut providers {
@@ -503,7 +545,12 @@ async fn load_stored_providers(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<Vec<se
         }
     }
     if migrated {
-        set_setting(pool, "search_providers", &serde_json::to_string(&providers)?).await?;
+        set_setting(
+            pool,
+            "search_providers",
+            &serde_json::to_string(&providers)?,
+        )
+        .await?;
     }
     Ok(providers)
 }
@@ -513,9 +560,10 @@ fn with_keychain_tokens(mut providers: Vec<serde_json::Value>) -> Result<Vec<ser
     for provider in &mut providers {
         let id = secrets::provider_id(provider)?;
         if let Some(token) = secrets::load_token(&id)?
-            && let Some(object) = provider.as_object_mut() {
-                object.insert("token".into(), serde_json::Value::String(token));
-            }
+            && let Some(object) = provider.as_object_mut()
+        {
+            object.insert("token".into(), serde_json::Value::String(token));
+        }
     }
     Ok(providers)
 }
@@ -526,7 +574,9 @@ pub async fn set_search_providers(
     app: AppHandle,
 ) -> Result<Vec<serde_json::Value>> {
     if providers.len() > 12 {
-        return Err(PlayerError::InvalidArg("At most 12 external providers can be enabled".into()));
+        return Err(PlayerError::InvalidArg(
+            "At most 12 external providers can be enabled".into(),
+        ));
     }
     search::validate_search_providers(&providers)?;
     let pool = ensure_db(&app).await?;
@@ -591,15 +641,20 @@ pub async fn extract_url(url: String, app: AppHandle) -> Result<ExtractedEntry> 
 
     // Source and entry are created together; a failed insert leaves no empty source behind.
     let playlist_id = import_playlist(pool, &playlist, &[ch]).await?;
-    let channel_id: i64 = sqlx::query_scalar("SELECT id FROM channels WHERE playlist_id = ? ORDER BY id LIMIT 1")
-        .bind(playlist_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let channel_id: i64 =
+        sqlx::query_scalar("SELECT id FROM channels WHERE playlist_id = ? ORDER BY id LIMIT 1")
+            .bind(playlist_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
     // Playback is the caller's job: the UI plays the entry right after this returns, so a
     // failure to play reaches the user instead of being dropped here.
-    Ok(ExtractedEntry { stream: extracted, channel_id, page_url: url })
+    Ok(ExtractedEntry {
+        stream: extracted,
+        channel_id,
+        page_url: url,
+    })
 }
 
 /// What `extract_url` returns: the resolved stream (for display) plus the saved library entry to
@@ -655,10 +710,11 @@ pub async fn harvest_page(url: String, app: AppHandle) -> Result<HarvestResponse
             // If it's a playlist (.m3u), try importing its channels; otherwise add as direct stream.
             // An HLS manifest found on the page comes back as the single stream it describes.
             if found_url.to_lowercase().ends_with(".m3u")
-                && let Ok((_, parsed_chans)) = import_m3u_url(found_url, None, allow_lan).await {
-                    all_channels.extend(parsed_chans);
-                    continue;
-                }
+                && let Ok((_, parsed_chans)) = import_m3u_url(found_url, None, allow_lan).await
+            {
+                all_channels.extend(parsed_chans);
+                continue;
+            }
             let stream_name = found_url
                 .split('/')
                 .next_back()
@@ -908,7 +964,10 @@ fn expand_home(path: &str) -> PathBuf {
     if trimmed == "~" {
         return home_dir();
     }
-    if let Some(rest) = trimmed.strip_prefix("~/").or_else(|| trimmed.strip_prefix("~\\")) {
+    if let Some(rest) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix("~\\"))
+    {
         return home_dir().join(rest);
     }
     PathBuf::from(trimmed)
@@ -926,10 +985,13 @@ static CACHE_WRITES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 
 /// A page of local videos asks for dozens of posters at once. Only a few ffmpeg processes run at a
 /// time; the rest wait here instead of starting a process (and a blocking thread) each.
-static FFMPEG_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> = std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(3));
+static FFMPEG_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(3));
 
 fn note_cache_write(cache_dir: &Path) {
-    if CACHE_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % PRUNE_EVERY_WRITES == PRUNE_EVERY_WRITES - 1 {
+    if CACHE_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % PRUNE_EVERY_WRITES
+        == PRUNE_EVERY_WRITES - 1
+    {
         prune_cache(cache_dir, THUMBNAIL_CACHE_MAX_BYTES);
     }
 }
@@ -939,34 +1001,67 @@ fn generate_local_filmstrip(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<u8>
         .canonicalize()
         .map_err(|error| PlayerError::Io(format!("Local video not found: {error}")))?;
     if !source.is_file() || !is_video_path(&source) {
-        return Err(PlayerError::InvalidArg("No video preview for this file".into()));
+        return Err(PlayerError::InvalidArg(
+            "No video preview for this file".into(),
+        ));
     }
 
     let metadata = std::fs::metadata(&source)?;
-    let modified = metadata.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default();
-    let key = cache_name(&[&source.to_string_lossy(), &metadata.len().to_string(), &modified.as_nanos().to_string(), "filmstrip"]);
+    let modified = metadata
+        .modified()
+        .unwrap_or(UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let key = cache_name(&[
+        &source.to_string_lossy(),
+        &metadata.len().to_string(),
+        &modified.as_nanos().to_string(),
+        "filmstrip",
+    ]);
     let cached = cache_dir.join(format!("{key}.jpg"));
     if let Ok(bytes) = std::fs::read(&cached)
-        && bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) {
-            return Ok(bytes);
-        }
+        && bytes.len() > 4
+        && bytes.starts_with(&[0xff, 0xd8])
+    {
+        return Ok(bytes);
+    }
 
     let mut probe_command = Command::new("ffprobe");
     probe_command
         // Local files only: a crafted "video" must not make ffprobe open other files or URLs.
-        .args(["-protocol_whitelist", "file", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"])
+        .args([
+            "-protocol_whitelist",
+            "file",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
         .arg(&source);
     let probe = run_with_timeout(probe_command, PROBE_TIMEOUT)?;
-    let duration = String::from_utf8_lossy(&probe.stdout).trim().parse::<f64>()
-        .ok().filter(|value| value.is_finite() && *value > 0.0)
-        .ok_or_else(|| PlayerError::InvalidArg("Could not determine video duration for preview".into()))?;
+    let duration = String::from_utf8_lossy(&probe.stdout)
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(|| {
+            PlayerError::InvalidArg("Could not determine video duration for preview".into())
+        })?;
 
     std::fs::create_dir_all(&cache_dir)?;
     let temporary = cache_dir.join(format!(".{key}-{}.jpg", std::process::id()));
     let mut command = Command::new("ffmpeg");
     command.args(["-nostdin", "-hide_banner", "-loglevel", "error"]);
     for fraction in [0.12, 0.36, 0.62, 0.88] {
-        command.args(["-protocol_whitelist", "file", "-ss", &format!("{:.3}", duration * fraction), "-i"]);
+        command.args([
+            "-protocol_whitelist",
+            "file",
+            "-ss",
+            &format!("{:.3}", duration * fraction),
+            "-i",
+        ]);
         command.arg(&source);
     }
     let mut filters: Vec<String> = (0..4)
@@ -974,27 +1069,56 @@ fn generate_local_filmstrip(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<u8>
         .collect();
     filters.push("[v0][v1][v2][v3]hstack=inputs=4[out]".into());
     command
-        .args(["-filter_complex", &filters.join(";"), "-map", "[out]", "-frames:v", "1", "-q:v", "6", "-threads", "1", "-an", "-sn", "-dn", "-y"])
+        .args([
+            "-filter_complex",
+            &filters.join(";"),
+            "-map",
+            "[out]",
+            "-frames:v",
+            "1",
+            "-q:v",
+            "6",
+            "-threads",
+            "1",
+            "-an",
+            "-sn",
+            "-dn",
+            "-y",
+        ])
         .arg(&temporary);
     let output = run_with_timeout(command, FILMSTRIP_TIMEOUT)?;
     if output.status.success()
         && let Ok(bytes) = std::fs::read(&temporary)
-            && bytes.len() > 4 && bytes.len() <= 2_000_000 && bytes.starts_with(&[0xff, 0xd8]) {
-                std::fs::rename(&temporary, &cached)?;
-                note_cache_write(&cache_dir);
-                return Ok(bytes);
-            }
+        && bytes.len() > 4
+        && bytes.len() <= 2_000_000
+        && bytes.starts_with(&[0xff, 0xd8])
+    {
+        std::fs::rename(&temporary, &cached)?;
+        note_cache_write(&cache_dir);
+        return Ok(bytes);
+    }
     let _ = std::fs::remove_file(&temporary);
-    Err(PlayerError::InvalidArg("Could not extract preview frames from this video".into()))
+    Err(PlayerError::InvalidArg(
+        "Could not extract preview frames from this video".into(),
+    ))
 }
 
 #[tauri::command]
 pub async fn local_filmstrip(path: String, app: AppHandle) -> Result<String> {
-    let cache_dir = app.path().app_cache_dir().map_err(|error| PlayerError::Io(error.to_string()))?.join("thumbnails");
-    let _slot = FFMPEG_SLOTS.acquire().await.map_err(|error| PlayerError::Io(error.to_string()))?;
-    let bytes = tokio::task::spawn_blocking(move || generate_local_filmstrip(PathBuf::from(path), cache_dir))
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| PlayerError::Io(error.to_string()))?
+        .join("thumbnails");
+    let _slot = FFMPEG_SLOTS
+        .acquire()
         .await
-        .map_err(|error| PlayerError::Io(format!("Filmstrip task failed: {error}")))??;
+        .map_err(|error| PlayerError::Io(error.to_string()))?;
+    let bytes = tokio::task::spawn_blocking(move || {
+        generate_local_filmstrip(PathBuf::from(path), cache_dir)
+    })
+    .await
+    .map_err(|error| PlayerError::Io(format!("Filmstrip task failed: {error}")))??;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
@@ -1006,22 +1130,34 @@ const DEFAULT_POSTER_FRAME_SECONDS: u32 = 2;
 const POSTER_FRAME_CHOICES: &[u32] = &[0, 2, 5, 10, 30, 60];
 
 fn parse_poster_frame_seconds(raw: &str) -> Option<u32> {
-    raw.trim().parse::<u32>().ok().filter(|seconds| POSTER_FRAME_CHOICES.contains(seconds))
+    raw.trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|seconds| POSTER_FRAME_CHOICES.contains(seconds))
 }
 
 fn poster_frame_seconds_from(stored: Option<String>) -> u32 {
-    stored.and_then(|raw| parse_poster_frame_seconds(&raw)).unwrap_or(DEFAULT_POSTER_FRAME_SECONDS)
+    stored
+        .and_then(|raw| parse_poster_frame_seconds(&raw))
+        .unwrap_or(DEFAULT_POSTER_FRAME_SECONDS)
 }
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "webm", "ts", "m2ts"];
 
 fn is_video_path(path: &Path) -> bool {
-    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("").to_lowercase();
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     VIDEO_EXTENSIONS.contains(&extension.as_str())
 }
 
 /// The frame chosen for one file, or None when it follows the global setting.
-async fn get_file_poster_frame(pool: &sqlx::Pool<sqlx::Sqlite>, path: &Path) -> Result<Option<u32>> {
+async fn get_file_poster_frame(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    path: &Path,
+) -> Result<Option<u32>> {
     let source = match path.canonicalize() {
         Ok(source) => source,
         Err(_) => return Ok(None),
@@ -1038,12 +1174,18 @@ async fn get_file_poster_frame(pool: &sqlx::Pool<sqlx::Sqlite>, path: &Path) -> 
 }
 
 /// Saves the frame for one file. `None` removes the file's choice so it follows the global setting again.
-async fn save_file_poster_frame(pool: &sqlx::Pool<sqlx::Sqlite>, path: &Path, seconds: Option<u32>) -> Result<()> {
+async fn save_file_poster_frame(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    path: &Path,
+    seconds: Option<u32>,
+) -> Result<()> {
     let source = path
         .canonicalize()
         .map_err(|error| PlayerError::Io(format!("Local video not found: {error}")))?;
     if !source.is_file() || !is_video_path(&source) {
-        return Err(PlayerError::InvalidArg("No video poster for this file".into()));
+        return Err(PlayerError::InvalidArg(
+            "No video poster for this file".into(),
+        ));
     }
     let key = source.to_string_lossy().to_string();
     match seconds {
@@ -1056,7 +1198,9 @@ async fn save_file_poster_frame(pool: &sqlx::Pool<sqlx::Sqlite>, path: &Path, se
         }
         Some(seconds) => {
             if !POSTER_FRAME_CHOICES.contains(&seconds) {
-                return Err(PlayerError::InvalidArg("Poster frame must be one of the offered times".into()));
+                return Err(PlayerError::InvalidArg(
+                    "Poster frame must be one of the offered times".into(),
+                ));
             }
             sqlx::query("INSERT INTO poster_frames (path, seconds) VALUES (?, ?) ON CONFLICT(path) DO UPDATE SET seconds = excluded.seconds")
                 .bind(key)
@@ -1075,7 +1219,11 @@ fn resolve_poster_frame(file_choice: Option<u32>, global_setting: Option<String>
 }
 
 fn thumbnail_cache_dir(app: &AppHandle) -> Result<PathBuf> {
-    Ok(app.path().app_cache_dir().map_err(|error| PlayerError::Io(error.to_string()))?.join("thumbnails"))
+    Ok(app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| PlayerError::Io(error.to_string()))?
+        .join("thumbnails"))
 }
 
 /// Removes cached posters and filmstrips so they regenerate with the current settings.
@@ -1083,26 +1231,46 @@ fn clear_thumbnail_cache(cache_dir: &Path) -> Result<()> {
     match std::fs::remove_dir_all(cache_dir) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(PlayerError::Io(format!("Could not clear the poster cache: {error}"))),
+        Err(error) => Err(PlayerError::Io(format!(
+            "Could not clear the poster cache: {error}"
+        ))),
     }
 }
 
-fn generate_local_thumbnail(path: PathBuf, cache_dir: PathBuf, frame_seconds: u32, fall_back_to_start: bool) -> Result<Vec<u8>> {
+fn generate_local_thumbnail(
+    path: PathBuf,
+    cache_dir: PathBuf,
+    frame_seconds: u32,
+    fall_back_to_start: bool,
+) -> Result<Vec<u8>> {
     let source = path
         .canonicalize()
         .map_err(|error| PlayerError::Io(format!("Local video not found: {error}")))?;
     if !source.is_file() || !is_video_path(&source) {
-        return Err(PlayerError::InvalidArg("No video poster for this file".into()));
+        return Err(PlayerError::InvalidArg(
+            "No video poster for this file".into(),
+        ));
     }
 
     let metadata = std::fs::metadata(&source)?;
-    let modified = metadata.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default();
-    let key = cache_name(&[&source.to_string_lossy(), &metadata.len().to_string(), &modified.as_nanos().to_string(), &frame_seconds.to_string()]);
+    let modified = metadata
+        .modified()
+        .unwrap_or(UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let key = cache_name(&[
+        &source.to_string_lossy(),
+        &metadata.len().to_string(),
+        &modified.as_nanos().to_string(),
+        &frame_seconds.to_string(),
+    ]);
     let cached = cache_dir.join(format!("{key}.jpg"));
     if let Ok(bytes) = std::fs::read(&cached)
-        && bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) {
-            return Ok(bytes);
-        }
+        && bytes.len() > 4
+        && bytes.starts_with(&[0xff, 0xd8])
+    {
+        return Ok(bytes);
+    }
 
     std::fs::create_dir_all(&cache_dir)?;
     let temporary = cache_dir.join(format!(".{key}-{}.jpg", std::process::id()));
@@ -1117,37 +1285,79 @@ fn generate_local_thumbnail(path: PathBuf, cache_dir: PathBuf, frame_seconds: u3
         let mut command = Command::new("ffmpeg");
         command
             // `-protocol_whitelist file`: a crafted "video" must not make ffmpeg open other files or URLs.
-            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file", "-ss", seek, "-i"])
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-protocol_whitelist",
+                "file",
+                "-ss",
+                seek,
+                "-i",
+            ])
             .arg(&source)
-            .args(["-map", "0:v:0", "-frames:v", "1", "-vf", "scale=480:-2:force_original_aspect_ratio=decrease", "-q:v", "5", "-threads", "1", "-an", "-sn", "-dn", "-y"])
+            .args([
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=480:-2:force_original_aspect_ratio=decrease",
+                "-q:v",
+                "5",
+                "-threads",
+                "1",
+                "-an",
+                "-sn",
+                "-dn",
+                "-y",
+            ])
             .arg(&temporary);
         let output = run_with_timeout(command, FRAME_TIMEOUT)?;
         if output.status.success() {
             if let Ok(bytes) = std::fs::read(&temporary)
-                && bytes.len() > 4 && bytes.starts_with(&[0xff, 0xd8]) && bytes.len() <= 2_000_000 {
-                    std::fs::rename(&temporary, &cached)?;
-                    note_cache_write(&cache_dir);
-                    return Ok(bytes);
-                }
+                && bytes.len() > 4
+                && bytes.starts_with(&[0xff, 0xd8])
+                && bytes.len() <= 2_000_000
+            {
+                std::fs::rename(&temporary, &cached)?;
+                note_cache_write(&cache_dir);
+                return Ok(bytes);
+            }
         } else {
             last_error = Some(String::from_utf8_lossy(&output.stderr).trim().to_string());
         }
         let _ = std::fs::remove_file(&temporary);
     }
     let _ = std::fs::remove_file(&temporary);
-    Err(PlayerError::InvalidArg(last_error.filter(|message| !message.is_empty()).unwrap_or_else(|| "Could not extract a frame from this video".into())))
+    Err(PlayerError::InvalidArg(
+        last_error
+            .filter(|message| !message.is_empty())
+            .unwrap_or_else(|| "Could not extract a frame from this video".into()),
+    ))
 }
 
 #[tauri::command]
 pub async fn local_thumbnail(path: String, app: AppHandle) -> Result<String> {
     let pool = ensure_db(&app).await?;
     let file_choice = get_file_poster_frame(pool, Path::new(&path)).await?;
-    let frame_seconds = resolve_poster_frame(file_choice, get_setting(pool, POSTER_FRAME_SETTING).await?);
-    let cache_dir = app.path().app_cache_dir().map_err(|error| PlayerError::Io(error.to_string()))?.join("thumbnails");
-    let _slot = FFMPEG_SLOTS.acquire().await.map_err(|error| PlayerError::Io(error.to_string()))?;
-    let bytes = tokio::task::spawn_blocking(move || generate_local_thumbnail(PathBuf::from(path), cache_dir, frame_seconds, true))
+    let frame_seconds =
+        resolve_poster_frame(file_choice, get_setting(pool, POSTER_FRAME_SETTING).await?);
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| PlayerError::Io(error.to_string()))?
+        .join("thumbnails");
+    let _slot = FFMPEG_SLOTS
+        .acquire()
         .await
-        .map_err(|error| PlayerError::Io(format!("Thumbnail task failed: {error}")))??;
+        .map_err(|error| PlayerError::Io(error.to_string()))?;
+    let bytes = tokio::task::spawn_blocking(move || {
+        generate_local_thumbnail(PathBuf::from(path), cache_dir, frame_seconds, true)
+    })
+    .await
+    .map_err(|error| PlayerError::Io(format!("Thumbnail task failed: {error}")))??;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
@@ -1169,7 +1379,10 @@ fn render_poster_candidates(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<Pos
                 image: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
             }),
             Err(error) if index == 0 => return Err(error),
-            Err(_) => candidates.push(PosterCandidate { seconds, image: None }),
+            Err(_) => candidates.push(PosterCandidate {
+                seconds,
+                image: None,
+            }),
         }
     }
     Ok(candidates)
@@ -1178,7 +1391,10 @@ fn render_poster_candidates(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<Pos
 #[tauri::command]
 pub async fn local_poster_candidates(path: String, app: AppHandle) -> Result<Vec<PosterCandidate>> {
     let cache_dir = thumbnail_cache_dir(&app)?;
-    let _slot = FFMPEG_SLOTS.acquire().await.map_err(|error| PlayerError::Io(error.to_string()))?;
+    let _slot = FFMPEG_SLOTS
+        .acquire()
+        .await
+        .map_err(|error| PlayerError::Io(error.to_string()))?;
     tokio::task::spawn_blocking(move || render_poster_candidates(expand_home(&path), cache_dir))
         .await
         .map_err(|error| PlayerError::Io(format!("Frame preview task failed: {error}")))?
@@ -1193,7 +1409,11 @@ pub async fn get_local_poster_frame(path: String, app: AppHandle) -> Result<Opti
 
 /// Chooses the poster frame for one file. A null frame clears the choice so the file follows the global setting.
 #[tauri::command]
-pub async fn set_local_poster_frame(path: String, seconds: Option<u32>, app: AppHandle) -> Result<()> {
+pub async fn set_local_poster_frame(
+    path: String,
+    seconds: Option<u32>,
+    app: AppHandle,
+) -> Result<()> {
     let pool = ensure_db(&app).await?;
     save_file_poster_frame(pool, &expand_home(&path), seconds).await
 }
@@ -1318,13 +1538,19 @@ fn is_user_setting(key: &str) -> bool {
 #[tauri::command]
 pub async fn set_setting_cmd(key: String, value: String, app: AppHandle) -> Result<()> {
     if !is_user_setting(&key) {
-        return Err(PlayerError::InvalidArg(format!("\"{key}\" is not a user setting")));
+        return Err(PlayerError::InvalidArg(format!(
+            "\"{key}\" is not a user setting"
+        )));
     }
     if key == "search_providers" {
-        return Err(PlayerError::InvalidArg("Use set_search_providers to change search providers".into()));
+        return Err(PlayerError::InvalidArg(
+            "Use set_search_providers to change search providers".into(),
+        ));
     }
     if key == tmdb::API_KEY_SETTING {
-        return Err(PlayerError::InvalidArg("Use set_tmdb_api_key to change the TMDB API key".into()));
+        return Err(PlayerError::InvalidArg(
+            "Use set_tmdb_api_key to change the TMDB API key".into(),
+        ));
     }
     let pool = ensure_db(&app).await?;
     if key == POSTER_FRAME_SETTING {
@@ -1334,9 +1560,14 @@ pub async fn set_setting_cmd(key: String, value: String, app: AppHandle) -> Resu
 }
 
 /// Saves the poster frame. Cached posters are cleared only when the frame actually changes.
-async fn set_poster_frame_seconds(pool: &sqlx::Pool<sqlx::Sqlite>, cache_dir: &Path, value: &str) -> Result<()> {
-    let seconds = parse_poster_frame_seconds(value)
-        .ok_or_else(|| PlayerError::InvalidArg("Poster frame must be one of the offered times".into()))?;
+async fn set_poster_frame_seconds(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    cache_dir: &Path,
+    value: &str,
+) -> Result<()> {
+    let seconds = parse_poster_frame_seconds(value).ok_or_else(|| {
+        PlayerError::InvalidArg("Poster frame must be one of the offered times".into())
+    })?;
     let previous = poster_frame_seconds_from(get_setting(pool, POSTER_FRAME_SETTING).await?);
     set_setting(pool, POSTER_FRAME_SETTING, &seconds.to_string()).await?;
     if previous != seconds {
@@ -1363,10 +1594,7 @@ pub async fn tmdb_status(app: AppHandle) -> Result<serde_json::Value> {
     let pool = ensure_db(&app).await?;
     let key = tmdb::api_key(pool).await?;
     let configured = key.is_some();
-    let key_source = key
-        .as_ref()
-        .map(|(_, source)| *source)
-        .unwrap_or("none");
+    let key_source = key.as_ref().map(|(_, source)| *source).unwrap_or("none");
     let (enriched, total) = tmdb::counts(pool).await?;
 
     Ok(serde_json::json!({
@@ -1419,11 +1647,16 @@ pub async fn tmdb_clear_enrichment(app: AppHandle) -> Result<serde_json::Value> 
 
 #[cfg(test)]
 mod local_path_tests {
-    use super::{expand_home, generate_local_filmstrip, generate_local_thumbnail, get_file_poster_frame, home_dir, parse_poster_frame_seconds, poster_frame_seconds_from, render_poster_candidates, resolve_poster_frame, save_file_poster_frame, set_poster_frame_seconds, POSTER_FRAME_CHOICES, POSTER_FRAME_SETTING};
+    use super::{
+        POSTER_FRAME_CHOICES, POSTER_FRAME_SETTING, expand_home, generate_local_filmstrip,
+        generate_local_thumbnail, get_file_poster_frame, home_dir, parse_poster_frame_seconds,
+        poster_frame_seconds_from, render_poster_candidates, resolve_poster_frame,
+        save_file_poster_frame, set_poster_frame_seconds,
+    };
     use crate::db::{get_setting, set_setting};
     use std::path::{Path, PathBuf};
-    use std::{fs, thread};
     use std::time::Duration;
+    use std::{fs, thread};
 
     #[test]
     fn expands_tilde_home_paths_without_rewriting_other_paths() {
@@ -1432,110 +1665,237 @@ mod local_path_tests {
         assert_eq!(expand_home("~/Videos"), home.join("Videos"));
         assert_eq!(expand_home("~\\Videos"), home.join("Videos"));
         assert_eq!(expand_home("/tmp/media"), PathBuf::from("/tmp/media"));
-        assert_eq!(expand_home("~someone/Videos"), PathBuf::from("~someone/Videos"));
+        assert_eq!(
+            expand_home("~someone/Videos"),
+            PathBuf::from("~someone/Videos")
+        );
     }
 
     #[test]
     fn poster_candidates_offer_every_frame_and_omit_frames_past_the_end() {
         use base64::Engine as _;
-        let temp = std::env::temp_dir().join(format!("lumen-candidate-test-{}", std::process::id()));
+        let temp =
+            std::env::temp_dir().join(format!("lumen-candidate-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp);
         fs::create_dir_all(&temp).expect("temporary test directory");
         let video = temp.join("clip.mp4");
         let generated = std::process::Command::new("ffmpeg")
-            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=2:duration=8", "-c:v", "mpeg4", "-y"])
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=640x360:rate=2:duration=8",
+                "-c:v",
+                "mpeg4",
+                "-y",
+            ])
             .arg(&video)
             .output()
             .expect("ffmpeg should be installed for the poster candidate integration test");
-        assert!(generated.status.success(), "could not create test video: {}", String::from_utf8_lossy(&generated.stderr));
+        assert!(
+            generated.status.success(),
+            "could not create test video: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
 
         let cache = temp.join("cache");
         let candidates = render_poster_candidates(video, cache).expect("poster candidates");
-        let offered: Vec<u32> = candidates.iter().map(|candidate| candidate.seconds).collect();
-        assert_eq!(offered, POSTER_FRAME_CHOICES.to_vec(), "every offered frame time is listed in order");
+        let offered: Vec<u32> = candidates
+            .iter()
+            .map(|candidate| candidate.seconds)
+            .collect();
+        assert_eq!(
+            offered,
+            POSTER_FRAME_CHOICES.to_vec(),
+            "every offered frame time is listed in order"
+        );
 
         for candidate in &candidates {
             if candidate.seconds < 8 {
-                let encoded = candidate.image.as_ref().unwrap_or_else(|| panic!("frame {}s is inside the 8s clip", candidate.seconds));
-                let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).expect("base64 image");
+                let encoded = candidate.image.as_ref().unwrap_or_else(|| {
+                    panic!("frame {}s is inside the 8s clip", candidate.seconds)
+                });
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .expect("base64 image");
                 assert!(bytes.starts_with(&[0xff, 0xd8]), "candidate is a JPEG");
             } else {
-                assert!(candidate.image.is_none(), "frame {}s is past the 8s clip and has no image", candidate.seconds);
+                assert!(
+                    candidate.image.is_none(),
+                    "frame {}s is past the 8s clip and has no image",
+                    candidate.seconds
+                );
             }
         }
 
         let invalid = temp.join("notes.txt");
         fs::write(&invalid, "not a video").expect("invalid file");
-        assert!(render_poster_candidates(invalid, temp.join("cache-invalid")).is_err(), "non-video files report an error");
+        assert!(
+            render_poster_candidates(invalid, temp.join("cache-invalid")).is_err(),
+            "non-video files report an error"
+        );
     }
 
     #[test]
     fn generates_and_caches_four_frame_video_filmstrips() {
-        let temp = std::env::temp_dir().join(format!("lumen-filmstrip-test-{}", std::process::id()));
+        let temp =
+            std::env::temp_dir().join(format!("lumen-filmstrip-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp);
         fs::create_dir_all(&temp).expect("temporary test directory");
         let video = temp.join("clip.mp4");
         let generated = std::process::Command::new("ffmpeg")
-            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=2:duration=8", "-c:v", "mpeg4", "-y"])
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=640x360:rate=2:duration=8",
+                "-c:v",
+                "mpeg4",
+                "-y",
+            ])
             .arg(&video)
             .output()
             .expect("ffmpeg should be installed for the filmstrip integration test");
-        assert!(generated.status.success(), "could not create test video: {}", String::from_utf8_lossy(&generated.stderr));
+        assert!(
+            generated.status.success(),
+            "could not create test video: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
 
         let cache = temp.join("cache");
-        let first = generate_local_filmstrip(video.clone(), cache.clone()).expect("filmstrip extraction");
+        let first =
+            generate_local_filmstrip(video.clone(), cache.clone()).expect("filmstrip extraction");
         assert!(first.starts_with(&[0xff, 0xd8]), "filmstrip is a JPEG");
         assert!(first.len() <= 2_000_000, "filmstrip stays small");
         let image = temp.join("filmstrip.jpg");
         fs::write(&image, &first).expect("write filmstrip fixture");
         let dimensions = std::process::Command::new("ffprobe")
-            .args(["-v", "error", "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0"])
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=s=x:p=0",
+            ])
             .arg(&image)
             .output()
             .expect("ffprobe should read filmstrip dimensions");
         assert!(dimensions.status.success());
-        assert_eq!(String::from_utf8_lossy(&dimensions.stdout).trim(), "960x136", "contact strip contains four 240x136 frames");
-        let cached = fs::read_dir(&cache).expect("cache directory").next().expect("cached strip").expect("cache entry").path();
-        let modified = fs::metadata(&cached).expect("cached strip metadata").modified().expect("mtime");
+        assert_eq!(
+            String::from_utf8_lossy(&dimensions.stdout).trim(),
+            "960x136",
+            "contact strip contains four 240x136 frames"
+        );
+        let cached = fs::read_dir(&cache)
+            .expect("cache directory")
+            .next()
+            .expect("cached strip")
+            .expect("cache entry")
+            .path();
+        let modified = fs::metadata(&cached)
+            .expect("cached strip metadata")
+            .modified()
+            .expect("mtime");
         thread::sleep(Duration::from_millis(20));
         let second = generate_local_filmstrip(video, cache).expect("cached filmstrip");
-        assert_eq!(first, second, "repeated requests return identical cached filmstrip bytes");
-        assert_eq!(modified, fs::metadata(cached).expect("cached strip metadata").modified().expect("mtime"), "cache hit does not rewrite the filmstrip");
+        assert_eq!(
+            first, second,
+            "repeated requests return identical cached filmstrip bytes"
+        );
+        assert_eq!(
+            modified,
+            fs::metadata(cached)
+                .expect("cached strip metadata")
+                .modified()
+                .expect("mtime"),
+            "cache hit does not rewrite the filmstrip"
+        );
         fs::remove_dir_all(temp).expect("remove test fixture");
     }
 
     #[test]
     fn generates_and_caches_jpeg_video_posters() {
-        let temp = std::env::temp_dir().join(format!("lumen-thumbnail-test-{}", std::process::id()));
+        let temp =
+            std::env::temp_dir().join(format!("lumen-thumbnail-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp);
         fs::create_dir_all(&temp).expect("temporary test directory");
         let video = temp.join("clip.mp4");
         let generated = std::process::Command::new("ffmpeg")
-            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=640x360:d=1", "-frames:v", "1", "-y"])
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=640x360:d=1",
+                "-frames:v",
+                "1",
+                "-y",
+            ])
             .arg(&video)
             .output()
             .expect("ffmpeg should be installed for the thumbnail integration test");
-        assert!(generated.status.success(), "could not create test video: {}", String::from_utf8_lossy(&generated.stderr));
+        assert!(
+            generated.status.success(),
+            "could not create test video: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
         assert!(video.metadata().expect("video metadata").len() > 0);
 
         let cache = temp.join("cache");
-        let first = generate_local_thumbnail(video.clone(), cache.clone(), 2, true).expect("thumbnail extraction");
+        let first = generate_local_thumbnail(video.clone(), cache.clone(), 2, true)
+            .expect("thumbnail extraction");
         assert!(first.starts_with(&[0xff, 0xd8]), "poster is a JPEG");
         assert!(first.len() <= 2_000_000, "poster stays small");
-        let cached = fs::read_dir(&cache).expect("cache directory").next().expect("cached poster").expect("cache entry").path();
-        let modified = fs::metadata(&cached).expect("cached poster metadata").modified().expect("mtime");
+        let cached = fs::read_dir(&cache)
+            .expect("cache directory")
+            .next()
+            .expect("cached poster")
+            .expect("cache entry")
+            .path();
+        let modified = fs::metadata(&cached)
+            .expect("cached poster metadata")
+            .modified()
+            .expect("mtime");
         thread::sleep(Duration::from_millis(20));
-        let second = generate_local_thumbnail(video.clone(), cache.clone(), 2, true).expect("cached thumbnail");
-        assert_eq!(first, second, "repeated requests return identical cached poster bytes");
-        assert_eq!(modified, fs::metadata(cached).expect("cached poster metadata").modified().expect("mtime"), "cache hit does not rewrite the poster");
+        let second = generate_local_thumbnail(video.clone(), cache.clone(), 2, true)
+            .expect("cached thumbnail");
+        assert_eq!(
+            first, second,
+            "repeated requests return identical cached poster bytes"
+        );
+        assert_eq!(
+            modified,
+            fs::metadata(cached)
+                .expect("cached poster metadata")
+                .modified()
+                .expect("mtime"),
+            "cache hit does not rewrite the poster"
+        );
 
         let invalid = temp.join("not-a-video.txt");
         fs::write(&invalid, "not video").expect("invalid fixture");
-        assert!(generate_local_thumbnail(invalid, cache.clone(), 2, true).is_err(), "non-video files do not produce posters");
+        assert!(
+            generate_local_thumbnail(invalid, cache.clone(), 2, true).is_err(),
+            "non-video files do not produce posters"
+        );
 
-        let other_frame = generate_local_thumbnail(video, cache.clone(), 0, true).expect("poster at a different frame time");
+        let other_frame = generate_local_thumbnail(video, cache.clone(), 0, true)
+            .expect("poster at a different frame time");
         assert!(other_frame.starts_with(&[0xff, 0xd8]), "poster is a JPEG");
-        assert_eq!(fs::read_dir(&cache).expect("cache directory").count(), 2, "each frame time has its own cached poster");
+        assert_eq!(
+            fs::read_dir(&cache).expect("cache directory").count(),
+            2,
+            "each frame time has its own cached poster"
+        );
         fs::remove_dir_all(temp).expect("remove test fixture");
     }
 
@@ -1560,32 +1920,57 @@ mod local_path_tests {
             .unwrap();
         crate::db::run_migrations(&pool).await.unwrap();
 
-        let temp = std::env::temp_dir().join(format!("lumen-poster-setting-{}", uuid::Uuid::new_v4().simple()));
+        let temp = std::env::temp_dir().join(format!(
+            "lumen-poster-setting-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         let cache = temp.join("thumbnails");
         let poster = cache.join("0000000000000000.jpg");
         let seed_cache = |cache: &Path| {
             fs::create_dir_all(cache).expect("cache directory");
-            fs::write(cache.join("0000000000000000.jpg"), [0xff, 0xd8, 0xff, 0xd9]).expect("cached poster");
+            fs::write(cache.join("0000000000000000.jpg"), [0xff, 0xd8, 0xff, 0xd9])
+                .expect("cached poster");
         };
 
         // Default frame is 2s, so choosing 5s is a change and must drop the old posters.
         seed_cache(&cache);
-        set_poster_frame_seconds(&pool, &cache, "5").await.expect("changing the frame saves");
-        assert_eq!(get_setting(&pool, POSTER_FRAME_SETTING).await.unwrap().as_deref(), Some("5"));
+        set_poster_frame_seconds(&pool, &cache, "5")
+            .await
+            .expect("changing the frame saves");
+        assert_eq!(
+            get_setting(&pool, POSTER_FRAME_SETTING)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("5")
+        );
         assert!(!cache.exists(), "changing the frame clears cached posters");
 
         // Saving the same frame again must keep the cache.
         seed_cache(&cache);
-        set_poster_frame_seconds(&pool, &cache, "5").await.expect("same frame saves");
+        set_poster_frame_seconds(&pool, &cache, "5")
+            .await
+            .expect("same frame saves");
         assert!(poster.exists(), "an unchanged frame keeps cached posters");
 
         // A rejected value never reaches storage and leaves the cache alone.
         assert!(set_poster_frame_seconds(&pool, &cache, "7").await.is_err());
         assert!(poster.exists(), "a rejected frame keeps cached posters");
-        assert_eq!(get_setting(&pool, POSTER_FRAME_SETTING).await.unwrap().as_deref(), Some("5"));
+        assert_eq!(
+            get_setting(&pool, POSTER_FRAME_SETTING)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("5")
+        );
 
-        set_poster_frame_seconds(&pool, &cache, "10").await.expect("changing the frame saves");
-        assert!(!cache.exists(), "changing the frame again clears cached posters");
+        set_poster_frame_seconds(&pool, &cache, "10")
+            .await
+            .expect("changing the frame saves");
+        assert!(
+            !cache.exists(),
+            "changing the frame again clears cached posters"
+        );
         fs::remove_dir_all(temp).expect("remove test fixture");
     }
 
@@ -1598,7 +1983,10 @@ mod local_path_tests {
             .unwrap();
         crate::db::run_migrations(&pool).await.unwrap();
 
-        let temp = std::env::temp_dir().join(format!("lumen-file-poster-{}", uuid::Uuid::new_v4().simple()));
+        let temp = std::env::temp_dir().join(format!(
+            "lumen-file-poster-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         fs::create_dir_all(&temp).expect("fixture directory");
         let clip = temp.join("clip.mp4");
         let other = temp.join("other.mkv");
@@ -1612,27 +2000,47 @@ mod local_path_tests {
         // Without a per-file choice, the file follows the global frame.
         assert_eq!(get_file_poster_frame(&pool, &clip).await.unwrap(), None);
         assert_eq!(
-            resolve_poster_frame(None, get_setting(&pool, POSTER_FRAME_SETTING).await.unwrap()),
+            resolve_poster_frame(
+                None,
+                get_setting(&pool, POSTER_FRAME_SETTING).await.unwrap()
+            ),
             5
         );
 
         // A per-file choice wins for that file only; the global setting stays unchanged.
-        save_file_poster_frame(&pool, &clip, Some(30)).await.expect("per-file frame saves");
+        save_file_poster_frame(&pool, &clip, Some(30))
+            .await
+            .expect("per-file frame saves");
         assert_eq!(get_file_poster_frame(&pool, &clip).await.unwrap(), Some(30));
         assert_eq!(
-            resolve_poster_frame(get_file_poster_frame(&pool, &clip).await.unwrap(), get_setting(&pool, POSTER_FRAME_SETTING).await.unwrap()),
+            resolve_poster_frame(
+                get_file_poster_frame(&pool, &clip).await.unwrap(),
+                get_setting(&pool, POSTER_FRAME_SETTING).await.unwrap()
+            ),
             30
         );
         assert_eq!(get_file_poster_frame(&pool, &other).await.unwrap(), None);
-        assert_eq!(get_setting(&pool, POSTER_FRAME_SETTING).await.unwrap().as_deref(), Some("5"));
+        assert_eq!(
+            get_setting(&pool, POSTER_FRAME_SETTING)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("5")
+        );
 
         // Rejected frames and non-video files leave the stored choice alone.
         assert!(save_file_poster_frame(&pool, &clip, Some(7)).await.is_err());
-        assert!(save_file_poster_frame(&pool, &notes, Some(30)).await.is_err());
+        assert!(
+            save_file_poster_frame(&pool, &notes, Some(30))
+                .await
+                .is_err()
+        );
         assert_eq!(get_file_poster_frame(&pool, &clip).await.unwrap(), Some(30));
 
         // Clearing the choice returns the file to the global frame.
-        save_file_poster_frame(&pool, &clip, None).await.expect("clearing saves");
+        save_file_poster_frame(&pool, &clip, None)
+            .await
+            .expect("clearing saves");
         assert_eq!(get_file_poster_frame(&pool, &clip).await.unwrap(), None);
 
         fs::remove_dir_all(temp).expect("remove test fixture");
@@ -1642,21 +2050,36 @@ mod local_path_tests {
     /// renders real frames and compares them. `testsrc` changes every frame, making the frames distinct.
     #[test]
     fn per_file_poster_frame_changes_the_rendered_image() {
-        let temp = std::env::temp_dir().join(format!("lumen-file-render-{}", uuid::Uuid::new_v4().simple()));
+        let temp = std::env::temp_dir().join(format!(
+            "lumen-file-render-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         fs::create_dir_all(&temp).expect("fixture directory");
         let clip = temp.join("clip.mp4");
         write_test_video(&clip).expect("fixture video");
         let cache = temp.join("cache");
 
         // The global frame renders the start of the video.
-        let global = generate_local_thumbnail(clip.clone(), cache.clone(), 0, true).expect("global frame renders");
+        let global = generate_local_thumbnail(clip.clone(), cache.clone(), 0, true)
+            .expect("global frame renders");
         assert!(global.starts_with(&[0xff, 0xd8]), "global frame is a JPEG");
 
         // The per-file choice renders its own frame, and the two cached files differ.
-        let per_file = generate_local_thumbnail(clip.clone(), cache.clone(), 5, true).expect("per-file frame renders");
-        assert!(per_file.starts_with(&[0xff, 0xd8]), "per-file frame is a JPEG");
-        assert_ne!(global, per_file, "the chosen frame time extracts different pixels than the global one");
-        assert_eq!(fs::read_dir(&cache).expect("cache directory").count(), 2, "each frame time keeps its own cached poster");
+        let per_file = generate_local_thumbnail(clip.clone(), cache.clone(), 5, true)
+            .expect("per-file frame renders");
+        assert!(
+            per_file.starts_with(&[0xff, 0xd8]),
+            "per-file frame is a JPEG"
+        );
+        assert_ne!(
+            global, per_file,
+            "the chosen frame time extracts different pixels than the global one"
+        );
+        assert_eq!(
+            fs::read_dir(&cache).expect("cache directory").count(),
+            2,
+            "each frame time keeps its own cached poster"
+        );
 
         fs::remove_dir_all(temp).expect("remove test fixture");
     }
@@ -1665,10 +2088,25 @@ mod local_path_tests {
     /// yields genuinely different frames.
     fn write_test_video(path: &Path) -> std::io::Result<()> {
         let generated = std::process::Command::new("ffmpeg")
-            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=2:duration=8", "-c:v", "mpeg4", "-y"])
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=640x360:rate=2:duration=8",
+                "-c:v",
+                "mpeg4",
+                "-y",
+            ])
             .arg(path)
             .output()?;
-        assert!(generated.status.success(), "could not create test video: {}", String::from_utf8_lossy(&generated.stderr));
+        assert!(
+            generated.status.success(),
+            "could not create test video: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
         Ok(())
     }
 }
@@ -1687,12 +2125,31 @@ mod setting_allowlist_tests {
 
     #[test]
     fn only_user_facing_settings_are_writable() {
-        for key in ["hwdec", "cache", "extra_mpv_args", "allow_lan_sources", "poster_frame_seconds", "search_preferred_language", "search_hide_other_languages"] {
+        for key in [
+            "hwdec",
+            "cache",
+            "extra_mpv_args",
+            "allow_lan_sources",
+            "poster_frame_seconds",
+            "search_preferred_language",
+            "search_hide_other_languages",
+        ] {
             assert!(is_user_setting(key), "{key} is a user setting");
         }
         // Internal state shares the table: writing these would bypass a PIN or corrupt sync.
-        for key in ["active_profile_id", "sync_pull_cursor", "sync_seeded", "sync_last_synced_at", "search_providers", "tmdb_api_key", ""] {
-            assert!(!is_user_setting(key), "{key:?} must not be writable from the UI");
+        for key in [
+            "active_profile_id",
+            "sync_pull_cursor",
+            "sync_seeded",
+            "sync_last_synced_at",
+            "search_providers",
+            "tmdb_api_key",
+            "",
+        ] {
+            assert!(
+                !is_user_setting(key),
+                "{key:?} must not be writable from the UI"
+            );
         }
     }
 }

@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Pool, Sqlite};
@@ -12,8 +12,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::db::{migrate_tmdb_columns, set_setting};
-use crate::sync::{queue_favorite, sync_with, Remote};
-use crate::sync_crypto::{generate_root, pow_valid, SealedItem, SyncKeys};
+use crate::sync::{Remote, queue_favorite, sync_with};
+use crate::sync_crypto::{SealedItem, SyncKeys, generate_root, pow_valid};
 use crate::sync_keys::{self, MemoryStore};
 
 const POW_BITS: u32 = 8;
@@ -41,13 +41,25 @@ fn reply(status: u16, body: Value) -> Vec<u8> {
     .into_bytes()
 }
 
-fn handle_request(mock: &mut Mock, method: &str, target: &str, headers: &HashMap<String, String>, body: &[u8]) -> Vec<u8> {
+fn handle_request(
+    mock: &mut Mock,
+    method: &str,
+    target: &str,
+    headers: &HashMap<String, String>,
+    body: &[u8],
+) -> Vec<u8> {
     let url = url::Url::parse(&format!("http://mock{target}")).unwrap();
     let json_body: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
 
     if method == "POST" && url.path() == "/v1/groups" {
-        let sync_id = json_body["sync_id"].as_str().unwrap_or_default().to_string();
-        let verifier = json_body["verifier"].as_str().unwrap_or_default().to_string();
+        let sync_id = json_body["sync_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let verifier = json_body["verifier"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         if let Some(existing) = mock.groups.get(&sync_id) {
             return if existing.verifier == verifier {
                 reply(200, json!({ "created": false }))
@@ -59,7 +71,13 @@ fn handle_request(mock: &mut Mock, method: &str, target: &str, headers: &HashMap
         if !pow_valid(&sync_id, nonce, POW_BITS) {
             return reply(400, json!({ "error": "invalid_pow" }));
         }
-        mock.groups.insert(sync_id, Group { verifier, items: BTreeMap::new() });
+        mock.groups.insert(
+            sync_id,
+            Group {
+                verifier,
+                items: BTreeMap::new(),
+            },
+        );
         return reply(201, json!({ "created": true }));
     }
 
@@ -98,7 +116,11 @@ fn handle_request(mock: &mut Mock, method: &str, target: &str, headers: &HashMap
         ("GET", "/v1/items") => {
             let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
             // The Worker refuses a missing, non-numeric or negative cursor; so does this stand-in.
-            let Some(since) = query.get("since").and_then(|v| v.parse::<i64>().ok()).filter(|v| *v >= 0) else {
+            let Some(since) = query
+                .get("since")
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|v| *v >= 0)
+            else {
                 return reply(400, json!({ "error": "invalid_request" }));
             };
             let after = query.get("after_id");
@@ -140,12 +162,18 @@ async fn handle(socket: &mut TcpStream, mock: &Shared) -> std::io::Result<()> {
     let head = String::from_utf8_lossy(&buffer[..head_end]).to_string();
     let mut lines = head.lines();
     let mut request_line = lines.next().unwrap_or_default().split_whitespace();
-    let (method, target) = (request_line.next().unwrap_or_default(), request_line.next().unwrap_or_default());
+    let (method, target) = (
+        request_line.next().unwrap_or_default(),
+        request_line.next().unwrap_or_default(),
+    );
     let headers: HashMap<String, String> = lines
         .filter_map(|line| line.split_once(':'))
         .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
         .collect();
-    let length: usize = headers.get("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let length: usize = headers
+        .get("content-length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     while buffer.len() < head_end + length {
         let n = socket.read(&mut chunk).await?;
         if n == 0 {
@@ -168,7 +196,9 @@ async fn start_mock() -> (String, Shared) {
     let served = mock.clone();
     tokio::spawn(async move {
         loop {
-            let Ok((mut socket, _)) = listener.accept().await else { return };
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
             let served = served.clone();
             tokio::spawn(async move {
                 let _ = handle(&mut socket, &served).await;
@@ -181,8 +211,15 @@ async fn start_mock() -> (String, Shared) {
 /// A device: its own database, with the default profile given a shared sync key so profiles line
 /// up across devices the way they do after a first sync.
 async fn device() -> Pool<Sqlite> {
-    let pool = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
-    sqlx::query("PRAGMA foreign_keys = ON;").execute(&pool).await.unwrap();
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON;")
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();
     migrate_tmdb_columns(&pool).await.unwrap();
     sqlx::query("UPDATE profiles SET sync_key = 'shared-profile' WHERE id = 1")
@@ -234,10 +271,17 @@ async fn two_devices_with_one_key_exchange_everything_and_the_server_sees_none_o
         .execute(&a)
         .await
         .unwrap();
-    sqlx::query("UPDATE profiles SET name = 'Quinn' WHERE id = 1").execute(&a).await.unwrap();
+    sqlx::query("UPDATE profiles SET name = 'Quinn' WHERE id = 1")
+        .execute(&a)
+        .await
+        .unwrap();
     // Newer than device B's untouched default profile, so last-write-wins picks the rename.
     let now = chrono::Utc::now().timestamp_millis();
-    sqlx::query("UPDATE profiles SET updated_at = ? WHERE id = 1").bind(now + 1_000).execute(&a).await.unwrap();
+    sqlx::query("UPDATE profiles SET updated_at = ? WHERE id = 1")
+        .bind(now + 1_000)
+        .execute(&a)
+        .await
+        .unwrap();
 
     let status = sync_with(&a, &remote(&origin, &root)).await.unwrap();
     assert_eq!(status.pending, 0);
@@ -250,7 +294,9 @@ async fn two_devices_with_one_key_exchange_everything_and_the_server_sees_none_o
     let favorites = favorite_rows(&b).await;
     assert_eq!(
         favorites,
-        URLS.iter().map(|url| (url.to_string(), 1)).collect::<Vec<_>>(),
+        URLS.iter()
+            .map(|url| (url.to_string(), 1))
+            .collect::<Vec<_>>(),
         "all rows that share a timestamp arrive, across page boundaries"
     );
     let position: f64 = sqlx::query_scalar("SELECT position FROM history WHERE path = ?")
@@ -259,10 +305,11 @@ async fn two_devices_with_one_key_exchange_everything_and_the_server_sees_none_o
         .await
         .unwrap();
     assert_eq!(position, 120.0);
-    let name: String = sqlx::query_scalar("SELECT name FROM profiles WHERE sync_key = 'shared-profile'")
-        .fetch_one(&b)
-        .await
-        .unwrap();
+    let name: String =
+        sqlx::query_scalar("SELECT name FROM profiles WHERE sync_key = 'shared-profile'")
+            .fetch_one(&b)
+            .await
+            .unwrap();
     assert_eq!(name, "Quinn");
 
     // What the server holds: no URL, no content key, no profile name, no field names.
@@ -271,14 +318,28 @@ async fn two_devices_with_one_key_exchange_everything_and_the_server_sees_none_o
         let group = guard.groups.values().next().unwrap();
         serde_json::to_string(&group.items).unwrap()
     };
-    for secret in ["cdn.example", "movie-a", "tmdb:movie", "Quinn", "favorite", "progress", "content_key", "shared-profile"] {
-        assert!(!stored.contains(secret), "the server must not see {secret:?}: {stored}");
+    for secret in [
+        "cdn.example",
+        "movie-a",
+        "tmdb:movie",
+        "Quinn",
+        "favorite",
+        "progress",
+        "content_key",
+        "shared-profile",
+    ] {
+        assert!(
+            !stored.contains(secret),
+            "the server must not see {secret:?}: {stored}"
+        );
     }
 
     // A removal on one device reaches the other.
     let mut conn = a.acquire().await.unwrap();
     let removed_at = now + 10 * 60 * 1000;
-    queue_favorite(&mut conn, 1, "tmdb:movie:500", URLS[0], false, removed_at).await.unwrap();
+    queue_favorite(&mut conn, 1, "tmdb:movie:500", URLS[0], false, removed_at)
+        .await
+        .unwrap();
     drop(conn);
     sqlx::query("UPDATE favorites SET active = 0, updated_at = ? WHERE channel_url = ?")
         .bind(removed_at)
@@ -289,7 +350,11 @@ async fn two_devices_with_one_key_exchange_everything_and_the_server_sees_none_o
     sync_with(&a, &remote(&origin, &root)).await.unwrap();
     sync_with(&b, &remote(&origin, &root)).await.unwrap();
     let favorites = favorite_rows(&b).await;
-    assert_eq!(favorites[0], (URLS[0].to_string(), 0), "the removal is applied");
+    assert_eq!(
+        favorites[0],
+        (URLS[0].to_string(), 0),
+        "the removal is applied"
+    );
     assert_eq!(favorites[1].1, 1);
 }
 
@@ -315,13 +380,19 @@ async fn a_different_key_sees_nothing_and_cannot_use_the_group() {
     let d = device().await;
     let error = String::from(sync_with(&d, &stranger).await.unwrap_err());
     assert!(error.contains("deleted or has expired"), "{error}");
-    assert!(!stranger.exists().await.unwrap(), "a failed sync must not create the group");
+    assert!(
+        !stranger.exists().await.unwrap(),
+        "a failed sync must not create the group"
+    );
 
     // A server that no longer accepts the key (here: its stored verifier changed) says so, in words
     // that tell the user what to do.
     {
         let mut guard = _mock.lock().unwrap();
-        let group = guard.groups.get_mut(&SyncKeys::from_root(&root).sync_id()).unwrap();
+        let group = guard
+            .groups
+            .get_mut(&SyncKeys::from_root(&root).sync_id())
+            .unwrap();
         group.verifier = "0".repeat(64);
     }
     let e = device().await;
@@ -347,7 +418,12 @@ async fn a_record_the_server_altered_is_skipped_and_counted_not_applied() {
             .items
             .iter()
             .find(|(id, (updated_at, deleted, blob))| {
-                let sealed = SealedItem { id: (*id).clone(), updated_at: *updated_at, deleted: *deleted, blob: blob.clone() };
+                let sealed = SealedItem {
+                    id: (*id).clone(),
+                    updated_at: *updated_at,
+                    deleted: *deleted,
+                    blob: blob.clone(),
+                };
                 keys.open(&sealed).is_ok_and(|item| item.kind == "favorite")
             })
             .map(|(id, _)| id.clone())
@@ -359,7 +435,10 @@ async fn a_record_the_server_altered_is_skipped_and_counted_not_applied() {
 
     let b = device().await;
     let status = sync_with(&b, &remote(&origin, &root)).await.unwrap();
-    assert_eq!(status.skipped, 1, "exactly the altered record fails verification");
+    assert_eq!(
+        status.skipped, 1,
+        "exactly the altered record fails verification"
+    );
     assert_eq!(
         favorite_rows(&b).await.len(),
         URLS.len() - 1,
@@ -375,58 +454,126 @@ async fn sync_keys_enable_join_show_and_disable() {
     let (origin, mock) = start_mock().await;
 
     let first = device().await;
-    set_setting(&first, "sync_server_url", &origin).await.unwrap();
+    set_setting(&first, "sync_server_url", &origin)
+        .await
+        .unwrap();
     let first_store = MemoryStore::default();
-    assert!(!sync_keys::state_with(&first, &first_store).await.unwrap().enabled);
-
-    let key = sync_keys::enable_with(&first, &first_store, POW_BITS).await.unwrap();
-    assert!(sync_keys::state_with(&first, &first_store).await.unwrap().enabled);
-    assert_eq!(sync_keys::show_key_with(&first_store).unwrap(), key);
-    assert!(sync_keys::enable_with(&first, &first_store, POW_BITS).await.is_err(), "already on");
     assert!(
-        sync_keys::set_server_with(&first, &first_store, "https://elsewhere.example").await.is_err(),
+        !sync_keys::state_with(&first, &first_store)
+            .await
+            .unwrap()
+            .enabled
+    );
+
+    let key = sync_keys::enable_with(&first, &first_store, POW_BITS)
+        .await
+        .unwrap();
+    assert!(
+        sync_keys::state_with(&first, &first_store)
+            .await
+            .unwrap()
+            .enabled
+    );
+    assert_eq!(sync_keys::show_key_with(&first_store).unwrap(), key);
+    assert!(
+        sync_keys::enable_with(&first, &first_store, POW_BITS)
+            .await
+            .is_err(),
+        "already on"
+    );
+    assert!(
+        sync_keys::set_server_with(&first, &first_store, "https://elsewhere.example")
+            .await
+            .is_err(),
         "the server cannot change under a live key"
     );
     assert_eq!(mock.lock().unwrap().groups.len(), 1);
 
     // Another device joins with the key text, typed in lowercase without the dashes.
     let second = device().await;
-    set_setting(&second, "sync_server_url", &origin).await.unwrap();
+    set_setting(&second, "sync_server_url", &origin)
+        .await
+        .unwrap();
     let second_store = MemoryStore::default();
     let typed = key.replace('-', "").to_lowercase();
-    sync_keys::join_with(&second, &second_store, &typed).await.unwrap();
+    sync_keys::join_with(&second, &second_store, &typed)
+        .await
+        .unwrap();
     assert_eq!(sync_keys::show_key_with(&second_store).unwrap(), key);
 
     // A well-formed key nobody has registered does not create a group.
     let third = device().await;
-    set_setting(&third, "sync_server_url", &origin).await.unwrap();
+    set_setting(&third, "sync_server_url", &origin)
+        .await
+        .unwrap();
     let third_store = MemoryStore::default();
     let unknown = crate::sync_crypto::format_key(&generate_root().unwrap());
-    let error = String::from(sync_keys::join_with(&third, &third_store, &unknown).await.unwrap_err());
+    let error = String::from(
+        sync_keys::join_with(&third, &third_store, &unknown)
+            .await
+            .unwrap_err(),
+    );
     assert!(error.contains("No synced data"), "{error}");
-    assert!(!sync_keys::state_with(&third, &third_store).await.unwrap().enabled);
-    assert_eq!(mock.lock().unwrap().groups.len(), 1, "joining never creates a group");
+    assert!(
+        !sync_keys::state_with(&third, &third_store)
+            .await
+            .unwrap()
+            .enabled
+    );
+    assert_eq!(
+        mock.lock().unwrap().groups.len(),
+        1,
+        "joining never creates a group"
+    );
 
     // A mistyped key is refused before any network call.
     let mut typo = key.clone();
     typo.replace_range(0..1, if key.starts_with('1') { "2" } else { "1" });
-    assert!(sync_keys::join_with(&third, &third_store, &typo).await.is_err());
+    assert!(
+        sync_keys::join_with(&third, &third_store, &typo)
+            .await
+            .is_err()
+    );
 
     // Turning off with deletion erases the server copy for everyone and forgets the key here.
     add_favorites(&first, 5_000).await;
-    let remote = sync_keys::remote(&first, &first_store).await.unwrap().unwrap();
+    let remote = sync_keys::remote(&first, &first_store)
+        .await
+        .unwrap()
+        .unwrap();
     sync_with(&first, &remote).await.unwrap();
-    sync_keys::disable_with(&first, &first_store, true).await.unwrap();
-    assert!(!sync_keys::state_with(&first, &first_store).await.unwrap().enabled);
+    sync_keys::disable_with(&first, &first_store, true)
+        .await
+        .unwrap();
+    assert!(
+        !sync_keys::state_with(&first, &first_store)
+            .await
+            .unwrap()
+            .enabled
+    );
     assert!(mock.lock().unwrap().groups.is_empty());
     assert_eq!(favorite_rows(&first).await.len(), 3, "local data is kept");
-    let error = String::from(sync_with(&second, &sync_keys::remote(&second, &second_store).await.unwrap().unwrap()).await.unwrap_err());
+    let error = String::from(
+        sync_with(
+            &second,
+            &sync_keys::remote(&second, &second_store)
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .await
+        .unwrap_err(),
+    );
     assert!(error.contains("deleted or has expired"), "{error}");
 
     // Without deletion the server copy stays.
-    let again = sync_keys::enable_with(&first, &first_store, POW_BITS).await.unwrap();
+    let again = sync_keys::enable_with(&first, &first_store, POW_BITS)
+        .await
+        .unwrap();
     assert_ne!(again, key, "a new key every time");
-    sync_keys::disable_with(&first, &first_store, false).await.unwrap();
+    sync_keys::disable_with(&first, &first_store, false)
+        .await
+        .unwrap();
     assert_eq!(mock.lock().unwrap().groups.len(), 1);
 }
 
@@ -434,10 +581,19 @@ async fn sync_keys_enable_join_show_and_disable() {
 async fn enabling_without_a_reachable_server_keeps_no_key() {
     let pool = device().await;
     // Nothing listens on the discard port.
-    set_setting(&pool, "sync_server_url", "http://127.0.0.1:9").await.unwrap();
+    set_setting(&pool, "sync_server_url", "http://127.0.0.1:9")
+        .await
+        .unwrap();
     let store = MemoryStore::default();
-    assert!(sync_keys::enable_with(&pool, &store, POW_BITS).await.is_err());
-    assert!(!sync_keys::state_with(&pool, &store).await.unwrap().enabled, "a failed attempt leaves nothing behind");
+    assert!(
+        sync_keys::enable_with(&pool, &store, POW_BITS)
+            .await
+            .is_err()
+    );
+    assert!(
+        !sync_keys::state_with(&pool, &store).await.unwrap().enabled,
+        "a failed attempt leaves nothing behind"
+    );
 }
 
 /// Two clients through the real Worker (`npm run dev` in `sync-server/`), not the in-process
@@ -448,17 +604,26 @@ async fn enabling_without_a_reachable_server_keeps_no_key() {
 #[tokio::test]
 #[ignore = "needs a running sync server; see the doc comment"]
 async fn live_two_clients_through_the_real_worker() {
-    let origin = std::env::var("SYNC_TEST_URL").expect("set SYNC_TEST_URL to the running Worker, e.g. http://127.0.0.1:8787");
-    let bits: u32 = std::env::var("SYNC_TEST_POW_BITS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    let origin = std::env::var("SYNC_TEST_URL")
+        .expect("set SYNC_TEST_URL to the running Worker, e.g. http://127.0.0.1:8787");
+    let bits: u32 = std::env::var("SYNC_TEST_POW_BITS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8);
 
     let root = generate_root().unwrap();
     let live = remote(&origin, &root);
     live.register(bits).await.unwrap();
-    live.register(bits).await.expect("registering the same group again is accepted");
+    live.register(bits)
+        .await
+        .expect("registering the same group again is accepted");
 
     let a = device().await;
     add_favorites(&a, 5_000).await;
-    sqlx::query("UPDATE profiles SET name = 'Quinn' WHERE id = 1").execute(&a).await.unwrap();
+    sqlx::query("UPDATE profiles SET name = 'Quinn' WHERE id = 1")
+        .execute(&a)
+        .await
+        .unwrap();
     sqlx::query("UPDATE profiles SET updated_at = ? WHERE id = 1")
         .bind(chrono::Utc::now().timestamp_millis() + 1_000)
         .execute(&a)
@@ -482,9 +647,21 @@ async fn live_two_clients_through_the_real_worker() {
         .text()
         .await
         .unwrap();
-    assert!(raw.contains("\"blob\""), "the server returned records: {raw}");
-    for secret in ["cdn.example", "tmdb:movie", "Quinn", "favorite", "content_key"] {
-        assert!(!raw.contains(secret), "the live server must not see {secret:?}");
+    assert!(
+        raw.contains("\"blob\""),
+        "the server returned records: {raw}"
+    );
+    for secret in [
+        "cdn.example",
+        "tmdb:movie",
+        "Quinn",
+        "favorite",
+        "content_key",
+    ] {
+        assert!(
+            !raw.contains(secret),
+            "the live server must not see {secret:?}"
+        );
     }
 
     // A browser request is refused outright, and the right group with a wrong secret is not served.
@@ -507,8 +684,13 @@ async fn live_two_clients_through_the_real_worker() {
     assert_eq!(wrong.status(), 401);
 
     live.delete_group().await.unwrap();
-    assert!(!live.exists().await.unwrap(), "the group is gone after deletion");
-    live.delete_group().await.expect("deleting a missing group is not an error");
+    assert!(
+        !live.exists().await.unwrap(),
+        "the group is gone after deletion"
+    );
+    live.delete_group()
+        .await
+        .expect("deleting a missing group is not an error");
 }
 
 #[tokio::test]
@@ -520,23 +702,39 @@ async fn hand_set_watched_marks_sync_between_devices_and_the_newer_one_wins() {
     let b = device().await;
 
     let now = chrono::Utc::now().timestamp_millis();
-    crate::series::set_episodes_watched(&a, 1, "tmdb:tv:42", 1, &[1, 2], true, now).await.unwrap();
+    crate::series::set_episodes_watched(&a, 1, "tmdb:tv:42", 1, &[1, 2], true, now)
+        .await
+        .unwrap();
     sync_with(&a, &remote(&origin, &root)).await.unwrap();
     sync_with(&b, &remote(&origin, &root)).await.unwrap();
     let marks = crate::series::list_episode_marks(&b, 1).await.unwrap();
-    assert_eq!(marks.iter().map(|m| (m.season, m.episode, m.watched)).collect::<Vec<_>>(), vec![(1, 1, true), (1, 2, true)]);
+    assert_eq!(
+        marks
+            .iter()
+            .map(|m| (m.season, m.episode, m.watched))
+            .collect::<Vec<_>>(),
+        vec![(1, 1, true), (1, 2, true)]
+    );
 
     // "Not watched" on B is newer, so it replaces A's mark on both devices.
-    crate::series::set_episodes_watched(&b, 1, "tmdb:tv:42", 1, &[2], false, now + 60_000).await.unwrap();
+    crate::series::set_episodes_watched(&b, 1, "tmdb:tv:42", 1, &[2], false, now + 60_000)
+        .await
+        .unwrap();
     sync_with(&b, &remote(&origin, &root)).await.unwrap();
     sync_with(&a, &remote(&origin, &root)).await.unwrap();
     let marks = crate::series::list_episode_marks(&a, 1).await.unwrap();
-    assert_eq!(marks.iter().map(|m| m.watched).collect::<Vec<_>>(), vec![true, false]);
+    assert_eq!(
+        marks.iter().map(|m| m.watched).collect::<Vec<_>>(),
+        vec![true, false]
+    );
 
     // The server saw none of it.
     let stored = {
         let guard = mock.lock().unwrap();
         serde_json::to_string(&guard.groups.values().next().unwrap().items).unwrap()
     };
-    assert!(!stored.contains("tmdb:tv:42") && !stored.contains("episode"), "{stored}");
+    assert!(
+        !stored.contains("tmdb:tv:42") && !stored.contains("episode"),
+        "{stored}"
+    );
 }

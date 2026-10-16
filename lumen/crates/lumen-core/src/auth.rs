@@ -1,7 +1,7 @@
 use crate::error::{PlayerError, Result};
+use argon2::Argon2;
 use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
-use argon2::Argon2;
 
 /// Minimum and maximum PIN length, counted in characters.
 const MIN_PIN_CHARS: usize = 4;
@@ -66,7 +66,10 @@ mod tests {
         assert!(verify_pin("4821", &hash));
         assert!(!verify_pin("4822", &hash));
         assert!(!verify_pin("", &hash));
-        assert!(hash.starts_with("$argon2id$"), "stored value is an Argon2id hash");
+        assert!(
+            hash.starts_with("$argon2id$"),
+            "stored value is an Argon2id hash"
+        );
         assert!(!hash.contains("4821"), "the PIN itself is never stored");
     }
 
@@ -85,8 +88,14 @@ mod tests {
         assert!(validate_pin("correct horse battery staple").is_ok());
 
         assert!(validate_pin("123").is_err(), "too short");
-        assert!(validate_pin(&"9".repeat(MAX_PIN_CHARS + 1)).is_err(), "too long");
-        assert!(validate_pin("12\n34").is_err(), "control characters rejected");
+        assert!(
+            validate_pin(&"9".repeat(MAX_PIN_CHARS + 1)).is_err(),
+            "too long"
+        );
+        assert!(
+            validate_pin("12\n34").is_err(),
+            "control characters rejected"
+        );
         assert!(hash_pin("123").is_err(), "hashing validates too");
     }
 

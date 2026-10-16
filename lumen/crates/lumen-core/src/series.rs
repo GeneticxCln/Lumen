@@ -28,13 +28,21 @@ pub struct EpisodeMark {
 
 fn check_series(series_key: &str, season: i64, episodes: &[i64]) -> Result<()> {
     if series_key.trim().is_empty() || series_key.chars().count() > MAX_SERIES_KEY_CHARS {
-        return Err(PlayerError::InvalidArg("That series has no usable name".into()));
+        return Err(PlayerError::InvalidArg(
+            "That series has no usable name".into(),
+        ));
     }
     if !(0..=MAX_SEASON).contains(&season) {
         return Err(PlayerError::InvalidArg("Season number out of range".into()));
     }
-    if episodes.len() > MAX_EPISODES_PER_CALL || episodes.iter().any(|episode| !(0..=MAX_EPISODE).contains(episode)) {
-        return Err(PlayerError::InvalidArg("Episode numbers out of range".into()));
+    if episodes.len() > MAX_EPISODES_PER_CALL
+        || episodes
+            .iter()
+            .any(|episode| !(0..=MAX_EPISODE).contains(episode))
+    {
+        return Err(PlayerError::InvalidArg(
+            "Episode numbers out of range".into(),
+        ));
     }
     Ok(())
 }
@@ -78,11 +86,19 @@ pub async fn set_episodes_watched(
     now: i64,
 ) -> Result<()> {
     check_series(series_key, season, episodes)?;
-    let mut tx = pool.begin().await.map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
     for episode in episodes {
-        write_mark(&mut tx, profile_id, series_key, season, *episode, watched, now).await?;
+        write_mark(
+            &mut tx, profile_id, series_key, season, *episode, watched, now,
+        )
+        .await?;
     }
-    tx.commit().await.map_err(|e| PlayerError::Sql(e.to_string()))
+    tx.commit()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))
 }
 
 pub async fn list_episode_marks(pool: &Pool<Sqlite>, profile_id: i64) -> Result<Vec<EpisodeMark>> {
@@ -123,7 +139,12 @@ pub struct Airing {
 }
 
 fn text(value: &Value, key: &str) -> Option<String> {
-    value.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Reads the schedule out of a TMDB `/tv/{id}` response. A missing or null episode is simply
@@ -137,12 +158,20 @@ pub fn parse_airing(tmdb_id: i64, payload: &Value) -> Airing {
         name: text(payload, "name").unwrap_or_default(),
         status: text(payload, "status"),
         next_air_date: next.and_then(|n| text(n, "air_date")),
-        next_season: next.and_then(|n| n.get("season_number")).and_then(Value::as_i64),
-        next_episode: next.and_then(|n| n.get("episode_number")).and_then(Value::as_i64),
+        next_season: next
+            .and_then(|n| n.get("season_number"))
+            .and_then(Value::as_i64),
+        next_episode: next
+            .and_then(|n| n.get("episode_number"))
+            .and_then(Value::as_i64),
         next_name: next.and_then(|n| text(n, "name")),
         last_air_date: last.and_then(|n| text(n, "air_date")),
-        last_season: last.and_then(|n| n.get("season_number")).and_then(Value::as_i64),
-        last_episode: last.and_then(|n| n.get("episode_number")).and_then(Value::as_i64),
+        last_season: last
+            .and_then(|n| n.get("season_number"))
+            .and_then(Value::as_i64),
+        last_episode: last
+            .and_then(|n| n.get("episode_number"))
+            .and_then(Value::as_i64),
     }
 }
 
@@ -178,7 +207,12 @@ pub async fn store_airing(pool: &Pool<Sqlite>, airing: &Airing, now: i64) -> Res
 pub const AIRING_MAX_AGE_MS: i64 = 12 * 60 * 60 * 1000;
 
 /// TMDB series ids this profile follows (played or saved) whose schedule is missing or stale.
-pub async fn series_needing_airing(pool: &Pool<Sqlite>, profile_id: i64, now: i64, limit: i64) -> Result<Vec<i64>> {
+pub async fn series_needing_airing(
+    pool: &Pool<Sqlite>,
+    profile_id: i64,
+    now: i64,
+    limit: i64,
+) -> Result<Vec<i64>> {
     sqlx::query_scalar(
         "SELECT DISTINCT c.tmdb_id FROM channels c \
          LEFT JOIN series_airing a ON a.tmdb_id = c.tmdb_id \
@@ -208,7 +242,12 @@ pub struct UpcomingSeries {
     pub channel_id: Option<i64>,
 }
 
-pub async fn list_upcoming(pool: &Pool<Sqlite>, profile_id: i64, today: &str, recent_from: &str) -> Result<Vec<UpcomingSeries>> {
+pub async fn list_upcoming(
+    pool: &Pool<Sqlite>,
+    profile_id: i64,
+    today: &str,
+    recent_from: &str,
+) -> Result<Vec<UpcomingSeries>> {
     let rows = sqlx::query(
         "SELECT a.tmdb_id, a.name, a.status, a.next_air_date, a.next_season, a.next_episode, a.next_name, \
                 a.last_air_date, a.last_season, a.last_episode, \
@@ -258,8 +297,15 @@ mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
 
     async fn pool() -> Pool<Sqlite> {
-        let pool = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
-        sqlx::query("PRAGMA foreign_keys = ON;").execute(&pool).await.unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA foreign_keys = ON;")
+            .execute(&pool)
+            .await
+            .unwrap();
         crate::db::run_migrations(&pool).await.unwrap();
         crate::db::migrate_tmdb_columns(&pool).await.unwrap();
         pool
@@ -268,34 +314,77 @@ mod tests {
     #[tokio::test]
     async fn marks_are_stored_per_profile_and_unwatched_is_an_answer_not_a_deletion() {
         let pool = pool().await;
-        set_episodes_watched(&pool, 1, "tmdb:tv:42", 1, &[1, 2, 3], true, 1_000).await.unwrap();
-        set_episodes_watched(&pool, 1, "tmdb:tv:42", 1, &[2], false, 2_000).await.unwrap();
+        set_episodes_watched(&pool, 1, "tmdb:tv:42", 1, &[1, 2, 3], true, 1_000)
+            .await
+            .unwrap();
+        set_episodes_watched(&pool, 1, "tmdb:tv:42", 1, &[2], false, 2_000)
+            .await
+            .unwrap();
         let marks = list_episode_marks(&pool, 1).await.unwrap();
-        assert_eq!(marks.iter().map(|m| (m.episode, m.watched)).collect::<Vec<_>>(), vec![(1, true), (2, false), (3, true)]);
-        assert!(list_episode_marks(&pool, 2).await.unwrap().is_empty(), "another profile has its own marks");
+        assert_eq!(
+            marks
+                .iter()
+                .map(|m| (m.episode, m.watched))
+                .collect::<Vec<_>>(),
+            vec![(1, true), (2, false), (3, true)]
+        );
+        assert!(
+            list_episode_marks(&pool, 2).await.unwrap().is_empty(),
+            "another profile has its own marks"
+        );
 
         // An older write (a slow device) does not undo a newer one.
-        set_episodes_watched(&pool, 1, "tmdb:tv:42", 1, &[2], true, 1_500).await.unwrap();
+        set_episodes_watched(&pool, 1, "tmdb:tv:42", 1, &[2], true, 1_500)
+            .await
+            .unwrap();
         assert!(!list_episode_marks(&pool, 1).await.unwrap()[1].watched);
     }
 
     #[tokio::test]
     async fn marks_are_validated_and_all_or_nothing() {
         let pool = pool().await;
-        assert!(set_episodes_watched(&pool, 1, "  ", 1, &[1], true, 1).await.is_err());
-        assert!(set_episodes_watched(&pool, 1, "s", -1, &[1], true, 1).await.is_err());
-        assert!(set_episodes_watched(&pool, 1, "s", 1, &[1, 99_999], true, 1).await.is_err());
-        assert!(set_episodes_watched(&pool, 1, "s", 1, &vec![1; 501], true, 1).await.is_err());
-        assert!(list_episode_marks(&pool, 1).await.unwrap().is_empty(), "a refused call writes nothing");
+        assert!(
+            set_episodes_watched(&pool, 1, "  ", 1, &[1], true, 1)
+                .await
+                .is_err()
+        );
+        assert!(
+            set_episodes_watched(&pool, 1, "s", -1, &[1], true, 1)
+                .await
+                .is_err()
+        );
+        assert!(
+            set_episodes_watched(&pool, 1, "s", 1, &[1, 99_999], true, 1)
+                .await
+                .is_err()
+        );
+        assert!(
+            set_episodes_watched(&pool, 1, "s", 1, &vec![1; 501], true, 1)
+                .await
+                .is_err()
+        );
+        assert!(
+            list_episode_marks(&pool, 1).await.unwrap().is_empty(),
+            "a refused call writes nothing"
+        );
     }
 
     #[tokio::test]
     async fn deleting_a_profile_removes_its_marks() {
         let pool = pool().await;
-        let second = crate::db::create_profile(&pool, "Guest", None).await.unwrap();
-        set_episodes_watched(&pool, second.id, "name:show", 1, &[1], true, 1).await.unwrap();
+        let second = crate::db::create_profile(&pool, "Guest", None)
+            .await
+            .unwrap();
+        set_episodes_watched(&pool, second.id, "name:show", 1, &[1], true, 1)
+            .await
+            .unwrap();
         crate::db::delete_profile(&pool, second.id).await.unwrap();
-        assert!(list_episode_marks(&pool, second.id).await.unwrap().is_empty());
+        assert!(
+            list_episode_marks(&pool, second.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -306,17 +395,29 @@ mod tests {
             "last_episode_to_air": {"air_date": "2026-10-25", "season_number": 3, "episode_number": 3, "name": "Hello"},
         });
         let airing = parse_airing(7, &ongoing);
-        assert_eq!((airing.next_season, airing.next_episode), (Some(3), Some(4)));
+        assert_eq!(
+            (airing.next_season, airing.next_episode),
+            (Some(3), Some(4))
+        );
         assert_eq!(airing.next_air_date.as_deref(), Some("2026-11-01"));
         assert_eq!(airing.last_air_date.as_deref(), Some("2026-10-25"));
         assert_eq!(airing.status.as_deref(), Some("Returning Series"));
 
-        let ended = parse_airing(8, &json!({"name": "Done", "status": "Ended", "next_episode_to_air": null, "last_episode_to_air": {"air_date": "2020-01-01", "season_number": 5, "episode_number": 10}}));
+        let ended = parse_airing(
+            8,
+            &json!({"name": "Done", "status": "Ended", "next_episode_to_air": null, "last_episode_to_air": {"air_date": "2020-01-01", "season_number": 5, "episode_number": 10}}),
+        );
         assert_eq!(ended.next_air_date, None);
         assert_eq!(ended.last_episode, Some(10));
 
         let junk = parse_airing(9, &json!("not an object"));
-        assert_eq!(junk, Airing { tmdb_id: 9, ..Airing::default() });
+        assert_eq!(
+            junk,
+            Airing {
+                tmdb_id: 9,
+                ..Airing::default()
+            }
+        );
     }
 
     async fn follow(pool: &Pool<Sqlite>, channel_id: i64, tmdb_id: i64, how: &str) {
@@ -345,31 +446,97 @@ mod tests {
         follow(&pool, 3, 300, "history").await; // followed, checked long ago
         follow(&pool, 4, 400, "none").await; // in the library but not followed
         let now = 10 * AIRING_MAX_AGE_MS;
-        store_airing(&pool, &Airing { tmdb_id: 200, name: "B".into(), ..Default::default() }, now - 1_000).await.unwrap();
-        store_airing(&pool, &Airing { tmdb_id: 300, name: "C".into(), ..Default::default() }, now - AIRING_MAX_AGE_MS - 1).await.unwrap();
-        assert_eq!(series_needing_airing(&pool, 1, now, 10).await.unwrap(), vec![100, 300]);
-        assert_eq!(series_needing_airing(&pool, 1, now, 1).await.unwrap(), vec![100], "limit applies");
-        assert!(series_needing_airing(&pool, 2, now, 10).await.unwrap().is_empty(), "another profile follows nothing");
+        store_airing(
+            &pool,
+            &Airing {
+                tmdb_id: 200,
+                name: "B".into(),
+                ..Default::default()
+            },
+            now - 1_000,
+        )
+        .await
+        .unwrap();
+        store_airing(
+            &pool,
+            &Airing {
+                tmdb_id: 300,
+                name: "C".into(),
+                ..Default::default()
+            },
+            now - AIRING_MAX_AGE_MS - 1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            series_needing_airing(&pool, 1, now, 10).await.unwrap(),
+            vec![100, 300]
+        );
+        assert_eq!(
+            series_needing_airing(&pool, 1, now, 1).await.unwrap(),
+            vec![100],
+            "limit applies"
+        );
+        assert!(
+            series_needing_airing(&pool, 2, now, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "another profile follows nothing"
+        );
     }
 
     #[tokio::test]
     async fn upcoming_lists_episodes_still_to_air_and_ones_that_just_aired() {
         let pool = pool().await;
-        for (channel, tmdb, how) in [(1, 100, "history"), (2, 200, "favorite"), (3, 300, "history"), (4, 400, "history"), (5, 500, "none")] {
+        for (channel, tmdb, how) in [
+            (1, 100, "history"),
+            (2, 200, "favorite"),
+            (3, 300, "history"),
+            (4, 400, "history"),
+            (5, 500, "none"),
+        ] {
             follow(&pool, channel, tmdb, how).await;
         }
         let at = |tmdb_id, next: Option<&str>, last: Option<&str>| Airing {
-            tmdb_id, name: format!("Show {tmdb_id}"), next_air_date: next.map(String::from), next_season: next.map(|_| 2), next_episode: next.map(|_| 5),
-            last_air_date: last.map(String::from), last_season: last.map(|_| 2), last_episode: last.map(|_| 4), ..Default::default()
+            tmdb_id,
+            name: format!("Show {tmdb_id}"),
+            next_air_date: next.map(String::from),
+            next_season: next.map(|_| 2),
+            next_episode: next.map(|_| 5),
+            last_air_date: last.map(String::from),
+            last_season: last.map(|_| 2),
+            last_episode: last.map(|_| 4),
+            ..Default::default()
         };
-        store_airing(&pool, &at(100, Some("2026-10-20"), Some("2026-10-13")), 1).await.unwrap(); // upcoming
-        store_airing(&pool, &at(200, None, Some("2026-10-14")), 1).await.unwrap(); // aired two days ago
-        store_airing(&pool, &at(300, None, Some("2026-08-01")), 1).await.unwrap(); // old news
-        store_airing(&pool, &at(400, Some("2026-10-10"), Some("2026-09-30")), 1).await.unwrap(); // stale "next": already past, nothing new in two weeks
-        store_airing(&pool, &at(500, Some("2026-10-22"), None), 1).await.unwrap(); // not followed
-        let upcoming = list_upcoming(&pool, 1, "2026-10-16", "2026-10-02").await.unwrap();
+        store_airing(&pool, &at(100, Some("2026-10-20"), Some("2026-10-13")), 1)
+            .await
+            .unwrap(); // upcoming
+        store_airing(&pool, &at(200, None, Some("2026-10-14")), 1)
+            .await
+            .unwrap(); // aired two days ago
+        store_airing(&pool, &at(300, None, Some("2026-08-01")), 1)
+            .await
+            .unwrap(); // old news
+        store_airing(&pool, &at(400, Some("2026-10-10"), Some("2026-09-30")), 1)
+            .await
+            .unwrap(); // stale "next": already past, nothing new in two weeks
+        store_airing(&pool, &at(500, Some("2026-10-22"), None), 1)
+            .await
+            .unwrap(); // not followed
+        let upcoming = list_upcoming(&pool, 1, "2026-10-16", "2026-10-02")
+            .await
+            .unwrap();
         let ids: Vec<_> = upcoming.iter().map(|u| u.airing.tmdb_id).collect();
-        assert_eq!(ids, vec![200, 100], "soonest first: what aired two days ago, then what airs on the 20th");
-        assert_eq!(upcoming[1].channel_id, Some(1), "the card can open a library entry");
+        assert_eq!(
+            ids,
+            vec![200, 100],
+            "soonest first: what aired two days ago, then what airs on the 20th"
+        );
+        assert_eq!(
+            upcoming[1].channel_id,
+            Some(1),
+            "the card can open a library entry"
+        );
     }
 }

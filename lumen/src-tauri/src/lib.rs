@@ -1,6 +1,6 @@
 pub use lumen_core::{
-    auth, board, db, error, extract, harvest, media_tools, netguard, pin_guard, player_prefs, playlist, probe,
-    search, secrets, series, tmdb,
+    auth, board, db, error, extract, harvest, media_tools, netguard, pin_guard, player_prefs,
+    playlist, probe, search, secrets, series, tmdb,
 };
 
 mod commands;

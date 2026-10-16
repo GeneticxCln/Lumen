@@ -13,7 +13,10 @@ pub struct Support {
 pub fn detect_display() {}
 
 pub fn support() -> Support {
-    Support { supported: false, reason: Some("Playing inside the window is only available on Linux.".into()) }
+    Support {
+        supported: false,
+        reason: Some("Playing inside the window is only available on Linux.".into()),
+    }
 }
 
 pub fn in_use() -> bool {
