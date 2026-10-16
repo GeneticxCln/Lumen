@@ -1,3 +1,4 @@
+use crate::embed;
 use crate::player_prefs;
 use crate::db::*;
 use crate::error::{PlayerError, Result};
@@ -101,8 +102,22 @@ async fn play_url_inner(
         let mut guard = backend_cell.lock().await;
         let running = guard.as_ref().is_some_and(|backend| backend.is_alive());
         if !running {
+            // Playing inside the window (experimental): mpv is started to draw into a native area
+            // above the page. If that cannot be set up, the separate mpv window is used instead.
+            let mut args = extra_args.clone();
+            embed::set_in_use(false);
+            if matches!(get_setting(pool, EMBED_PLAYER_SETTING).await, Ok(Some(value)) if value == "true") {
+                match embed::ensure_area(&app).await {
+                    Ok(xid) => {
+                        // Last, so a user's own arguments cannot point mpv away from the area.
+                        args = format!("{args} {}", embed::mpv_args(xid));
+                        embed::set_in_use(true);
+                    }
+                    Err(reason) => eprintln!("lumen: playing in the window is not available, using the mpv window: {reason}"),
+                }
+            }
             *guard = Some(Arc::new(
-                MpvIpcBackend::new(Some(app.clone()), &hwdec, &cache, &extra_args).await?,
+                MpvIpcBackend::new(Some(app.clone()), &hwdec, &cache, &args).await?,
             ));
         }
         guard
@@ -181,9 +196,32 @@ pub async fn set_volume(vol: i64) -> Result<()> {
 }
 
 #[tauri::command]
-pub async fn set_fullscreen(enabled: bool) -> Result<()> {
+pub async fn set_fullscreen(enabled: bool, app: AppHandle) -> Result<()> {
+    // Playing inside the window: the window goes fullscreen, and the page re-sizes the video.
+    if embed::in_use() {
+        let window = app.get_webview_window("main").ok_or_else(|| PlayerError::Io("The main window is not available".into()))?;
+        return window.set_fullscreen(enabled).map_err(|error| PlayerError::Io(error.to_string()));
+    }
     let backend = current_backend().await?;
     backend.set_fullscreen(enabled).await
+}
+
+/// Whether the video can be played inside the window, and why not when it cannot.
+#[tauri::command]
+pub fn embedded_player_support() -> embed::Support {
+    embed::support()
+}
+
+/// Gives the embedded video `height` pixels above the page, or hides it. Returns whether the
+/// video is now showing inside the window (false for the separate-window player, where this does
+/// nothing), so the page knows which layout it is in.
+#[tauri::command]
+pub fn set_embedded_video(visible: bool, height: i32, app: AppHandle) -> Result<bool> {
+    if !embed::in_use() {
+        return Ok(false);
+    }
+    embed::set_visible(&app, visible, height.clamp(0, 10_000)).map_err(PlayerError::Io)?;
+    Ok(visible && height > 0)
 }
 
 #[tauri::command]
@@ -245,8 +283,15 @@ pub async fn stop(app: AppHandle) -> Result<()> {
         let _ = backend.stop().await;
     }
     let _ = app.emit("player://state", PlayerStateEvent::default());
+    if embed::in_use() {
+        let _ = embed::set_visible(&app, false, 0);
+        embed::set_in_use(false);
+    }
     Ok(())
 }
+
+/// Opt-in: play video inside the Lumen window instead of a separate mpv window (X11 only).
+const EMBED_PLAYER_SETTING: &str = "embed_player";
 
 /// The user's opt-in to fetch from their own network (a NAS, Jellyfin on this machine).
 const ALLOW_LAN_SETTING: &str = "allow_lan_sources";
@@ -1260,6 +1305,7 @@ const USER_SETTING_KEYS: &[&str] = &[
     "cache",
     "extra_mpv_args",
     ALLOW_LAN_SETTING,
+    EMBED_PLAYER_SETTING,
     POSTER_FRAME_SETTING,
     SEARCH_LANGUAGE_SETTING,
     SEARCH_HIDE_OTHER_LANGUAGES_SETTING,

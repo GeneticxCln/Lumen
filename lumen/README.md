@@ -15,6 +15,20 @@ A Linux-first media library and player built with Tauri v2, React 19, TypeScript
 - Playback, appearance, source management, and keyboard preferences.
 - Native mpv playback on desktop.
 
+## Linux integration
+
+- **Open with Lumen.** The `.deb` declares the common video, audio and playlist types, so Lumen appears in "Open with". Video and audio files play, `.m3u`/`.m3u8` files are added as sources, and a subtitle file is added to what is playing.
+- **One window, one instance.** Opening something while Lumen is running hands it to the running window (and brings it forward) instead of starting a second copy.
+- **Links.** `lumen://play?url=https://…` plays a public web address. Because any web page can trigger such a link, Lumen always asks before playing it, and addresses on your local network are never opened this way.
+- **Drag and drop.** Drop video, audio, playlist or subtitle files on the window.
+- **Media keys.** Lumen registers with MPRIS, so media keys, the GNOME/KDE media widget and `playerctl` can see what is playing and play, pause, seek, change the volume and stop it.
+- **Package.** The `.deb` depends on `mpv` and recommends `ffmpeg` (used for thumbnails).
+- The OS keychain (used for the sync key and API keys) is the Secret Service on Linux; a bare window-manager session needs GNOME Keyring or KWallet running.
+
+### Playing inside the window (experimental)
+
+By default video plays in a separate mpv window. **Settings → Playback → Play video inside the Lumen window** puts the video in the main window instead, above the controls. It is off by default and needs an X11 window: it works when Lumen runs on X11 or XWayland (`GDK_BACKEND=x11 lumen`), and is unavailable (with an explanation in Settings) in a native Wayland window, which cannot host another program's video. Controls are shown beside the video, not drawn over it. Fullscreen in this mode makes the whole window fullscreen and has only been exercised under a virtual display.
+
 ## Sync
 
 Sync is optional and there are no accounts. The library, files, and playback all work without it.

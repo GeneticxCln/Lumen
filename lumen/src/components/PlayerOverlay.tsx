@@ -21,6 +21,8 @@ interface PlayerOverlayProps {
   onNextEpisode?: () => void;
   /** True while the stream is loading or refilling. The spinner ignores the idle state, so it stays visible after the controls fade. */
   buffering: boolean;
+  /** Keep the controls on screen. Used when the video sits above the page rather than behind the controls. */
+  controlsAlwaysVisible?: boolean;
   controls: ReactNode;
   children: ReactNode;
 }
@@ -35,6 +37,7 @@ export function PlayerOverlay({
   nextEpisodeTitle,
   onNextEpisode,
   buffering,
+  controlsAlwaysVisible = false,
   controls,
   children,
 }: PlayerOverlayProps) {
@@ -63,7 +66,7 @@ export function PlayerOverlay({
   }, [wake]);
 
   // Controls stay visible while paused, as they do in streaming apps.
-  const showControls = controlsAwake || paused;
+  const showControls = controlsAwake || paused || controlsAlwaysVisible;
 
   return (
     <section

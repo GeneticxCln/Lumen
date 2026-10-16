@@ -116,6 +116,22 @@ export async function setPlayerQuality(id: string) {
   return callBackend("set_player_quality", { id });
 }
 
+export interface EmbeddedSupport {
+  supported: boolean;
+  /** Why not, in words for the settings page. */
+  reason: string | null;
+}
+
+/** Whether video can play inside the window (X11 only for now). */
+export async function embeddedPlayerSupport() {
+  return callBackend<EmbeddedSupport>("embedded_player_support");
+}
+
+/** Gives the embedded video `height` pixels above the page, or hides it. Returns whether it is showing in the window. */
+export async function setEmbeddedVideo(visible: boolean, height: number) {
+  return callBackend<boolean>("set_embedded_video", { visible, height });
+}
+
 export async function getPlayerPrefs() {
   return callBackend<PlayerPrefs>("get_player_prefs_cmd");
 }

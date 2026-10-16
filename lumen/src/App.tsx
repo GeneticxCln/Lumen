@@ -17,7 +17,7 @@ import { LocalDevicePage } from "./components/LocalDevicePage";
 import { SearchEnginePage } from "./components/SearchEnginePage";
 import { usePlayer } from "./hooks/usePlayer";
 import { useChannels } from "./hooks/useChannels";
-import { activeProfile, boardNewChannelIds, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, listProfiles, setPlayerFullscreen, tmdbStatus } from "./lib/tauri";
+import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, listProfiles, setPlayerFullscreen, tmdbStatus } from "./lib/tauri";
 import type { BrowseTitle } from "./lib/types";
 import type { Channel, HistoryEntry, Profile } from "./lib/types";
 import { readPreferences, recommendChannels, catalogShelves, contentKind, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
@@ -265,6 +265,40 @@ function App() {
     setPlayerOpen(false);
     if (isFullscreen) void run(toggleFullscreen);
   }, [isFullscreen, toggleFullscreen]);
+
+  // Playing inside the window (experimental): give the video room above the page while the player
+  // is open, keep it sized as the window changes, and hand the room back when it closes.
+  const [embeddedActive, setEmbeddedActive] = useState(false);
+  const videoHeightRef = useRef(0);
+  useEffect(() => {
+    if (!player.currentUrl || !playerOpen) {
+      if (videoHeightRef.current > 0) {
+        videoHeightRef.current = 0;
+        void setEmbeddedVideo(false, 0).catch(() => {});
+      }
+      setEmbeddedActive(false);
+      return;
+    }
+    let active = true;
+    const apply = async () => {
+      // The page only sees the room left under the video, so the window height is both together.
+      const total = window.innerHeight + videoHeightRef.current;
+      const height = Math.round(total * (isFullscreen ? 0.85 : 0.62));
+      try {
+        const showing = await setEmbeddedVideo(true, height);
+        if (!active) return;
+        videoHeightRef.current = showing ? height : 0;
+        setEmbeddedActive(showing);
+      } catch {
+        if (active) setEmbeddedActive(false);
+      }
+    };
+    void apply();
+    const onResize = () => void apply();
+    window.addEventListener("resize", onResize);
+    return () => { active = false; window.removeEventListener("resize", onResize); };
+  }, [player.currentUrl, playerOpen, isFullscreen]);
+
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -546,11 +580,14 @@ function App() {
       nextEpisodeTitle={followingEpisode?.name}
       onNextEpisode={followingEpisode ? () => void play(followingEpisode) : undefined}
       buffering={player.playerState.buffering}
+      controlsAlwaysVisible={embeddedActive}
       onTogglePause={() => void run(player.togglePause)}
       onToggleFullscreen={() => void run(toggleFullscreen)}
       controls={<Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); closePlayer(); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} onSelectTrack={(kind, id) => void run(() => player.selectTrack(kind, id))} onSelectQuality={(id) => void run(() => player.selectQuality(id))} subtitleDelay={player.subtitleDelay} onSubtitleDelay={(direction) => void run(() => player.changeSubtitleDelay(direction))} onSubtitleScale={(direction) => void run(() => player.changeSubtitleScale(direction))} onAddSubtitle={() => void run(chooseSubtitleFile)} isFullscreen={isFullscreen} onToggleFullscreen={() => void run(toggleFullscreen)} />}
     >
-      <div className="player-native-card"><Icon name="play" size={40} /><h2>{player.currentTitle}</h2><p>Your video plays in the native mpv window.</p></div>
+      {embeddedActive
+        ? null
+        : <div className="player-native-card"><Icon name="play" size={40} /><h2>{player.currentTitle}</h2><p>Your video plays in the native mpv window.</p></div>}
     </PlayerOverlay>}
     </div>
     {locked && <ProfileGate profiles={profiles} initialProfileId={activeProfileId} onUnlocked={handleProfilesChanged} />}

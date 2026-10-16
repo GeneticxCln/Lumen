@@ -50,3 +50,6 @@ tauri-plugin-single-instance = "2"
 # feature: that switches zbus for the whole build, and the keychain (keyring -> zbus blocking) is
 # used from async code, where a tokio-backed blocking connection panics.
 mpris-server = "0.10"
+# The same GTK the window is built on, to give mpv a native area to draw into (embedded player).
+gtk = "0.18"
+gdkx11 = "0.18"

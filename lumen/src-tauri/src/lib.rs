@@ -4,6 +4,11 @@ pub use lumen_core::{
 };
 
 mod commands;
+#[cfg(target_os = "linux")]
+mod embed;
+#[cfg(not(target_os = "linux"))]
+#[path = "embed_unsupported.rs"]
+mod embed;
 mod launch;
 #[cfg(target_os = "linux")]
 mod mpris;
@@ -29,6 +34,7 @@ pub fn run() {
             // What this launch was asked to open ("Open with Lumen", a lumen:// link).
             let args: Vec<String> = std::env::args().skip(1).collect();
             launch::handle_arguments(app.handle(), &args, std::env::current_dir().ok().as_deref());
+            embed::detect_display();
             #[cfg(target_os = "linux")]
             mpris::start(app.handle().clone());
             let app_handle = app.handle().clone();
@@ -67,6 +73,8 @@ pub fn run() {
             set_fullscreen,
             set_player_track,
             set_player_quality,
+            embedded_player_support,
+            set_embedded_video,
             get_player_prefs_cmd,
             set_player_prefs_cmd,
             set_subtitle_delay_cmd,

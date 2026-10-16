@@ -26,7 +26,8 @@ Tauri v2 shell (`src-tauri`) over a UI-agnostic Rust core (`crates/lumen-core`: 
 ## Known limitations and open work
 
 - **Release packaging is not proven.** No `.deb`, AppImage or Flatpak has been built or installed on a clean machine, and there is no CI workflow in the repository yet.
-- **Native playback is not verified on every desktop.** Rust tests pass and mpv IPC is exercised, but end-to-end playback on GNOME Wayland, Hyprland and X11 has not been checked here. Video is still a separate mpv window (single-window playback is not done).
+- **Native playback is not verified on every desktop.** Rust tests pass, mpv IPC and MPRIS are exercised against a real mpv and a real D-Bus session, and the whole path (launch, page, mpv, MPRIS) was run in the real app under a virtual X display, but playback on real GNOME, KDE and Hyprland sessions has not been checked.
+- **Single-window playback is an experiment.** Playing inside the Lumen window works on X11/XWayland (verified by screenshot under Xvfb: one window, video above the controls, setting off gives the separate mpv window). It is unavailable in a native Wayland window, controls are beside the video rather than over it, and fullscreen in this mode is untested on a real window manager.
 - **Sync data model.** Synced records still carry the (credential-stripped) stream URL beside the `content_key`; the server cannot read either. Query parameters whose names contain `key`, `auth`, `token`, `secret` or `pass` are removed from synced URLs, which can break a stream whose identity lives in such a parameter on the other device.
 - **Search and discovery** classify movies, series and live TV from names and groups, not catalog metadata. All library rows are held in memory; shelves virtualize the DOM but very large libraries need pagination.
 - **Clippy** reports a few style lints in `extract.rs`, `harvest.rs` and `search.rs`; they are not enforced.

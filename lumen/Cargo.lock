@@ -2591,6 +2591,8 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "chrono",
+ "gdkx11",
+ "gtk",
  "keyring",
  "lumen-core",
  "mpris-server",
