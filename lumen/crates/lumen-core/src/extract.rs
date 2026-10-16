@@ -526,16 +526,14 @@ pub fn parse_ytdlp_json(raw_json: &[u8], fallback_title: &str, allow_lan: bool) 
     // Fallback to `formats` list.
     if video_url.is_none()
         && let Some(formats) = info.get("formats").and_then(|f| f.as_array())
-    {
-        if let Some(last) = formats
+        && let Some(last) = formats
             .iter()
             .rev()
             .find(|f| f.get("url").and_then(|u| u.as_str()).is_some_and(|s| !s.trim().is_empty()))
-        {
-            video_url = last.get("url").and_then(|u| u.as_str()).map(|s| s.trim().to_string());
-            if headers.is_empty() {
-                headers = clean_headers(last.get("http_headers"));
-            }
+    {
+        video_url = last.get("url").and_then(|u| u.as_str()).map(|s| s.trim().to_string());
+        if headers.is_empty() {
+            headers = clean_headers(last.get("http_headers"));
         }
     }
 

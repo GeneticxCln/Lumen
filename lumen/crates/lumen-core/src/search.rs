@@ -951,7 +951,7 @@ pub fn deduplicate_results(
         if dup.status.is_none() {
             dup.status = item.status;
         }
-        if dup.available.unwrap_or(false) == false && item.available == Some(true) {
+        if !dup.available.unwrap_or(false) && item.available == Some(true) {
             dup.available = Some(true);
         } else if dup.available.is_none() && item.available.is_some() {
             dup.available = item.available;
