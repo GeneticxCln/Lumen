@@ -6,6 +6,7 @@ import { remainingLabel } from "../lib/board";
 import type { ContinueItem } from "../lib/board";
 import { TMDB_BACKDROP_SIZE, tmdbImage } from "../lib/tauri";
 import { Icon } from "./Icon";
+import { t } from "../i18n/index.ts";
 
 export function ChannelArtwork({ channel, hero = false }: { channel: Channel; hero?: boolean }) {
   const [artFailed, setArtFailed] = useState(false);
@@ -54,14 +55,14 @@ export function BrowseShelf({ title, subtitle, titles, compact }: BrowseShelfPro
   });
   return <section className="media-shelf" aria-label={title}>
     <div className="shelf-heading"><div><h2>{title}<span className="shelf-count">{titles.length}</span></h2>{subtitle && <p>{subtitle}</p>}</div>
-      <div className="shelf-arrows"><button className="icon-button" aria-label={`Scroll ${title} left`} onClick={() => scroll(-1)}><Icon name="chevron" style={{ transform: "rotate(180deg)" }} /></button><button className="icon-button" aria-label={`Scroll ${title} right`} onClick={() => scroll(1)}><Icon name="chevron" /></button></div>
+      <div className="shelf-arrows"><button className="icon-button" aria-label={t("shelf.scrollLeft", { title })} onClick={() => scroll(-1)}><Icon name="chevron" style={{ transform: "rotate(180deg)" }} /></button><button className="icon-button" aria-label={t("shelf.scrollRight", { title })} onClick={() => scroll(1)}><Icon name="chevron" /></button></div>
     </div>
-    <div className="shelf-track" ref={ref} tabIndex={0} aria-label={`${title} titles`}>
+    <div className="shelf-track" ref={ref} tabIndex={0} aria-label={t("shelf.titlesLabel", { title })}>
       <div style={{ display: "flex", gap: 12, width: "max-content", paddingRight: 12 }}>
         {titles.map((item) => <article className="media-card" key={`${item.tmdb_type}-${item.tmdb_id}`} style={{ width: width - 12 }}>
           <div className="card-art-button">
             <BrowseArtwork title={item} />
-            <span className="card-badge">Not in library</span>
+            <span className="card-badge">{t("shelf.notInLibrary")}</span>
           </div>
           <div className="card-bottom"><div><h3>{item.name}</h3><p>{browseCaption(item)}</p></div></div>
         </article>)}
@@ -88,21 +89,21 @@ export function MediaShelf({ title, subtitle, channels, favorites, onPlay, onDet
   if (!channels.length) return null;
   return <section className="media-shelf" aria-label={title}>
     <div className="shelf-heading"><div><h2>{title}<span className="shelf-count">{channels.length}</span></h2>{subtitle && <p>{subtitle}</p>}</div>
-      <div className="shelf-arrows"><button className="icon-button" aria-label={`Scroll ${title} left`} onClick={() => ref.current?.scrollBy({ left: -(ref.current.clientWidth * .8), behavior: document.documentElement.classList.contains("reduce-motion") || window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" })}><Icon name="chevron" style={{ transform: "rotate(180deg)" }} /></button><button className="icon-button" aria-label={`Scroll ${title} right`} onClick={() => ref.current?.scrollBy({ left: ref.current.clientWidth * .8, behavior: document.documentElement.classList.contains("reduce-motion") || window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" })}><Icon name="chevron" /></button></div>
+      <div className="shelf-arrows"><button className="icon-button" aria-label={t("shelf.scrollLeft", { title })} onClick={() => ref.current?.scrollBy({ left: -(ref.current.clientWidth * .8), behavior: document.documentElement.classList.contains("reduce-motion") || window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" })}><Icon name="chevron" style={{ transform: "rotate(180deg)" }} /></button><button className="icon-button" aria-label={t("shelf.scrollRight", { title })} onClick={() => ref.current?.scrollBy({ left: ref.current.clientWidth * .8, behavior: document.documentElement.classList.contains("reduce-motion") || window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" })}><Icon name="chevron" /></button></div>
     </div>
-    <div className="shelf-track" ref={ref} tabIndex={0} aria-label={`${title} titles`}>
+    <div className="shelf-track" ref={ref} tabIndex={0} aria-label={t("shelf.titlesLabel", { title })}>
       <div style={{ width: virtualizer.getTotalSize(), height: compact ? 190 : 223, position: "relative" }}>
         {virtualizer.getVirtualItems().map((item) => {
           const channel = channels[item.index];
           const favorite = favorites.has(channel.id);
           return <article className={`media-card ${ranked ? "ranked-card" : ""}`} key={channel.id} style={{ position: "absolute", top: 0, left: 0, width: width - 12, transform: `translateX(${item.start}px)` }}>
-            <button className="card-art-button" aria-label={`Play ${channel.name}`} onClick={() => onPlay(channel)}>
+            <button className="card-art-button" aria-label={t("episodes.play", { name: channel.name })} onClick={() => onPlay(channel)}>
               <ChannelArtwork key={channel.id} channel={channel} />
               <span className="card-play"><Icon name="play" size={24} /></span>
-              <span className={`card-badge ${channel.last_error ? "unavailable" : ""}`}>{channel.last_error ? "Unavailable" : channel.last_ok ? "Last checked OK" : "Stream"}</span>
+              <span className={`card-badge ${channel.last_error ? "unavailable" : ""}`}>{channel.last_error ? t("transport.qualityUnavailable") : channel.last_ok ? t("shelf.lastCheckedOk") : t("shelf.stream")}</span>
               {ranked && <span className="card-rank">{item.index + 1}</span>}
             </button>
-            <div className="card-bottom"><div><h3>{channel.name}</h3><p>{channel.group_title || "Your library"}</p></div><button className={`icon-button circle ${favorite ? "is-saved" : ""}`} aria-label={`${favorite ? "Remove" : "Add"} ${channel.name} ${favorite ? "from" : "to"} My List`} aria-pressed={favorite} onClick={() => onFavorite(channel.id)}><Icon name={favorite ? "check" : "plus"} size={17} /></button><button className="icon-button circle" aria-label={`Details for ${channel.name}`} onClick={() => onDetails(channel)}><Icon name="info" size={17} /></button></div>
+            <div className="card-bottom"><div><h3>{channel.name}</h3><p>{channel.group_title || t("shelf.yourLibrary")}</p></div><button className={`icon-button circle ${favorite ? "is-saved" : ""}`} aria-label={favorite ? t("shelf.removeFromList", { name: channel.name }) : t("shelf.addToList", { name: channel.name })} aria-pressed={favorite} onClick={() => onFavorite(channel.id)}><Icon name={favorite ? "check" : "plus"} size={17} /></button><button className="icon-button circle" aria-label={t("shelf.details", { name: channel.name })} onClick={() => onDetails(channel)}><Icon name="info" size={17} /></button></div>
           </article>;
         })}
       </div>
@@ -122,20 +123,20 @@ export function ContinueShelf({ items, compact, onPlayChannel, onPlayFile }: Con
   const ref = useRef<HTMLDivElement>(null);
   const width = compact ? 224 : 280;
   if (!items.length) return null;
-  const title = "Continue watching";
+  const title = t("shelf.continue.title");
   return <section className="media-shelf" aria-label={title}>
-    <div className="shelf-heading"><div><h2>{title}<span className="shelf-count">{items.length}</span></h2><p>Pick up exactly where you stopped.</p></div></div>
-    <div className="shelf-track" ref={ref} tabIndex={0} aria-label={`${title} titles`}>
+    <div className="shelf-heading"><div><h2>{title}<span className="shelf-count">{items.length}</span></h2><p>{t("shelf.continue.subtitle")}</p></div></div>
+    <div className="shelf-track" ref={ref} tabIndex={0} aria-label={t("shelf.titlesLabel", { title })}>
       <div style={{ display: "flex", gap: 12, width: "max-content", paddingRight: 12 }}>
         {items.map((item) => <article className="media-card" key={item.key} style={{ width: width - 12 }}>
-          <button className="card-art-button" aria-label={`Resume ${item.title}`} onClick={() => item.channel ? onPlayChannel(item.channel) : onPlayFile(item.path!, item.title)}>
+          <button className="card-art-button" aria-label={t("shelf.continue.resume", { title: item.title })} onClick={() => item.channel ? onPlayChannel(item.channel) : onPlayFile(item.path!, item.title)}>
             {item.channel
               ? <ChannelArtwork channel={item.channel} />
               : <div className="channel-art"><img className="landscape-art" src="/artwork/landscape.svg" alt="" aria-hidden="true" /><span className="art-title">{item.title}</span></div>}
             <span className="card-play"><Icon name="play" size={24} /></span>
-            <span className="card-progress" role="progressbar" aria-label={`${item.title} progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(item.progress * 100)}><span style={{ width: `${Math.round(item.progress * 100)}%` }} /></span>
+            <span className="card-progress" role="progressbar" aria-label={t("shelf.continue.progress", { title: item.title })} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(item.progress * 100)}><span style={{ width: `${Math.round(item.progress * 100)}%` }} /></span>
           </button>
-          <div className="card-bottom"><div><h3>{item.title}</h3><p>{remainingLabel(item.remainingSeconds)}{item.path ? " · On this computer" : ""}</p></div></div>
+          <div className="card-bottom"><div><h3>{item.title}</h3><p>{item.path ? t("shelf.continue.onThisComputer", { remaining: remainingLabel(item.remainingSeconds) }) : remainingLabel(item.remainingSeconds)}</p></div></div>
         </article>)}
       </div>
     </div>
@@ -156,17 +157,17 @@ export interface UpcomingCard {
 export function UpcomingShelf({ items, compact, onDetails }: { items: UpcomingCard[]; compact: boolean; onDetails: (channel: Channel) => void }) {
   const width = compact ? 224 : 280;
   if (!items.length) return null;
-  const title = "Coming up";
+  const title = t("shelf.upcoming.title");
   return <section className="media-shelf" aria-label={title}>
-    <div className="shelf-heading"><div><h2>{title}<span className="shelf-count">{items.length}</span></h2><p>New and upcoming episodes of series you follow, from TMDB.</p></div></div>
-    <div className="shelf-track" tabIndex={0} aria-label={`${title} series`}>
+    <div className="shelf-heading"><div><h2>{title}<span className="shelf-count">{items.length}</span></h2><p>{t("shelf.upcoming.subtitle")}</p></div></div>
+    <div className="shelf-track" tabIndex={0} aria-label={t("shelf.seriesLabel", { title })}>
       <div style={{ display: "flex", gap: 12, width: "max-content", paddingRight: 12 }}>
         {items.map((item) => <article className="media-card" key={item.key} style={{ width: width - 12 }}>
-          <button className="card-art-button" aria-label={`${item.name}: ${item.text}`} disabled={!item.channel} onClick={() => item.channel && onDetails(item.channel)}>
+          <button className="card-art-button" aria-label={t("shelf.upcoming.card", { name: item.name, text: item.text })} disabled={!item.channel} onClick={() => item.channel && onDetails(item.channel)}>
             {item.channel
               ? <ChannelArtwork channel={item.channel} />
               : <div className="channel-art"><img className="landscape-art" src="/artwork/landscape.svg" alt="" aria-hidden="true" /><span className="art-title">{item.name}</span></div>}
-            <span className="card-badge">{item.kind === "aired" ? "New episode" : "Upcoming"}</span>
+            <span className="card-badge">{item.kind === "aired" ? t("shelf.upcoming.newEpisode") : t("shelf.upcoming.upcoming")}</span>
           </button>
           <div className="card-bottom"><div><h3>{item.name}</h3><p>{item.text}</p></div></div>
         </article>)}
