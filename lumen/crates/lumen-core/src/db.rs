@@ -1239,13 +1239,15 @@ pub async fn add_history(
         _ => None,
     };
 
+    // Resolved before the transaction opens: it reads through the pool, and a transaction already
+    // holds a connection, so asking for a second one while holding the first can exhaust the pool.
+    let content_key = resolve_content_key(pool, channel_id, path).await;
+
     let now = Utc::now().timestamp();
     let mut tx = pool
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
-
-    let content_key = resolve_content_key(pool, channel_id, path).await;
 
     let previous = sqlx::query(
         "SELECT channel_id, position, duration FROM history WHERE profile_id = ? AND (content_key = ? OR path = ?) ORDER BY played_at DESC, id DESC LIMIT 1",
