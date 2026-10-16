@@ -569,6 +569,7 @@ impl MpvIpcBackend {
         });
 
         let pending_writer = pending.clone();
+        let log_writer = log.clone();
         tokio::spawn(async move {
             while let Some((req, responder)) = rx.recv().await {
                 let req_id = req.request_id;
@@ -589,11 +590,17 @@ impl MpvIpcBackend {
                 };
 
                 if writer_half.write_all(data.as_bytes()).await.is_err() {
+                    // The pipe is gone because mpv itself exited; say what it printed before it
+                    // did, instead of leaving this as a bare "write failed".
+                    let tail = log_tail(log_writer.as_ref());
+                    let message = if tail.is_empty() {
+                        "mpv stopped responding (its control connection closed)".to_string()
+                    } else {
+                        format!("mpv stopped responding (its control connection closed): {tail}")
+                    };
                     let mut map = pending_writer.lock().await;
                     if let Some(r) = map.remove(&req_id) {
-                        let _ = r.send(Err(PlayerError::Mpv(
-                            "Failed to write to mpv socket".into(),
-                        )));
+                        let _ = r.send(Err(PlayerError::Mpv(message)));
                     }
                     break;
                 }
@@ -1028,6 +1035,96 @@ mod tests {
         assert!(wait_for_socket(&path, &mut engine, None).await.is_ok());
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// Accepts one connection on `path`, answers every request on it with `"success"` (as the
+    /// setup commands `connect` sends expect), then closes the connection after `alive_for` —
+    /// standing in for mpv dying partway through a session rather than at startup.
+    async fn accept_respond_then_vanish(path: String, alive_for: Duration) {
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let (reader_half, mut writer_half) = stream.into_split();
+        let mut reader = BufReader::new(reader_half);
+        let respond = async {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let Some(id) = line
+                            .split_once("\"request_id\":")
+                            .and_then(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).next())
+                        else {
+                            continue;
+                        };
+                        let reply = format!("{{\"request_id\":{id},\"error\":\"success\"}}\n");
+                        if writer_half.write_all(reply.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+        let _ = tokio::time::timeout(alive_for, respond).await;
+        // Both halves drop here: the peer's next write hits a closed pipe.
+    }
+
+    #[tokio::test]
+    async fn a_player_that_dies_mid_session_explains_itself_on_the_next_command() {
+        let path = MpvIpcBackend::new_socket_path().unwrap();
+        tokio::spawn(accept_respond_then_vanish(
+            path.clone(),
+            Duration::from_millis(200),
+        ));
+        let child = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let log = MpvLog::default();
+        log.lock()
+            .unwrap()
+            .push_back("[ao/pulse] Context status failed.".to_string());
+        // `connect_logged` itself sends and awaits the property-observation setup calls, so by
+        // the time it returns the fake mpv has already answered them.
+        let backend = MpvIpcBackend::connect_logged(None, path, Engine::Process(child), Some(log))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let error = backend.pause().await.unwrap_err();
+        let text = String::from(error);
+        assert!(text.contains("stopped responding"), "{text}");
+        assert!(
+            text.contains("Context status failed"),
+            "mpv's own words are kept: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_same_failure_without_a_log_still_says_the_connection_closed() {
+        let path = MpvIpcBackend::new_socket_path().unwrap();
+        tokio::spawn(accept_respond_then_vanish(
+            path.clone(),
+            Duration::from_millis(200),
+        ));
+        let child = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let backend = MpvIpcBackend::connect(None, path, Engine::Process(child))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let error = backend.pause().await.unwrap_err();
+        assert_eq!(
+            String::from(error),
+            "mpv error: mpv stopped responding (its control connection closed)"
+        );
+    }
+
     use std::io::Write;
     use std::path::PathBuf;
 
