@@ -71,6 +71,12 @@ The server is a small Cloudflare Worker with a D1 database in `sync-server/`. De
 
 No Netflix catalog, paid-channel access, DRM bypass, or external recommendation service is included. Artwork fallbacks are original local SVGs. Movie/series/live sections use playlist naming/group heuristics.
 
+## Packages
+
+`npx tauri build --bundles deb,appimage` (from `lumen/`, with the Tauri system libraries installed) produces a `.deb` and an AppImage in `target/release/bundle/`. Lumen starts `mpv` from the `PATH` rather than bundling it, so the `.deb` depends on `mpv` and an AppImage needs `mpv` installed on the host. `ffmpeg` is recommended for thumbnails, and `yt-dlp` is downloaded and verified by Lumen itself (Settings → Metadata → Update extractor).
+
+Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds both packages and attaches them, with a `SHA256SUMS` file, to a **draft** GitHub release. Set the repository variable `LUMEN_SYNC_URL` to bake in a default sync server. Both package types have been built and inspected here (desktop entry, file types, `lumen://` handler, dependencies); neither has been installed on a clean machine, and the release workflow itself has not been run. There is no Flatpak, AUR or signed auto-update yet.
+
 ## Development
 
 Use the existing npm lockfile with Node 24+:
