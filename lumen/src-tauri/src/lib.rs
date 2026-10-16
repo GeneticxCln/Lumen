@@ -5,6 +5,8 @@ pub use lumen_core::{
 
 mod commands;
 mod launch;
+#[cfg(target_os = "linux")]
+mod mpris;
 mod playback;
 mod sync;
 
@@ -27,6 +29,8 @@ pub fn run() {
             // What this launch was asked to open ("Open with Lumen", a lumen:// link).
             let args: Vec<String> = std::env::args().skip(1).collect();
             launch::handle_arguments(app.handle(), &args, std::env::current_dir().ok().as_deref());
+            #[cfg(target_os = "linux")]
+            mpris::start(app.handle().clone());
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Ok(app_dir) = app_handle.path().app_data_dir() {

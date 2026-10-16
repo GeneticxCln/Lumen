@@ -48,7 +48,7 @@ pub(crate) async fn ensure_db(app: &AppHandle) -> Result<&'static sqlx::Pool<sql
 }
 
 /// The running backend, or an error when nothing is playing. Holds the lock only to clone.
-async fn current_backend() -> Result<Arc<MpvIpcBackend>> {
+pub(crate) async fn current_backend() -> Result<Arc<MpvIpcBackend>> {
     let cell = get_playback_backend().await?;
     let guard = cell.lock().await;
     guard
@@ -59,6 +59,22 @@ async fn current_backend() -> Result<Arc<MpvIpcBackend>> {
 
 #[tauri::command]
 pub async fn play_url(
+    url: String,
+    headers: Option<serde_json::Value>,
+    channel_id: Option<i64>,
+    volume: Option<i64>,
+    audio_url: Option<String>,
+    app: AppHandle,
+) -> Result<()> {
+    let result = play_url_inner(url, headers, channel_id, volume, audio_url, app).await;
+    // The page shows the error to the user; this line is for anyone reading the log afterwards.
+    if let Err(error) = &result {
+        eprintln!("lumen: could not start playback: {error}");
+    }
+    result
+}
+
+async fn play_url_inner(
     url: String,
     headers: Option<serde_json::Value>,
     channel_id: Option<i64>,

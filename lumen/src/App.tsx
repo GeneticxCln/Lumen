@@ -218,6 +218,19 @@ function App() {
     return () => { disposed = true; unlisten?.(); };
   }, []);
 
+  // Stop pressed in the desktop's media controls: do what the Stop button does, so progress is saved.
+  const stopFromDesktopRef = useRef<() => void>(() => {});
+  stopFromDesktopRef.current = () => { void run(async () => { await player.stopPlayback(); closePlayer(); }); };
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/api/event").then(async ({ listen }) => {
+      const off = await listen("mpris://stop", () => stopFromDesktopRef.current());
+      if (disposed) off(); else unlisten = off;
+    }).catch(() => {});
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+
   // Dropping files on the window opens them the same way.
   const [dragging, setDragging] = useState(false);
   useEffect(() => {

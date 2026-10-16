@@ -61,6 +61,16 @@ pub struct MpvIpcBackend {
     app: Option<AppHandle>,
 }
 
+/// The longest socket file name made in the directory: `/mpv-<pid>-<8 hex>.sock`.
+const SOCKET_NAME_ALLOWANCE: usize = 32;
+/// A Unix socket path must fit `sun_path` (104 bytes on some systems, 108 on Linux). A directory
+/// that would push it over makes mpv fail to bind and the app wait out a timeout, so it is skipped.
+const SOCKET_PATH_LIMIT: usize = 104;
+
+fn socket_path_fits(dir: &std::path::Path) -> bool {
+    dir.as_os_str().len() + SOCKET_NAME_ALLOWANCE < SOCKET_PATH_LIMIT
+}
+
 /// A directory only this user can enter, for mpv's control socket. mpv's IPC accepts commands
 /// that run programs, so the socket must not sit where another local user can reach it.
 /// `$XDG_RUNTIME_DIR` (mode 0700, per user) is the right place; if it is missing, a private
@@ -69,9 +79,11 @@ fn private_socket_dir() -> Result<std::path::PathBuf> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
     if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)
-        && runtime.is_dir() {
-            return Ok(runtime);
-        }
+        && runtime.is_dir()
+        && socket_path_fits(&runtime)
+    {
+        return Ok(runtime);
+    }
     let dir = std::env::temp_dir().join("lumen-ipc");
     match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
         Ok(()) => {}
@@ -625,6 +637,14 @@ impl MpvIpcBackend {
         }
     }
 
+    /// mpv's current volume (0 to 150, 100 being unamplified), or `None` if it cannot be read.
+    pub async fn volume(&self) -> Option<f64> {
+        self.send_command(vec![MpvValue::String("get_property".into()), MpvValue::String("volume".into())])
+            .await
+            .ok()
+            .and_then(|value| value.as_f64())
+    }
+
     /// Shifts the subtitles of the current file by `seconds` (positive shows them later).
     pub async fn set_subtitle_delay(&self, seconds: f64) -> Result<f64> {
         let delay = lumen_core::player_prefs::clamp_delay(seconds)?;
@@ -660,6 +680,13 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::path::PathBuf;
+
+    #[test]
+    fn a_runtime_directory_too_long_for_a_unix_socket_is_not_used() {
+        assert!(socket_path_fits(std::path::Path::new("/run/user/1000")));
+        let long = format!("/tmp/{}", "x".repeat(90));
+        assert!(!socket_path_fits(std::path::Path::new(&long)));
+    }
 
     /// These tests drive a real mpv. On a machine without it (a minimal CI image) they skip, with
     /// a message, rather than failing for a reason unrelated to the code under test.
