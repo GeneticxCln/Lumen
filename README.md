@@ -165,7 +165,7 @@ Layout:
 | `lumen/packaging` | Flatpak manifest, Arch `PKGBUILD`, desktop file and app data. |
 | `.github/workflows` | CI, packaging and release workflows. |
 
-`npx tauri build --bundles deb,appimage` (from `lumen/`) produces a `.deb` and an AppImage in `target/release/bundle/`. Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds both and attaches them, with a `SHA256SUMS` file, to a **draft** GitHub release; publish it for the updater to see it. Set the repository variable `LUMEN_SYNC_URL` to bake in a default sync server.
+`npx tauri build --bundles deb,appimage` (from `lumen/`) produces a `.deb` and an AppImage in `target/release/bundle/`. Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds both and attaches them, with a `SHA256SUMS` file, to a published GitHub release (a tag with a suffix such as `v0.2.0-rc.1` becomes a pre-release, which the updater ignores). Lumen updates itself from the latest published release, so a tag is a release: check the version in `tauri.conf.json` and `Cargo.toml` matches it first. Set the repository variable `LUMEN_SYNC_URL` to bake in a default sync server.
 
 ## Checks
 

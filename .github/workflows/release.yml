@@ -1,7 +1,9 @@
 name: Release
 
 # Builds Linux packages when a version tag is pushed (git tag v0.1.0 && git push origin v0.1.0) and
-# publishes them, with a SHA256SUMS file, as a draft GitHub release for a person to review and publish.
+# publishes them, with a SHA256SUMS file, as a GitHub release. The release is public at once because
+# Lumen updates itself from the latest published release; a tag with a suffix (v0.2.0-rc.1) is
+# published as a pre-release, which the updater ignores.
 on:
   push:
     tags: ["v*"]
@@ -52,7 +54,9 @@ jobs:
           cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
-          draft: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
           files: |
             lumen/target/release/bundle/deb/*.deb
             lumen/target/release/bundle/appimage/*.AppImage
