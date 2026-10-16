@@ -22,6 +22,7 @@ interface TransportProps {
   onSubtitleDelay: (direction: 1 | -1) => void;
   onSubtitleScale: (direction: 1 | -1) => void;
   onAddSubtitle: () => void;
+  onFindSubtitles: () => void;
 }
 
 export function Transport({
@@ -42,6 +43,7 @@ export function Transport({
   onSubtitleDelay,
   onSubtitleScale,
   onAddSubtitle,
+  onFindSubtitles,
 }: TransportProps) {
   const hasSubtitles = state.tracks.some((track) => track.kind === "subtitle");
   const formatTime = (seconds: number) => {
@@ -155,6 +157,7 @@ export function Transport({
                 <button className="icon-button" disabled={!hasSubtitles} aria-label={t("transport.subtitlesSmaller")} title={t("transport.subtitlesSmaller")} onClick={() => onSubtitleScale(-1)}>{t("transport.subtitlesSmallerGlyph")}</button>
                 <button className="icon-button" disabled={!hasSubtitles} aria-label={t("transport.subtitlesLarger")} title={t("transport.subtitlesLarger")} onClick={() => onSubtitleScale(1)}>{t("transport.subtitlesLargerGlyph")}</button>
                 <button className="icon-button" aria-label={t("transport.addSubtitle")} title={t("transport.addSubtitle")} onClick={onAddSubtitle}>{t("transport.addSubtitleGlyph")}</button>
+                <button className="icon-button" aria-label={t("transport.findSubtitles")} title={t("transport.findSubtitles")} onClick={onFindSubtitles}>{t("transport.findSubtitlesGlyph")}</button>
               </div>
             </div>
             <label className="player-option">

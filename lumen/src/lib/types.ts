@@ -280,3 +280,41 @@ export interface PlayerPrefs {
   /** 100 is the bottom of the picture, 0 the top. */
   subPos: number;
 }
+
+/** What is playing, for subtitle lookups. */
+export interface PlayingItem {
+  channelId?: number;
+  /** The address or file path being played. */
+  source: string;
+  /** The title shown to the user. */
+  name?: string;
+}
+
+export interface SubtitleCandidate {
+  provider: string;
+  id: string;
+  /** ISO 639-1. */
+  language: string;
+  release: string;
+  hearingImpaired: boolean;
+  downloads: number | null;
+  fps: number | null;
+  /** The service says it matches this exact file. */
+  hashMatch: boolean;
+  score: number;
+  url: string;
+}
+
+export interface SubtitleSearch {
+  searched: { title: string; year: number | null; season: number | null; episode: number | null; languages: string[] };
+  candidates: SubtitleCandidate[];
+  problems: { provider: string; message: string }[];
+  /** Codes: no_title, no_episode, no_id. */
+  hints: string[];
+}
+
+export interface SubtitleState {
+  /** The user has agreed to look subtitles up online. */
+  online: boolean;
+  services: { id: string; enabled: boolean }[];
+}

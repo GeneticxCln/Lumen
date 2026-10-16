@@ -17,7 +17,7 @@ import { LocalDevicePage } from "./components/LocalDevicePage";
 import { SearchEnginePage } from "./components/SearchEnginePage";
 import { usePlayer } from "./hooks/usePlayer";
 import { useChannels } from "./hooks/useChannels";
-import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, listProfiles, setPlayerFullscreen, tmdbStatus } from "./lib/tauri";
+import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, getPlayerPrefs, listProfiles, setPlayerFullscreen, tmdbStatus } from "./lib/tauri";
 import type { BrowseTitle } from "./lib/types";
 import type { Channel, HistoryEntry, Profile } from "./lib/types";
 import { readPreferences, recommendChannels, catalogShelves, contentKind, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
@@ -29,6 +29,7 @@ import type { OpenTarget } from "./lib/launch";
 import { describeUpcoming } from "./lib/series";
 import type { EpisodeMark, UpcomingSeries } from "./lib/series";
 import { EpisodeList } from "./components/EpisodeList";
+import { FindSubtitles } from "./components/FindSubtitles";
 import type { UpcomingCard } from "./components/MediaShelf";
 import type { FacetSelection, Preferences } from "./lib/discovery";
 import "./App.css";
@@ -162,6 +163,18 @@ function App() {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({ filters: [{ name: "Subtitles", extensions: ["srt", "ass", "ssa", "vtt", "sub"] }] });
     if (typeof selected === "string") await player.addSubtitle(selected);
+  }
+
+  // Opens the online subtitle search for what is playing, starting from the profile's language.
+  const [findingSubtitles, setFindingSubtitles] = useState(false);
+  const [subtitleLanguage, setSubtitleLanguage] = useState("");
+  async function openSubtitleFinder() {
+    try {
+      setSubtitleLanguage((await getPlayerPrefs()).subtitles);
+    } catch {
+      setSubtitleLanguage("");
+    }
+    setFindingSubtitles(true);
   }
 
   async function playFile(path: string, name?: string, headers?: Record<string, string>, audioUrl?: string, channelId?: number) {
@@ -309,6 +322,8 @@ function App() {
       // Space on a focused button already activates that button; handling it here would toggle twice.
       if (event.key === " " && target?.closest("button, a")) return;
       if (!playerOpen && document.querySelector("dialog[open]")) return;
+      // The subtitle search is a dialog over the player: its keys (Escape closes only the dialog) belong to it.
+      if (findingSubtitles) return;
       const shortcut = playerShortcutFor(event.key);
       if (!shortcut || (shortcut === "close" && !playerOpen)) return;
       event.preventDefault();
@@ -326,7 +341,7 @@ function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [preferences.keyboardShortcuts, player, playerOpen, toggleFullscreen, closePlayer]);
+  }, [preferences.keyboardShortcuts, player, playerOpen, findingSubtitles, toggleFullscreen, closePlayer]);
 
   // Files on this computer belong to the Local Device page only; every other tab shows sources.
   const available = useMemo(() => library.channels.filter((channel) => !isLocalPath(channel.url) && (!preferences.hideUnavailable || !channel.last_error)), [library.channels, preferences.hideUnavailable]);
@@ -583,13 +598,19 @@ function App() {
       controlsAlwaysVisible={embeddedActive}
       onTogglePause={() => void run(player.togglePause)}
       onToggleFullscreen={() => void run(toggleFullscreen)}
-      controls={<Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); closePlayer(); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} onSelectTrack={(kind, id) => void run(() => player.selectTrack(kind, id))} onSelectQuality={(id) => void run(() => player.selectQuality(id))} subtitleDelay={player.subtitleDelay} onSubtitleDelay={(direction) => void run(() => player.changeSubtitleDelay(direction))} onSubtitleScale={(direction) => void run(() => player.changeSubtitleScale(direction))} onAddSubtitle={() => void run(chooseSubtitleFile)} isFullscreen={isFullscreen} onToggleFullscreen={() => void run(toggleFullscreen)} />}
+      controls={<Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); closePlayer(); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} onSelectTrack={(kind, id) => void run(() => player.selectTrack(kind, id))} onSelectQuality={(id) => void run(() => player.selectQuality(id))} subtitleDelay={player.subtitleDelay} onSubtitleDelay={(direction) => void run(() => player.changeSubtitleDelay(direction))} onSubtitleScale={(direction) => void run(() => player.changeSubtitleScale(direction))} onAddSubtitle={() => void run(chooseSubtitleFile)} onFindSubtitles={() => void run(openSubtitleFinder)} isFullscreen={isFullscreen} onToggleFullscreen={() => void run(toggleFullscreen)} />}
     >
       {embeddedActive
         ? null
         : <div className="player-native-card"><Icon name="play" size={40} /><h2>{player.currentTitle}</h2><p>Your video plays in the native mpv window.</p></div>}
     </PlayerOverlay>}
     </div>
+    <FindSubtitles
+      open={findingSubtitles}
+      item={player.currentUrl ? { channelId: player.currentChannelId, source: player.currentUrl, name: player.currentTitle || undefined } : null}
+      preferredLanguage={subtitleLanguage}
+      onClose={() => setFindingSubtitles(false)}
+    />
     {locked && <ProfileGate profiles={profiles} initialProfileId={activeProfileId} onUnlocked={handleProfilesChanged} />}
   </>;
 }

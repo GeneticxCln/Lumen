@@ -22,6 +22,10 @@ import type {
   SyncState,
   SyncStatus,
   PlayerPrefs,
+  PlayingItem,
+  SubtitleCandidate,
+  SubtitleSearch,
+  SubtitleState,
   BrowseTitle,
 } from "./types";
 import type { PosterCandidate } from "./types";
@@ -148,6 +152,29 @@ export async function setSubtitleDelay(seconds: number) {
 
 export async function addSubtitleFile(path: string) {
   return callBackend("add_subtitle_file_cmd", { path });
+}
+
+/** Whether online subtitle search is on, and which services are switched on. */
+export async function subtitlesState() {
+  return callBackend<SubtitleState>("subtitles_state_cmd");
+}
+
+export async function subtitlesSetOnline(on: boolean) {
+  return callBackend("subtitles_set_online_cmd", { on });
+}
+
+export async function subtitlesSetService(id: string, enabled: boolean) {
+  return callBackend("subtitles_set_service_cmd", { id, enabled });
+}
+
+/** Looks for subtitles for what is playing. Fails until online search has been turned on. */
+export async function subtitlesSearch(item: PlayingItem, languages: string[]) {
+  return callBackend<SubtitleSearch>("subtitles_search_cmd", { item, languages });
+}
+
+/** Downloads the chosen subtitle, remembers it for the title and shows it in the player. */
+export async function subtitlesApply(item: PlayingItem, candidate: SubtitleCandidate) {
+  return callBackend("subtitles_apply_cmd", { item, candidate });
 }
 
 export async function stop() {
