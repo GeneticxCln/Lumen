@@ -708,6 +708,52 @@ pub async fn browse(key: &str) -> Result<Vec<BrowseTitle>> {
     ))
 }
 
+/// Fetches one series' schedule from TMDB.
+async fn fetch_airing(
+    http: &reqwest::Client,
+    key: &str,
+    tmdb_id: i64,
+    requests: &mut i64,
+) -> std::result::Result<crate::series::Airing, TmdbFailure> {
+    let payload = tmdb_get(http, key, &format!("/tv/{tmdb_id}"), &[], requests).await?;
+    Ok(crate::series::parse_airing(tmdb_id, &payload))
+}
+
+/// Refreshes the schedules of series this profile follows that have none yet or a stale one, at
+/// most `limit` per call and politely spaced. Returns how many were refreshed. A series TMDB has
+/// no record of is skipped, not retried in a loop: its failure is recorded as "checked".
+pub async fn refresh_airing(pool: &Pool<Sqlite>, profile_id: i64, limit: i64) -> Result<i64> {
+    let Some((key, _source)) = api_key(pool).await? else {
+        return Ok(0);
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    let ids = crate::series::series_needing_airing(pool, profile_id, now, limit).await?;
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| PlayerError::Http(e.to_string()))?;
+    let mut requests = 0_i64;
+    let mut refreshed = 0;
+    for id in ids {
+        match fetch_airing(&http, &key, id, &mut requests).await {
+            Ok(airing) => {
+                crate::series::store_airing(pool, &airing, now).await?;
+                refreshed += 1;
+            }
+            Err(TmdbFailure::Unauthorized) => {
+                return Err(PlayerError::InvalidArg("TMDB rejected the API key (HTTP 401)".into()));
+            }
+            // Offline or a single bad id must not stop the rest, and must not be retried at once.
+            Err(TmdbFailure::Other(_)) => {}
+        }
+        tokio::time::sleep(Duration::from_millis(REQUEST_GAP_MS)).await;
+    }
+    Ok(refreshed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

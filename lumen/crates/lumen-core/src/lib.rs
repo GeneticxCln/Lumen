@@ -11,6 +11,7 @@ pub mod pin_guard;
 pub mod playlist;
 pub mod probe;
 pub mod search;
+pub mod series;
 pub mod secrets;
 pub mod sync;
 pub mod sync_crypto;

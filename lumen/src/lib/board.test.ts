@@ -66,6 +66,23 @@ assert.equal(isInProgress(hist(movie, 100, 0, 1)), false, "unknown duration cann
   assert.deepEqual(board.continueWatching.map((item) => item.channel?.id), [11]);
 }
 
+// Hand-set marks drive next up too
+{
+  const s2e1 = ch(13, "Severance S02E01 Hello, Ms. Cobel", { group_title: "Series" });
+  const withSeason2 = [...library, s2e1];
+  const mark = (season: number, episode: number, watched: boolean, updatedAt = 5_000) => ({ seriesKey: "name:severance", season, episode, watched, updatedAt });
+  // "Mark season 1 watched" with no playback at all moves the series on to season 2
+  let board = buildBoard({ ...base, channels: withSeason2, history: [], marks: [mark(1, 1, true), mark(1, 2, true), mark(1, 3, true)] });
+  assert.deepEqual(board.nextUp.map((item) => item.channel.id), [13]);
+  assert.equal(board.nextUp[0].after, e3.name);
+  // Marking an episode unwatched overrides a finished playback: nothing has been watched
+  board = buildBoard({ ...base, channels: withSeason2, history: [hist(e1, 3000, 3100, 100)], marks: [mark(1, 1, false)] });
+  assert.equal(board.nextUp.length, 0);
+  // A mark on one series does not leak into another
+  board = buildBoard({ ...base, channels: withSeason2, history: [], marks: [{ seriesKey: "name:fargo", season: 1, episode: 1, watched: true, updatedAt: 9_000 }, mark(1, 1, true, 4_000)] });
+  assert.deepEqual(board.nextUp.map((item) => item.channel.id), [21, 11], "most recently marked series first");
+}
+
 // Files on this computer continue by path; stale stream history with no library entry is dropped
 {
   const board = buildBoard({

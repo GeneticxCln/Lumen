@@ -141,3 +141,36 @@ export function ContinueShelf({ items, compact, onPlayChannel, onPlayFile }: Con
     </div>
   </section>;
 }
+
+export interface UpcomingCard {
+  key: string;
+  name: string;
+  /** "S03E04 airs tomorrow". */
+  text: string;
+  kind: "upcoming" | "aired";
+  /** A library entry of the series, when there is one. */
+  channel?: Channel;
+}
+
+/** Series you follow with an episode on the way or just out. Opens the series' details. */
+export function UpcomingShelf({ items, compact, onDetails }: { items: UpcomingCard[]; compact: boolean; onDetails: (channel: Channel) => void }) {
+  const width = compact ? 224 : 280;
+  if (!items.length) return null;
+  const title = "Coming up";
+  return <section className="media-shelf" aria-label={title}>
+    <div className="shelf-heading"><div><h2>{title}<span className="shelf-count">{items.length}</span></h2><p>New and upcoming episodes of series you follow, from TMDB.</p></div></div>
+    <div className="shelf-track" tabIndex={0} aria-label={`${title} series`}>
+      <div style={{ display: "flex", gap: 12, width: "max-content", paddingRight: 12 }}>
+        {items.map((item) => <article className="media-card" key={item.key} style={{ width: width - 12 }}>
+          <button className="card-art-button" aria-label={`${item.name}: ${item.text}`} disabled={!item.channel} onClick={() => item.channel && onDetails(item.channel)}>
+            {item.channel
+              ? <ChannelArtwork channel={item.channel} />
+              : <div className="channel-art"><img className="landscape-art" src="/artwork/landscape.svg" alt="" aria-hidden="true" /><span className="art-title">{item.name}</span></div>}
+            <span className="card-badge">{item.kind === "aired" ? "New episode" : "Upcoming"}</span>
+          </button>
+          <div className="card-bottom"><div><h3>{item.name}</h3><p>{item.text}</p></div></div>
+        </article>)}
+      </div>
+    </div>
+  </section>;
+}

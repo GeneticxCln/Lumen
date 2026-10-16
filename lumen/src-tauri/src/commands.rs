@@ -257,6 +257,48 @@ pub async fn board_new_channel_ids(app: AppHandle) -> Result<Vec<i64>> {
     }
 }
 
+/// Marks episodes of one season watched or unwatched for the active profile. The mark overrides
+/// what history says, and is synced like other profile state.
+#[tauri::command]
+pub async fn set_episodes_watched_cmd(
+    series_key: String,
+    season: i64,
+    episodes: Vec<i64>,
+    watched: bool,
+    app: AppHandle,
+) -> Result<()> {
+    let pool = ensure_db(&app).await?;
+    let profile_id = active_profile_id(pool).await?;
+    crate::series::set_episodes_watched(pool, profile_id, &series_key, season, &episodes, watched, Utc::now().timestamp_millis()).await?;
+    crate::sync::schedule(pool);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn list_episode_marks_cmd(app: AppHandle) -> Result<Vec<crate::series::EpisodeMark>> {
+    let pool = ensure_db(&app).await?;
+    let profile_id = active_profile_id(pool).await?;
+    crate::series::list_episode_marks(pool, profile_id).await
+}
+
+/// Series the active profile follows that have an episode still to air, or one that aired in the
+/// last two weeks. With `refresh`, stale schedules are first re-read from TMDB (needs a key);
+/// without a key or without a network the stored schedules are returned as they are.
+#[tauri::command]
+pub async fn upcoming_episodes_cmd(refresh: Option<bool>, app: AppHandle) -> Result<Vec<crate::series::UpcomingSeries>> {
+    let pool = ensure_db(&app).await?;
+    let profile_id = active_profile_id(pool).await?;
+    if refresh.unwrap_or(false) {
+        // A TMDB failure must not hide what is already known.
+        if let Err(error) = tmdb::refresh_airing(pool, profile_id, 12).await {
+            eprintln!("lumen: schedule refresh failed: {}", String::from(error));
+        }
+    }
+    let today = Utc::now().date_naive();
+    let fmt = |date: chrono::NaiveDate| date.format("%Y-%m-%d").to_string();
+    crate::series::list_upcoming(pool, profile_id, &fmt(today), &fmt(today - chrono::Days::new(14))).await
+}
+
 #[tauri::command]
 pub async fn list_playlists_cmd(app: AppHandle) -> Result<Vec<Playlist>> {
     let pool = ensure_db(&app).await?;

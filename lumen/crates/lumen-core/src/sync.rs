@@ -24,6 +24,7 @@ use crate::sync_crypto::{SealedItem, SyncKeys};
 const KIND_PROFILE: &str = "profile";
 const KIND_FAVORITE: &str = "favorite";
 const KIND_PROGRESS: &str = "progress";
+const KIND_EPISODE: &str = "episode";
 
 /// The server rejects a whole push if one sealed record is over its size cap, so oversized
 /// records are not queued. Otherwise one long record would block every later change. 4,000 bytes
@@ -264,8 +265,76 @@ pub async fn queue_progress(
     enqueue(conn, &item).await
 }
 
+/// Queues a hand-set watched mark for one episode. `watched = false` is a real answer ("I have not
+/// seen this"), so these are never tombstones.
+pub async fn queue_episode(
+    conn: &mut SqliteConnection,
+    profile_id: i64,
+    series_key: &str,
+    season: i64,
+    episode: i64,
+    watched: bool,
+    now: i64,
+) -> Result<()> {
+    let Some(profile_key) = profile_sync_key(conn, profile_id).await? else {
+        return Ok(());
+    };
+    let item = SyncItem {
+        kind: KIND_EPISODE.into(),
+        key: format!("{profile_key}:{}:S{season}E{episode}", hashed(series_key)),
+        payload: json!({
+            "profile": profile_key,
+            "series": series_key,
+            "season": season,
+            "episode": episode,
+            "watched": watched,
+        }),
+        updated_at: now,
+        deleted: false,
+    };
+    enqueue(conn, &item).await
+}
+
+async fn apply_episode(conn: &mut SqliteConnection, item: &SyncItem) -> Result<()> {
+    let Some(profile_key) = item.payload.get("profile").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let (Some(series), Some(season), Some(episode), Some(watched)) = (
+        item.payload.get("series").and_then(Value::as_str),
+        item.payload.get("season").and_then(Value::as_i64),
+        item.payload.get("episode").and_then(Value::as_i64),
+        item.payload.get("watched").and_then(Value::as_bool),
+    ) else {
+        return Ok(());
+    };
+    if series.trim().is_empty() || series.chars().count() > 200 || !(0..=500).contains(&season) || !(0..=10_000).contains(&episode) {
+        return Ok(());
+    }
+    let Some(profile_id) = profile_id_for_key(conn, profile_key).await? else {
+        return Ok(());
+    };
+    // Applied directly, never re-queued: the other device already has it.
+    sqlx::query(
+        "INSERT INTO episode_state (profile_id, series_key, season, episode, watched, updated_at) VALUES (?, ?, ?, ?, ?, ?) \
+         ON CONFLICT (profile_id, series_key, season, episode) DO UPDATE SET \
+           watched = excluded.watched, updated_at = excluded.updated_at \
+         WHERE excluded.updated_at > episode_state.updated_at",
+    )
+    .bind(profile_id)
+    .bind(series)
+    .bind(season)
+    .bind(episode)
+    .bind(i64::from(watched))
+    .bind(item.updated_at)
+    .execute(conn)
+    .await
+    .map_err(sql_err)?;
+    Ok(())
+}
+
 async fn apply_remote(conn: &mut SqliteConnection, item: &SyncItem) -> Result<()> {
     match item.kind.as_str() {
+        KIND_EPISODE => apply_episode(conn, item).await,
         KIND_PROFILE => apply_profile(conn, item).await,
         KIND_FAVORITE => apply_favorite(conn, item).await,
         KIND_PROGRESS => apply_progress(conn, item).await,
@@ -479,6 +548,23 @@ async fn queue_all(pool: &Pool<Sqlite>) -> Result<()> {
             row.get("position"),
             row.get("duration"),
             row.get("played_at"),
+        )
+        .await?;
+    }
+
+    let marks = sqlx::query("SELECT profile_id, series_key, season, episode, watched, updated_at FROM episode_state")
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(sql_err)?;
+    for row in marks {
+        queue_episode(
+            &mut tx,
+            row.get("profile_id"),
+            &row.get::<String, _>("series_key"),
+            row.get("season"),
+            row.get("episode"),
+            row.get::<i64, _>("watched") != 0,
+            row.get("updated_at"),
         )
         .await?;
     }

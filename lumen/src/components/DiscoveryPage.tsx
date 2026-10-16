@@ -1,5 +1,6 @@
 import { Icon } from "./Icon";
-import { BrowseShelf, ContinueShelf, MediaShelf } from "./MediaShelf";
+import { BrowseShelf, ContinueShelf, MediaShelf, UpcomingShelf } from "./MediaShelf";
+import type { UpcomingCard } from "./MediaShelf";
 import type { Board } from "../lib/board";
 import type { BrowseTitle, Channel } from "../lib/types";
 import type { CatalogShelf } from "../lib/discovery";
@@ -9,6 +10,7 @@ interface DiscoveryPageProps {
   catalog: CatalogShelf[];
   recommended: Channel[];
   board: Board;
+  upcoming: UpcomingCard[];
   browse: BrowseTitle[];
   personalized: boolean;
   libraryMatches: Channel[];
@@ -31,6 +33,7 @@ export function DiscoveryPage({
   catalog,
   recommended,
   board,
+  upcoming,
   browse,
   personalized,
   libraryMatches,
@@ -57,6 +60,7 @@ export function DiscoveryPage({
       {!query && <>
         <ContinueShelf items={board.continueWatching} compact={compact} onPlayChannel={onPlayChannel} onPlayFile={onPlayFile} />
         <MediaShelf title="Next up" subtitle="The next episode of what you have been watching." channels={board.nextUp.map((item) => item.channel)} {...shelfProps} />
+        <UpcomingShelf items={upcoming} compact={compact} onDetails={onDetails} />
         <MediaShelf title="New since your last visit" subtitle="Added to your sources since you last opened Lumen." channels={board.fresh} {...shelfProps} />
         <MediaShelf title="My List" subtitle="Titles you saved." channels={board.myList} {...shelfProps} />
       </>}

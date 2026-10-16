@@ -1,6 +1,6 @@
 pub use lumen_core::{
     auth, board, db, error, extract, harvest, media_tools, netguard, pin_guard, playlist, probe,
-    search, secrets, tmdb,
+    search, secrets, series, tmdb,
 };
 
 mod commands;
@@ -32,6 +32,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             board_new_channel_ids,
+            set_episodes_watched_cmd,
+            list_episode_marks_cmd,
+            upcoming_episodes_cmd,
             sync::sync_now_cmd,
             sync::sync_status_cmd,
             sync::sync_state_cmd,

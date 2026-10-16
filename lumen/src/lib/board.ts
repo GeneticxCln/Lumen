@@ -2,6 +2,8 @@ import type { Channel, HistoryEntry } from "./types.ts";
 import { contentKind, uniqueHistory } from "./discovery.ts";
 import { episodeInfo, nextEpisode } from "./episodes.ts";
 import { fileLabel, fileNameOf, isLocalPath } from "./local.ts";
+import { finishedChannelIds, indexMarks, isEpisodeWatched, seriesIdOf } from "./series.ts";
+import type { EpisodeMark } from "./series.ts";
 
 /** A title counts as finished once this much of it has played. */
 export const COMPLETE_FRACTION = 0.92;
@@ -47,6 +49,8 @@ export interface BoardInput {
   newChannelIds: number[];
   /** Ranked recommendations; titles already on the board are removed from them. */
   recommended: Channel[];
+  /** Watched marks set by hand; they override what history says. */
+  marks?: EpisodeMark[];
 }
 
 function fraction(entry: HistoryEntry): number {
@@ -76,47 +80,83 @@ export function buildBoard(input: BoardInput): Board {
 
   const shown = new Set<number>();
   const continueWatching: ContinueItem[] = [];
-  const nextUp: NextUpItem[] = [];
-  // The most recent entry of a series decides what the series needs: resume it, or move on.
+  // The most recent entry of a series decides whether it is being resumed.
   const seriesHandled = new Set<string>();
+  const resumingSeries = new Set<string>();
 
   for (const entry of recent) {
+    if (!isInProgress(entry)) {
+      // Finished episodes still claim their series' "most recent" slot, so an older in-progress
+      // episode of the same series is not resumed over a newer finished one.
+      const finishedChannel = locate(entry);
+      const finishedInfo = finishedChannel ? episodeInfo(finishedChannel) : null;
+      if (finishedInfo) seriesHandled.add(finishedInfo.seriesKey);
+      continue;
+    }
     const channel = locate(entry);
     const info = channel ? episodeInfo(channel) : null;
     if (info && seriesHandled.has(info.seriesKey)) continue;
     if (info) seriesHandled.add(info.seriesKey);
 
-    if (isInProgress(entry)) {
-      if (channel) {
-        if (contentKind(channel) === "live") continue;
-        continueWatching.push({
-          key: `channel-${channel.id}`,
-          title: channel.name,
-          progress: fraction(entry),
-          remainingSeconds: Math.max(0, entry.duration - entry.position),
-          playedAt: entry.played_at,
-          channel,
-        });
-        shown.add(channel.id);
-      } else if (isLocalPath(entry.path)) {
-        continueWatching.push({
-          key: `file-${entry.path}`,
-          title: fileLabel(fileNameOf(entry.path)),
-          progress: fraction(entry),
-          remainingSeconds: Math.max(0, entry.duration - entry.position),
-          playedAt: entry.played_at,
-          path: entry.path,
-        });
-      }
-    } else if (isFinished(entry) && channel && info) {
-      const following = nextEpisode(channel, input.channels);
-      // Already started or watched: nothing to suggest.
-      if (following && !watchedChannelIds.has(following.id)) {
-        nextUp.push({ channel: following, after: channel.name });
-        shown.add(following.id);
-      }
+    if (channel) {
+      if (contentKind(channel) === "live") continue;
+      continueWatching.push({
+        key: `channel-${channel.id}`,
+        title: channel.name,
+        progress: fraction(entry),
+        remainingSeconds: Math.max(0, entry.duration - entry.position),
+        playedAt: entry.played_at,
+        channel,
+      });
+      shown.add(channel.id);
+      const series = seriesIdOf(channel);
+      if (series) resumingSeries.add(series);
+    } else if (isLocalPath(entry.path)) {
+      continueWatching.push({
+        key: `file-${entry.path}`,
+        title: fileLabel(fileNameOf(entry.path)),
+        progress: fraction(entry),
+        remainingSeconds: Math.max(0, entry.duration - entry.position),
+        playedAt: entry.played_at,
+        path: entry.path,
+      });
     }
   }
+
+  // Next up: per series, the episode after the furthest one watched (by a mark or by finishing
+  // it), unless the series is being resumed or that episode was already started.
+  const marks = indexMarks(input.marks ?? []);
+  const finished = finishedChannelIds(input.history, input.channels);
+  const recency = new Map<string, number>();
+  for (const entry of recent) {
+    if (!isFinished(entry)) continue;
+    const channel = locate(entry);
+    const series = channel ? seriesIdOf(channel) : null;
+    if (series) recency.set(series, Math.max(recency.get(series) ?? 0, entry.played_at * 1000));
+  }
+  for (const mark of input.marks ?? []) {
+    if (mark.watched) recency.set(mark.seriesKey, Math.max(recency.get(mark.seriesKey) ?? 0, mark.updatedAt));
+  }
+  const furthest = new Map<string, { channel: Channel; season: number; episode: number }>();
+  for (const channel of input.channels) {
+    const series = seriesIdOf(channel);
+    const info = episodeInfo(channel);
+    if (!series || !info || !isEpisodeWatched(channel, marks, finished)) continue;
+    const held = furthest.get(series);
+    if (!held || info.season > held.season || (info.season === held.season && info.episode > held.episode)) {
+      furthest.set(series, { channel, season: info.season, episode: info.episode });
+    }
+  }
+  const candidates: { item: NextUpItem; recency: number }[] = [];
+  for (const [series, last] of furthest) {
+    if (resumingSeries.has(series)) continue;
+    const following = nextEpisode(last.channel, input.channels);
+    if (!following || watchedChannelIds.has(following.id) || isEpisodeWatched(following, marks, finished)) continue;
+    candidates.push({ item: { channel: following, after: last.channel.name }, recency: recency.get(series) ?? 0 });
+  }
+  candidates.sort((a, b) => b.recency - a.recency);
+  const nextUp = candidates.map((candidate) => candidate.item);
+  for (const item of nextUp) shown.add(item.channel.id);
 
   const fresh: Channel[] = [];
   for (const id of input.newChannelIds) {

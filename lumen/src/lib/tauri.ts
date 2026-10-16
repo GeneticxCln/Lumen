@@ -24,6 +24,7 @@ import type {
   BrowseTitle,
 } from "./types";
 import type { PosterCandidate } from "./types";
+import type { EpisodeMark, UpcomingSeries } from "./series";
 
 export type {
   Channel,
@@ -217,6 +218,21 @@ export async function setProfilePin(profileId: number, pin?: string, currentPin?
  */
 export async function activateProfile(profileId: number, pin?: string) {
   return callBackend<Profile>("activate_profile_cmd", { profileId, pin: pin ? pin : null });
+}
+
+/** Watched marks the active profile set by hand. */
+export async function listEpisodeMarks() {
+  return callBackend<EpisodeMark[]>("list_episode_marks_cmd");
+}
+
+/** Marks episodes of one season watched or unwatched. The mark overrides what history says. */
+export async function setEpisodesWatched(seriesKey: string, season: number, episodes: number[], watched: boolean) {
+  return callBackend("set_episodes_watched_cmd", { seriesKey, season, episodes, watched });
+}
+
+/** Followed series with an episode still to air or one that just aired. `refresh` re-reads TMDB first. */
+export async function upcomingEpisodes(refresh = false) {
+  return callBackend<UpcomingSeries[]>("upcoming_episodes_cmd", { refresh });
 }
 
 /** Library entries added since this profile last visited. Empty on the first visit. */
