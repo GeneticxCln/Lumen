@@ -1,4 +1,5 @@
 import { Icon } from "./Icon";
+import { t } from "../i18n/index.ts";
 import { BrowseShelf, ContinueShelf, MediaShelf, UpcomingShelf } from "./MediaShelf";
 import type { UpcomingCard } from "./MediaShelf";
 import type { Board } from "../lib/board";
@@ -51,23 +52,23 @@ export function DiscoveryPage({
   return <div className="discovery-page">
     <div className="discovery-body">
       {query && libraryMatches.length > 0 && <MediaShelf
-        title={`In your library · “${query}”`}
-        subtitle="Titles from your own sources that match this search."
+        title={t("discovery.libraryMatches.title", { query })}
+        subtitle={t("discovery.libraryMatches.subtitle")}
         channels={libraryMatches}
         {...shelfProps}
       />}
 
       {!query && <>
         <ContinueShelf items={board.continueWatching} compact={compact} onPlayChannel={onPlayChannel} onPlayFile={onPlayFile} />
-        <MediaShelf title="Next up" subtitle="The next episode of what you have been watching." channels={board.nextUp.map((item) => item.channel)} {...shelfProps} />
+        <MediaShelf title={t("discovery.nextUp.title")} subtitle={t("discovery.nextUp.subtitle")} channels={board.nextUp.map((item) => item.channel)} {...shelfProps} />
         <UpcomingShelf items={upcoming} compact={compact} onDetails={onDetails} />
-        <MediaShelf title="New since your last visit" subtitle="Added to your sources since you last opened Lumen." channels={board.fresh} {...shelfProps} />
-        <MediaShelf title="My List" subtitle="Titles you saved." channels={board.myList} {...shelfProps} />
+        <MediaShelf title={t("discovery.fresh.title")} subtitle={t("discovery.fresh.subtitle")} channels={board.fresh} {...shelfProps} />
+        <MediaShelf title={t("app.myList")} subtitle={t("discovery.myList.subtitle")} channels={board.myList} {...shelfProps} />
       </>}
 
       {!query && <BrowseShelf
-        title="Popular on TMDB"
-        subtitle="Trending and top-rated titles from TMDB. They are not in your library, so they show details only."
+        title={t("discovery.popular.title")}
+        subtitle={t("discovery.popular.subtitle")}
         titles={browse}
         compact={compact}
       />}
@@ -83,25 +84,25 @@ export function DiscoveryPage({
 
       {showFallback && <>
         <MediaShelf
-          title={personalized ? "Because it’s your kind of thing" : "From your sources"}
-          subtitle={personalized ? "Picked from your recently watched categories and saved titles." : "A selection from your own playlists."}
+          title={personalized ? t("discovery.personalized.title") : t("discovery.fromSources.title")}
+          subtitle={personalized ? t("discovery.personalized.subtitle") : t("discovery.fromSources.subtitle")}
           channels={board.recommended}
           {...shelfProps}
         />
-        <p className="muted-note">Genre shelves and posters appear once your titles are matched on TMDB. Add a TMDB key in Settings → Metadata.</p>
+        <p className="muted-note">{t("discovery.tmdbNote")}</p>
       </>}
 
       {query && libraryMatches.length === 0 && <div className="empty-state">
         <div className="empty-symbol"><Icon name="search" size={32} /></div>
-        <h2>No matches for “{query}”.</h2>
-        <p>Nothing in your sources matches that. Try a shorter word, or clear the search.</p>
+        <h2>{t("discovery.noMatches.title", { query })}</h2>
+        <p>{t("discovery.noMatches.body")}</p>
       </div>}
 
       {!query && catalog.length === 0 && recommended.length === 0 && browse.length === 0 && board.continueWatching.length === 0 && board.myList.length === 0 && <div className="empty-state">
         <div className="empty-symbol"><Icon name="compass" size={32} /></div>
-        <h2>Nothing to discover yet.</h2>
-        <p>Add a playlist or catalogue source and its titles will show up here. Files on this computer are on the Local Device page.</p>
-        <div className="hero-buttons"><button className="primary-button" onClick={onOpenSources}><Icon name="plus" size={20} />Add a source</button></div>
+        <h2>{t("discovery.empty.title")}</h2>
+        <p>{t("discovery.empty.body")}</p>
+        <div className="hero-buttons"><button className="primary-button" onClick={onOpenSources}><Icon name="plus" size={20} />{t("discovery.empty.addSource")}</button></div>
       </div>}
     </div>
   </div>;
