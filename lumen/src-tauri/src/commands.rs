@@ -100,14 +100,19 @@ async fn play_url_inner(
         .await?
         .unwrap_or_default();
 
-    let backend = {
-        let backend_cell = get_playback_backend().await?;
-        let mut guard = backend_cell.lock().await;
-        let running = guard.as_ref().is_some_and(|backend| backend.is_alive());
-        if !running {
-            // Playing inside the window (experimental): on X11 mpv draws into a native area above
-            // the page; on native Wayland libmpv runs here and draws into an OpenGL area. If that
-            // cannot be set up, the separate mpv window is used instead.
+    let backend_cell = get_playback_backend().await?;
+    let existing = {
+        let guard = backend_cell.lock().await;
+        match guard.as_ref() {
+            Some(backend) if backend.is_alive() => Some(backend.clone()),
+            _ => None,
+        }
+    };
+    let backend = match existing {
+        Some(backend) => backend,
+        None => {
+            // Starting mpv can take up to its full socket-wait timeout, so build the new backend
+            // with the lock released: Stop/Pause/Seek must never block behind a slow start.
             let mut args = extra_args.clone();
             embed::set_in_use(false);
             let mut in_window = None;
@@ -138,7 +143,7 @@ async fn play_url_inner(
                     None => {}
                 }
             }
-            *guard = Some(Arc::new(match in_window {
+            let backend: SharedBackend = Arc::new(match in_window {
                 Some((socket_path, engine)) => {
                     MpvIpcBackend::connect(
                         Some(app.clone()),
@@ -148,12 +153,11 @@ async fn play_url_inner(
                     .await?
                 }
                 None => MpvIpcBackend::new(Some(app.clone()), &hwdec, &cache, &args).await?,
-            }));
+            });
+            let mut guard = backend_cell.lock().await;
+            *guard = Some(backend.clone());
+            backend
         }
-        guard
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| PlayerError::Mpv("mpv did not start".into()))?
     };
 
     // An entry saved from a page (extract) has no stable stream link: resolve it now. The history

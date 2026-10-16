@@ -81,6 +81,10 @@ pub struct MpvIpcBackend {
     /// Latest player state shared with the reader loop, so UI-only changes can emit it whole.
     state: Arc<Mutex<PlayerStateEvent>>,
     app: Option<AppHandle>,
+    /// Cleared by the reader or writer task the moment the control connection is found dead (EOF,
+    /// a read error, or a failed write). For `Engine::Embedded`, this is the only signal that the
+    /// in-window engine has died, since there is no child process to `try_wait()` on.
+    connection_alive: Arc<AtomicBool>,
 }
 
 /// The longest socket file name made in the directory: `/mpv-<pid>-<8 hex>.sock`.
@@ -93,16 +97,27 @@ fn socket_path_fits(dir: &std::path::Path) -> bool {
     dir.as_os_str().len() + SOCKET_NAME_ALLOWANCE < SOCKET_PATH_LIMIT
 }
 
-/// A directory only this user can enter, for mpv's control socket. mpv's IPC accepts commands
-/// that run programs, so the socket must not sit where another local user can reach it.
-/// `$XDG_RUNTIME_DIR` (mode 0700, per user) is the right place; if it is missing, a private
-/// directory is created under the temp dir and checked before use.
+/// True when `dir` exists, is owned by the current user, and no other user can enter it (mode
+/// bits `0o077` all clear). mpv's IPC accepts commands that run programs, so every path that
+/// supplies the socket directory must pass this check rather than trust the directory on sight.
+fn is_private_dir(dir: &std::path::Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let meta = std::fs::symlink_metadata(dir)?;
+    let mine = std::fs::metadata("/proc/self")?.uid();
+    Ok(meta.is_dir() && meta.uid() == mine && meta.permissions().mode() & 0o077 == 0)
+}
+
+/// A directory only this user can enter, for mpv's control socket. `$XDG_RUNTIME_DIR` (mode
+/// 0700, per user) is the right place; if it is missing, or not actually private once checked
+/// (an inherited value pointing somewhere a misconfigured host made world- or group-enterable),
+/// a private directory is created under the temp dir and checked the same way before use.
 fn private_socket_dir() -> Result<std::path::PathBuf> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    use std::os::unix::fs::DirBuilderExt;
 
     if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)
-        && runtime.is_dir()
         && socket_path_fits(&runtime)
+        && is_private_dir(&runtime).unwrap_or(false)
     {
         return Ok(runtime);
     }
@@ -118,9 +133,7 @@ fn private_socket_dir() -> Result<std::path::PathBuf> {
     }
     // A directory made by someone else, or readable by others, is not private: refuse it rather
     // than trust it.
-    let meta = std::fs::symlink_metadata(&dir)?;
-    let mine = std::fs::metadata("/proc/self")?.uid();
-    if !meta.is_dir() || meta.uid() != mine || meta.permissions().mode() & 0o077 != 0 {
+    if !is_private_dir(&dir)? {
         return Err(PlayerError::Mpv(format!(
             "{} is not a private directory owned by you; remove it and try again",
             dir.display()
@@ -362,11 +375,13 @@ impl MpvIpcBackend {
         let state = Arc::new(Mutex::new(PlayerStateEvent::default()));
 
         let (load_state_tx, _) = tokio::sync::watch::channel(0_u8);
+        let connection_alive = Arc::new(AtomicBool::new(true));
 
         let pending_reader = pending.clone();
         let state_reader = state.clone();
         let app_reader = app.clone();
         let load_state_reader = load_state_tx.clone();
+        let connection_alive_reader = connection_alive.clone();
 
         // Spawn reader loop for both command responses and property-change events
         tokio::spawn(async move {
@@ -378,7 +393,10 @@ impl MpvIpcBackend {
             loop {
                 line.clear();
                 match reader.read_line(&mut line).await {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        connection_alive_reader.store(false, Ordering::SeqCst);
+                        break;
+                    }
                     Ok(_) => {
                         if let Ok(msg) = serde_json::from_str::<MpvMessage>(&line) {
                             // 1. Handle command response if request_id matches
@@ -563,13 +581,17 @@ impl MpvIpcBackend {
                             }
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        connection_alive_reader.store(false, Ordering::SeqCst);
+                        break;
+                    }
                 }
             }
         });
 
         let pending_writer = pending.clone();
         let log_writer = log.clone();
+        let connection_alive_writer = connection_alive.clone();
         tokio::spawn(async move {
             while let Some((req, responder)) = rx.recv().await {
                 let req_id = req.request_id;
@@ -598,6 +620,7 @@ impl MpvIpcBackend {
                     } else {
                         format!("mpv stopped responding (its control connection closed): {tail}")
                     };
+                    connection_alive_writer.store(false, Ordering::SeqCst);
                     let mut map = pending_writer.lock().await;
                     if let Some(r) = map.remove(&req_id) {
                         let _ = r.send(Err(PlayerError::Mpv(message)));
@@ -617,6 +640,7 @@ impl MpvIpcBackend {
             closing: AtomicBool::new(false),
             state,
             app,
+            connection_alive,
         };
 
         // Observe standard mpv properties per PLAN.md §3.1
@@ -651,7 +675,9 @@ impl MpvIpcBackend {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match engine.as_mut() {
             Some(Engine::Process(child)) => matches!(child.try_wait(), Ok(None)),
-            Some(Engine::Embedded(_)) => true,
+            // No child process to `try_wait()` on; the reader/writer tasks clearing this flag on
+            // EOF, a read error, or a failed write is the only sign the engine has died.
+            Some(Engine::Embedded(_)) => self.connection_alive.load(Ordering::SeqCst),
             None => false,
         }
     }
@@ -1122,6 +1148,36 @@ mod tests {
         assert_eq!(
             String::from(error),
             "mpv error: mpv stopped responding (its control connection closed)"
+        );
+    }
+
+    /// A stand-in for the real in-window libmpv engine: nothing to embed, just something that
+    /// implements the marker trait so `Engine::Embedded` can be constructed in a test.
+    struct FakeEmbeddedEngine;
+    impl EmbeddedEngine for FakeEmbeddedEngine {}
+
+    #[tokio::test]
+    async fn a_dead_embedded_engine_is_no_longer_reported_alive() {
+        let path = MpvIpcBackend::new_socket_path().unwrap();
+        tokio::spawn(accept_respond_then_vanish(
+            path.clone(),
+            Duration::from_millis(200),
+        ));
+        let backend =
+            MpvIpcBackend::connect(None, path, Engine::Embedded(Box::new(FakeEmbeddedEngine)))
+                .await
+                .unwrap();
+        assert!(
+            backend.is_alive(),
+            "freshly connected, nothing has died yet"
+        );
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // Nothing to `try_wait()` on for an embedded engine; only the reader task noticing the
+        // fake mpv closed the connection (the same EOF a real crash would produce) can tell.
+        assert!(
+            !backend.is_alive(),
+            "the control connection closed, so a stale backend must not be reused"
         );
     }
 

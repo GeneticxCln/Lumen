@@ -22,6 +22,7 @@ pub mod subtitles;
 pub mod sync;
 pub mod sync_crypto;
 pub mod sync_keys;
+pub mod text_encoding;
 pub mod tmdb;
 pub mod update;
 

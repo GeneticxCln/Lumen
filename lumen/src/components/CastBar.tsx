@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { castControl, castState, errorMessage } from "../lib/tauri";
 import type { CastState } from "../lib/types";
 import { formatClock } from "../lib/local";
@@ -28,6 +28,11 @@ interface CastBarProps {
 /** Controls for the cast in progress: shown while a TV plays what was sent. */
 export function CastBar({ cast, seekStep, onEnded, onError }: CastBarProps) {
   const [current, setCurrent] = useState<CastState>(cast);
+  // `onEnded` is typically a fresh closure every render of the parent (it closes over parent
+  // state); reading it through a ref instead of listing it as an effect dependency keeps an
+  // unrelated re-render from tearing down and restarting the poll before it ever fires.
+  const onEndedRef = useRef(onEnded);
+  onEndedRef.current = onEnded;
 
   useEffect(() => {
     let active = true;
@@ -36,12 +41,12 @@ export function CastBar({ cast, seekStep, onEnded, onError }: CastBarProps) {
       castState()
         .then((next) => {
           if (!active) return;
-          if (next) setCurrent(next); else onEnded();
+          if (next) setCurrent(next); else onEndedRef.current();
         })
         .catch(() => { /* the device may be briefly busy; the next poll tries again */ });
     }, POLL_MS);
     return () => { active = false; window.clearInterval(timer); };
-  }, [cast, onEnded]);
+  }, [cast]);
 
   const control = async (action: "play" | "pause" | "stop" | "seek", position?: number) => {
     try {
