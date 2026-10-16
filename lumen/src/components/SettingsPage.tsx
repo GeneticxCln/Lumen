@@ -6,7 +6,7 @@ import { defaultPreferences, themes, applyTheme } from "../lib/discovery";
 import type { Preferences } from "../lib/discovery";
 import { POSTER_FRAME_OPTIONS } from "../lib/local";
 import { ProfileSettings } from "./ProfileSettings";
-import { AccountSignIn } from "./AccountSignIn";
+import { SyncSettings } from "./SyncSettings";
 import { LanSourcesToggle } from "./LanSourcesToggle";
 import { MediaShelf } from "./MediaShelf";
 import { Icon } from "./Icon";
@@ -37,7 +37,7 @@ interface SettingsPageProps {
 const posterFrameChoices = POSTER_FRAME_OPTIONS.map((option) => ({ seconds: String(option.seconds), label: option.label }));
 
 const sections: { id: SettingsSection; label: string; description: string; icon: IconName; group: string }[] = [
-  { id: "account", label: "Account", description: "Profiles on this device", icon: "profile", group: "ACCOUNT" },
+  { id: "account", label: "Profiles & sync", description: "Who is watching, and your other devices", icon: "profile", group: "YOU" },
   { id: "sources", label: "Sources", description: "Manage your connected playlists", icon: "grid", group: "YOUR LIBRARY" },
   { id: "mylist", label: "My List", description: "Your saved titles, all together", icon: "bookmark", group: "YOUR LIBRARY" },
   { id: "metadata", label: "Metadata", description: "TMDB posters, genres and years", icon: "film", group: "YOUR LIBRARY" },
@@ -349,7 +349,7 @@ export function SettingsPage({
 
         {section === "account" && (
           <>
-            <AccountSignIn />
+            <SyncSettings />
             <h3 className="settings-section-title">Who is watching</h3>
             <p>
               Each profile keeps its own watch history and My List on this device. The library of sources

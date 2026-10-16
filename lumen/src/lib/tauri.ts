@@ -19,7 +19,7 @@ import type {
   EnrichResult,
   SearchProviderConfig,
   SearchResponse,
-  AccountStatus,
+  SyncState,
   SyncStatus,
   BrowseTitle,
 } from "./types";
@@ -338,17 +338,34 @@ export async function setTmdbApiKey(key: string) {
   return callBackend("set_tmdb_api_key", { key });
 }
 
-// Cross-device sign-in. The app token is kept in the OS keychain by the backend.
-export async function accountStatus() {
-  return callBackend<AccountStatus>("account_status");
+// Cross-device sync. There are no accounts: a random sync key, kept in the OS keychain by the
+// backend, encrypts everything before it leaves this device.
+export async function syncState() {
+  return callBackend<SyncState>("sync_state_cmd");
 }
 
-export async function accountSignIn() {
-  return callBackend<AccountStatus>("account_sign_in");
+/** Saves the sync server address (empty restores the built-in one). Refused while sync is on. */
+export async function syncSetServer(url: string) {
+  return callBackend<SyncState>("sync_set_server", { url });
 }
 
-export async function accountSignOut() {
-  return callBackend<AccountStatus>("account_sign_out");
+/** Turns sync on with a new key and returns the key text. Show it once and ask the user to keep it. */
+export async function syncEnable() {
+  return callBackend<string>("sync_enable");
+}
+
+/** Turns sync on with the key from another device. */
+export async function syncJoin(key: string) {
+  return callBackend<SyncState>("sync_join", { key });
+}
+
+export async function syncShowKey() {
+  return callBackend<string>("sync_show_key");
+}
+
+/** Turns sync off on this device; with `deleteRemote` the synced copy is erased from the server too. */
+export async function syncDisable(deleteRemote: boolean) {
+  return callBackend<SyncState>("sync_disable", { deleteRemote });
 }
 
 export async function syncStatus() {

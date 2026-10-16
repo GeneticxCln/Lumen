@@ -690,7 +690,8 @@ async fn pull_remote(pool: &Pool<Sqlite>, remote: &Remote) -> Result<i64> {
         .unwrap_or(0);
     let mut newest = saved;
     let mut skipped = 0;
-    let mut cursor = PullCursor { since: saved.saturating_sub(PULL_OVERLAP_MS), after: None };
+    // Never below zero: the server rejects a negative `since`, which a first sync would otherwise send.
+    let mut cursor = PullCursor { since: saved.saturating_sub(PULL_OVERLAP_MS).max(0), after: None };
 
     loop {
         let page = pull_page(remote, &cursor).await?;

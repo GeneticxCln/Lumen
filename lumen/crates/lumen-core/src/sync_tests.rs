@@ -1,5 +1,5 @@
 //! Sync transport tests: real queue, real merge code and real sealing, against a small in-process
-//! stand-in for the Worker (`account/src/worker.ts`) that speaks the same HTTP API.
+//! stand-in for the Worker (`sync-server/src/worker.ts`) that speaks the same HTTP API.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -97,7 +97,10 @@ fn handle_request(mock: &mut Mock, method: &str, target: &str, headers: &HashMap
         }
         ("GET", "/v1/items") => {
             let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
-            let since: i64 = query.get("since").and_then(|v| v.parse().ok()).unwrap_or(0);
+            // The Worker refuses a missing, non-numeric or negative cursor; so does this stand-in.
+            let Some(since) = query.get("since").and_then(|v| v.parse::<i64>().ok()).filter(|v| *v >= 0) else {
+                return reply(400, json!({ "error": "invalid_request" }));
+            };
             let after = query.get("after_id");
             let mut rows: Vec<_> = group
                 .items
@@ -435,4 +438,75 @@ async fn enabling_without_a_reachable_server_keeps_no_key() {
     let store = MemoryStore::default();
     assert!(sync_keys::enable_with(&pool, &store, POW_BITS).await.is_err());
     assert!(!sync_keys::state_with(&pool, &store).await.unwrap().enabled, "a failed attempt leaves nothing behind");
+}
+
+/// Two clients through the real Worker (`npm run dev` in `sync-server/`), not the in-process
+/// stand-in. Ignored by default because it needs a running server:
+/// `SYNC_TEST_URL=http://127.0.0.1:8787 cargo test -p lumen-core live_ -- --ignored`.
+/// The proof-of-work difficulty must match the server's `POW_BITS` (`SYNC_TEST_POW_BITS`, default 8,
+/// which is what `npm run dev` uses).
+#[tokio::test]
+#[ignore = "needs a running sync server; see the doc comment"]
+async fn live_two_clients_through_the_real_worker() {
+    let origin = std::env::var("SYNC_TEST_URL").expect("set SYNC_TEST_URL to the running Worker, e.g. http://127.0.0.1:8787");
+    let bits: u32 = std::env::var("SYNC_TEST_POW_BITS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+
+    let root = generate_root().unwrap();
+    let live = remote(&origin, &root);
+    live.register(bits).await.unwrap();
+    live.register(bits).await.expect("registering the same group again is accepted");
+
+    let a = device().await;
+    add_favorites(&a, 5_000).await;
+    sqlx::query("UPDATE profiles SET name = 'Quinn' WHERE id = 1").execute(&a).await.unwrap();
+    sqlx::query("UPDATE profiles SET updated_at = ? WHERE id = 1")
+        .bind(chrono::Utc::now().timestamp_millis() + 1_000)
+        .execute(&a)
+        .await
+        .unwrap();
+    assert_eq!(sync_with(&a, &live).await.unwrap().skipped, 0);
+
+    let b = device().await;
+    assert_eq!(sync_with(&b, &live).await.unwrap().skipped, 0);
+    assert_eq!(favorite_rows(&b).await.len(), URLS.len());
+
+    // The bytes the Worker returns are the bytes it stores. None of them mention what was synced.
+    let keys = SyncKeys::from_root(&root);
+    let raw = reqwest::Client::new()
+        .get(format!("{origin}/v1/items?since=0"))
+        .header("X-Sync-Id", keys.sync_id())
+        .bearer_auth(keys.auth_token())
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(raw.contains("\"blob\""), "the server returned records: {raw}");
+    for secret in ["cdn.example", "tmdb:movie", "Quinn", "favorite", "content_key"] {
+        assert!(!raw.contains(secret), "the live server must not see {secret:?}");
+    }
+
+    // A browser request is refused outright, and the right group with a wrong secret is not served.
+    let browser = reqwest::Client::new()
+        .get(format!("{origin}/v1/items?since=0"))
+        .header("Origin", "https://evil.example")
+        .header("X-Sync-Id", keys.sync_id())
+        .bearer_auth(keys.auth_token())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(browser.status(), 403);
+    let wrong = reqwest::Client::new()
+        .get(format!("{origin}/v1/items?since=0"))
+        .header("X-Sync-Id", keys.sync_id())
+        .bearer_auth("not-the-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), 401);
+
+    live.delete_group().await.unwrap();
+    assert!(!live.exists().await.unwrap(), "the group is gone after deletion");
+    live.delete_group().await.expect("deleting a missing group is not an error");
 }

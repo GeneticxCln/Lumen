@@ -15,21 +15,45 @@ A Linux-first media library and player built with Tauri v2, React 19, TypeScript
 - Playback, appearance, source management, and keyboard preferences.
 - Native mpv playback on desktop.
 
-## Accounts and sync
+## Sync
 
-Signing in with Freebuff is optional. The library, files, and playback all work without an account.
+Sync is optional and there are no accounts. The library, files, and playback all work without it.
 
-Signed-in devices sync:
+Turn it on in **Settings → Profiles & sync**. Lumen makes a random secret key on that device and shows it once (14 groups of four characters, with a checksum so a typo is caught). On another device choose **Add this device** and type the key. Nothing else is exchanged: no email, no sign-in page, no code that can expire.
+
+Synced devices share:
 
 - **Profiles**: name and colour. PIN codes never leave the device.
-- **Favorites**: the stream URL and the profile it belongs to.
+- **Favorites**: the stream URL, its title key, and the profile it belongs to.
 - **Watch progress**: the stream URL, resume position, and duration.
 
-Deletions sync too. Conflicts resolve last-write-wins by timestamp.
+Deletions sync too. Conflicts resolve last-write-wins by timestamp. Playlists and imported sources are not synced and stay on this device, as do local files and their thumbnails.
 
-Favorites and progress include stream URLs, so the account server sees which streams you favorite and watch. Playlists and imported sources are not synced and stay on this device, as do local files and their thumbnails.
+### What the server can and cannot see
 
-Sign-in opens your browser and returns a one-time code to a loopback address. The app keeps its token in the OS keyring.
+Every record is encrypted on the device (XChaCha20-Poly1305) before it is uploaded. The key is split with HKDF into separate keys for the group name, for proving you belong to the group, for encryption, and for naming records, so the server learns the first two uses at most and can never decrypt.
+
+| The server can see | The server cannot see |
+| --- | --- |
+| a random group id, and when a group was last used | stream URLs, titles, profile names, positions |
+| how many records there are and how large each is | what kind of record each one is |
+| an opaque id and a timestamp per record, and whether it is a deletion | the sync key |
+| your network address, as any web server does | |
+
+A server can also refuse to answer, drop records, or serve an older valid copy of a record. It cannot alter or move a record without the app noticing: such records fail verification, are ignored, and are reported in Settings.
+
+### Things to know
+
+- **No account means no recovery.** If you lose the key and every device that has it, the synced copy is gone. Your library on each computer is not affected.
+- Anyone who has the key can read and change the synced data. **Show key** displays it again; only type it into your own devices.
+- **Turn off** forgets the key on this device and leaves the synced copy for other devices. **Delete synced data** also erases the copy from the server for everyone.
+- The key is kept in the OS keychain, never in the settings database. The server address must start with `https://` because the app sends a bearer credential to it (plain `http://` is accepted only for a server on the same computer, for development).
+- Abuse limits replace sign-in: a proof of work to create a group, a per-network daily cap, and size limits per group. They slow abuse down; they do not stop a determined attacker.
+- Data synced by older versions through the Freebuff account is not migrated. Turn sync on, and this device uploads what is in its local library.
+
+### Running your own sync server
+
+The server is a small Cloudflare Worker with a D1 database in `sync-server/`. Deploy it with `npx wrangler d1 create lumen-sync`, put the database id in `sync-server/wrangler.jsonc`, and run `npx wrangler deploy`. Enter its address in **Settings → Profiles & sync → Sync server**, or build Lumen with `LUMEN_SYNC_URL=https://your-server` to make it the default.
 
 No Netflix catalog, paid-channel access, DRM bypass, or external recommendation service is included. Artwork fallbacks are original local SVGs. Movie/series/live sections use playlist naming/group heuristics.
 
@@ -58,8 +82,6 @@ cargo test -p lumen-core
 `libgtk-3-dev`, `libsoup-3.0-dev`, `libjavascriptcoregtk-4.1-dev`), plus `ffmpeg` for the poster tests
 and `mpv` for the playback tests (those skip with a message when `mpv` is missing).
 
-The account Worker has its own checks. With `npx wrangler dev --port 8787` running (and
-`--var FREEBUFF_CLIENT_ID:test --var APP_ORIGIN:http://127.0.0.1:8787`), run `node test/desktop-flow.mjs`
-and `node test/sync-flow.mjs` from `account/` after making one request to create the schema.
+The sync server has its own checks. From `sync-server/`, `npm run typecheck` checks the types, and `npm run dev` starts it locally with small limits (in another terminal, `npm run test:sync` runs 47 plain-HTTP checks against it: group creation and proof of work, authentication, isolation between groups, last-write-wins, paging through rows that share a timestamp, quotas and deletion). The Rust side is tested against an in-process server that speaks the same API (`cargo test -p lumen-core sync`), and an ignored test (`SYNC_TEST_URL=http://127.0.0.1:8787 cargo test -p lumen-core live_ -- --ignored`) runs two clients through the real local Worker.
 
 See [AUDIT.md](AUDIT.md) for verified behavior, audit findings, security boundaries, and release blockers.

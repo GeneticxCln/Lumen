@@ -150,7 +150,7 @@ src-tauri/src/            Tauri shell
   playback/
     mod.rs         PlaybackBackend trait
     mpv_ipc.rs     JSON IPC client (MVP)
-  account.rs, sync.rs   sign-in and sync glue
+  sync.rs          sync commands (thin wrappers)
 
 crates/lumen-core/src/    core logic
   playlist/
@@ -161,7 +161,7 @@ crates/lumen-core/src/    core logic
   harvest.rs       HTML stream harvesting (Phase 2)
   probe.rs         live probing (Phase 2)
   netguard.rs      URL validation and SSRF guard
-  sync.rs, account.rs, auth.rs, secrets.rs
+  sync.rs, sync_keys.rs, sync_crypto.rs, auth.rs, secrets.rs
   error.rs
 ```
 
