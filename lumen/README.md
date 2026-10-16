@@ -15,6 +15,18 @@ A Linux-first media library and player built with Tauri v2, React 19, TypeScript
 - Playback, appearance, source management, and keyboard preferences.
 - Native mpv playback on desktop.
 
+## Subtitles
+
+Local subtitle handling needs nothing from the internet: tracks inside the file, a `.srt`/`.ass` file next to a local video (loaded automatically), drag and drop, and a file you pick in the player. Settings → Playback sets the preferred language, size and position per profile, and the player adjusts delay and size while playing.
+
+**Find subtitles online** (the *Find…* button in the player's subtitle tools) needs no account and no API key. It is off until you agree, and it only searches when you press Search; picking a result saves the file on this computer and loads it automatically the next time you play that title (no network). What it uses:
+
+- **Stremio's OpenSubtitles mirror** (`opensubtitles-v3.strem.io`) for movies and series, found by IMDb id. The id comes from TMDB when you have set a TMDB token, otherwise from IMDb's public suggestion list.
+- **Gestdown** (`api.gestdown.info`, a mirror of Addic7ed) for TV episodes.
+- Subtitles a web page offers itself, for entries added from a page (through yt-dlp); they are picked by your preferred subtitle language.
+
+A search sends the title's name, year, season and episode, the language, and for a local file a fingerprint of it (the OpenSubtitles hash, never the file) to those services. Each service can be switched off in Settings → Playback. Downloads are limited to each service's own servers and 10 MB, checked to really be subtitles (an error page is refused), converted to UTF-8 and kept in a 50 MB cache. These services are run by other people and are not official interfaces for apps like Lumen, so they can change or stop working; Gestdown covers TV only. OpenSubtitles' own old API is not used: it was shut down for third-party apps.
+
 ## Linux integration
 
 - **Open with Lumen.** The `.deb` declares the common video, audio and playlist types, so Lumen appears in "Open with". Video and audio files play, `.m3u`/`.m3u8` files are added as sources, and a subtitle file is added to what is playing.

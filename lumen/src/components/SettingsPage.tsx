@@ -8,6 +8,7 @@ import { POSTER_FRAME_OPTIONS } from "../lib/local";
 import { ProfileSettings } from "./ProfileSettings";
 import { SyncSettings } from "./SyncSettings";
 import { PlayerPrefsSettings } from "./PlayerPrefsSettings";
+import { OnlineSubtitlesSettings } from "./OnlineSubtitlesSettings";
 import { EmbeddedPlayerToggle } from "./EmbeddedPlayerToggle";
 import { LanSourcesToggle } from "./LanSourcesToggle";
 import { MediaShelf } from "./MediaShelf";
@@ -595,6 +596,7 @@ export function SettingsPage({
               A great picture. Smooth playback. Tune the native engine for your hardware.
             </p>
             <PlayerPrefsSettings />
+            <OnlineSubtitlesSettings />
             <EmbeddedPlayerToggle />
             {loading ? (
               <p role="status">Loading playback settings…</p>

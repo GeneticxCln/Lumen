@@ -1242,4 +1242,69 @@ mod tests {
         let _ = backend.stop().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A subtitle fetched from a service is stored by the core and loaded by mpv as a real track,
+    /// in each format the store can produce.
+    #[tokio::test]
+    async fn test_stored_downloaded_subtitles_load_as_tracks() {
+        if !mpv_installed() {
+            return;
+        }
+        use lumen_core::subtitles::{SubtitleCandidate, store};
+        let dir =
+            std::env::temp_dir().join(format!("lumen-fetched-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let media = dir.join("tone.wav");
+        write_wav(&media, 15).expect("fixture");
+        let backend = MpvIpcBackend::new(None, "no", "no", headless_backend_args())
+            .await
+            .expect("mpv starts");
+        backend
+            .load(&media.to_string_lossy(), None, None)
+            .await
+            .expect("load");
+
+        let candidate = |id: &str| SubtitleCandidate {
+            provider: "test".into(),
+            id: id.into(),
+            language: "en".into(),
+            release: String::new(),
+            hearing_impaired: false,
+            downloads: None,
+            fps: None,
+            hash_match: false,
+            score: 0,
+            url: String::new(),
+        };
+        let texts = [
+            ("srt", "1\n00:00:01,000 --> 00:00:02,000\nHello\n"),
+            ("vtt", "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\n"),
+            (
+                "ass",
+                "[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Text\nDialogue: 0,0:00:01.00,0:00:02.00,Default,Hello\n",
+            ),
+        ];
+        for (extension, text) in texts {
+            let before = property(&backend, "track-list")
+                .await
+                .as_array()
+                .unwrap()
+                .len();
+            let path = store::save(&dir, "stream:test", &candidate(extension), text).unwrap();
+            assert_eq!(path.extension().unwrap(), extension);
+            backend
+                .add_subtitle_file(&path.to_string_lossy())
+                .await
+                .unwrap_or_else(|error| panic!("{extension} subtitle refused: {error}"));
+            let after = property(&backend, "track-list")
+                .await
+                .as_array()
+                .unwrap()
+                .len();
+            assert_eq!(after, before + 1, "{extension} became a track");
+        }
+
+        let _ = backend.stop().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

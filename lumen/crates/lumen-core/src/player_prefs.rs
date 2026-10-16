@@ -15,7 +15,7 @@ use crate::error::{PlayerError, Result};
 pub const MIN_SUB_SCALE: f64 = 0.5;
 pub const MAX_SUB_SCALE: f64 = 3.0;
 pub const MAX_SUB_DELAY_SECONDS: f64 = 600.0;
-const MAX_SUBTITLE_FILE_BYTES: u64 = 10 * 1024 * 1024;
+pub(crate) const MAX_SUBTITLE_FILE_BYTES: u64 = 10 * 1024 * 1024;
 const SUBTITLE_EXTENSIONS: [&str; 5] = ["srt", "ass", "ssa", "vtt", "sub"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

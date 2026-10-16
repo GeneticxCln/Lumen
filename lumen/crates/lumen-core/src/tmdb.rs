@@ -713,6 +713,38 @@ pub async fn browse(key: &str) -> Result<Vec<BrowseTitle>> {
     ))
 }
 
+/// The IMDb id TMDB lists for a movie or a series (`tt0111161`), if it has one. Used to look
+/// subtitles up by a title's identity instead of its name.
+pub async fn imdb_id_for(key: &str, tmdb_type: &str, tmdb_id: i64) -> Result<Option<String>> {
+    let kind = match tmdb_type {
+        "movie" => "movie",
+        "tv" | "series" => "tv",
+        _ => return Ok(None),
+    };
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| PlayerError::Http(e.to_string()))?;
+    let mut requests = 0_i64;
+    let payload = tmdb_get(
+        &http,
+        key,
+        &format!("/{kind}/{tmdb_id}/external_ids"),
+        &[],
+        &mut requests,
+    )
+    .await
+    .map_err(|failure| match failure {
+        TmdbFailure::Unauthorized => PlayerError::Http("TMDB rejected the saved key".into()),
+        TmdbFailure::Other(message) => PlayerError::Http(message),
+    })?;
+    Ok(payload
+        .get("imdb_id")
+        .and_then(|value| value.as_str())
+        .filter(|id| id.starts_with("tt"))
+        .map(str::to_string))
+}
+
 /// Fetches one series' schedule from TMDB.
 async fn fetch_airing(
     http: &reqwest::Client,

@@ -589,3 +589,18 @@ kbd { background: var(--bg-secondary); border-color: var(--border); color: var(-
 /* Drop files anywhere to open them */
 .drop-overlay { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; background: #000a; border: 3px dashed var(--accent, #e50914); pointer-events: none; }
 .drop-overlay > div { font-size: 22px; font-weight: 800; padding: 18px 28px; border-radius: 10px; background: #1b1b1b; }
+
+/* Find subtitles dialog and its settings */
+.subtitle-dialog { width: min(640px, 92vw); }
+.subtitle-finder-controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 12px 0 8px; }
+.subtitle-finder-controls label { margin: 0; }
+.subtitle-results { list-style: none; margin: 14px 0 0; padding: 0; max-height: 46vh; overflow-y: auto; }
+.subtitle-results li { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 0; border-top: 1px solid var(--border); }
+.subtitle-row-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 13px; }
+.subtitle-row-text strong { overflow-wrap: anywhere; }
+.online-subtitles { margin-top: 28px; }
+.subtitle-services { border: 0; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+.subtitle-services legend { font-size: 12px; color: var(--fg-secondary); padding: 0; margin-bottom: 6px; }
+.subtitle-service { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.subtitle-service input { width: 16px; height: 16px; flex: none; margin: 0; }
+
