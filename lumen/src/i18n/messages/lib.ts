@@ -18,6 +18,11 @@ export const lib = {
   "lib.shelf.topRated.subtitle": "Highest TMDB ratings in your library.",
   "lib.shelf.recent.title": "Recently released",
   "lib.shelf.recent.subtitle": "Newest TMDB release years first.",
+  "lib.shelf.genre.one": "{count} title with this TMDB genre.",
+  "lib.shelf.genre.other": "{count} titles with this TMDB genre.",
+  "lib.remaining.minutes": "{minutes} min left",
+  "lib.remaining.hours": "{hours} h left",
+  "lib.remaining.hoursMinutes": "{hours} h {minutes} min left",
   "lib.onTmdb": "On TMDB",
 
   "lib.posterFrame.start": "Start of video",

@@ -170,7 +170,7 @@ export function FacetBrowser({
               <h2>{emptyMessage}</h2>
               <p>{t("facets.emptyHint")}</p>
             </div>
-          : <div className="poster-grid-viewport" ref={trackRef} tabIndex={0} aria-label={t("facets.gridLabel", { count: channels.length })}>
+          : <div className="poster-grid-viewport" ref={trackRef} tabIndex={0} aria-label={tn("facets.gridLabel", channels.length)}>
               <div style={{ height: virtualizer.getTotalSize(), width: "100%", position: "relative" }}>
                 {virtualizer.getVirtualItems().map((row) => {
                   const start = row.index * columns;

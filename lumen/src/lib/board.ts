@@ -1,3 +1,4 @@
+import { t } from "../i18n/index.ts";
 import type { Channel, HistoryEntry } from "./types.ts";
 import { contentKind, uniqueHistory } from "./discovery.ts";
 import { episodeInfo, nextEpisode } from "./episodes.ts";
@@ -179,8 +180,8 @@ export function buildBoard(input: BoardInput): Board {
 /** "12 min left", "1 h 5 min left". */
 export function remainingLabel(seconds: number): string {
   const minutes = Math.max(1, Math.round(seconds / 60));
-  if (minutes < 60) return `${minutes} min left`;
+  if (minutes < 60) return t("lib.remaining.minutes", { minutes });
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
-  return rest === 0 ? `${hours} h left` : `${hours} h ${rest} min left`;
+  return rest === 0 ? t("lib.remaining.hours", { hours }) : t("lib.remaining.hoursMinutes", { hours, minutes: rest });
 }

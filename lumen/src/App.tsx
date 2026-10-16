@@ -3,6 +3,7 @@ import { Transport } from "./components/Transport";
 import { PlayerOverlay } from "./components/PlayerOverlay";
 import { PLAYER_SEEK_STEP_SECONDS, PLAYER_VOLUME_STEP, playerShortcutFor } from "./lib/playerKeys";
 import { nextUp } from "./lib/autoplay";
+import { useEpisodeAlerts } from "./hooks/useEpisodeAlerts";
 import type { PlayerShortcut } from "./lib/playerKeys";
 import { SourceDialog } from "./components/SourceDialog";
 import { SettingsPage } from "./components/SettingsPage";
@@ -33,7 +34,7 @@ import { EpisodeList } from "./components/EpisodeList";
 import { FindSubtitles } from "./components/FindSubtitles";
 import type { UpcomingCard } from "./components/MediaShelf";
 import type { FacetSelection, Preferences } from "./lib/discovery";
-import { splitRich, t, tn, tRich } from "./i18n/index.ts";
+import { splitRich, t, tn } from "./i18n/index.ts";
 import type { PlainKey, RichPart } from "./i18n/index.ts";
 import "./App.css";
 
@@ -368,6 +369,9 @@ function App() {
     const current = library.allChannels.find((channel) => channel.id === player.currentChannelId);
     return current ? nextEpisode(current, library.allChannels) : null;
   }, [library.allChannels, player.currentChannelId]);
+  // Desktop notifications for new episodes of followed series, when the user turned them on.
+  useEpisodeAlerts(activeProfileId);
+
   // Offer the next episode in the last seconds, and start it when this one ends.
   const [dismissedNextFor, setDismissedNextFor] = useState<string | null>(null);
   const upNext = nextUp({
@@ -588,7 +592,7 @@ function App() {
         onLibraryChanged={() => { setRefresh((value) => value + 1); library.loadChannels(); }}
         onOpenSources={() => openSettings("sources")}
       /> : <div className="browse-content standalone-content">
-          <div className="page-heading"><div><p className="eyebrow">{t("app.browse.eyebrow")}</p><h1>{t(headings[page as Exclude<Page, "discovery" | "search" | "local" | "settings">].title)}</h1><p>{t(headings[page as Exclude<Page, "discovery" | "search" | "local" | "settings">].blurb)}</p></div><span className="library-stat">{renderStrong(tRich("app.browse.libraryStat", { count: listForPage(page).length }))}</span></div>
+          <div className="page-heading"><div><p className="eyebrow">{t("app.browse.eyebrow")}</p><h1>{t(headings[page as Exclude<Page, "discovery" | "search" | "local" | "settings">].title)}</h1><p>{t(headings[page as Exclude<Page, "discovery" | "search" | "local" | "settings">].blurb)}</p></div><span className="library-stat">{renderStrong(splitRich(tn("app.browse.libraryStat", listForPage(page).length)))}</span></div>
 
           <div className="browse-toolbar">
             <p className="browse-summary" role="status">

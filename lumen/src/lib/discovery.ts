@@ -1,4 +1,4 @@
-import { t } from "../i18n/index.ts";
+import { t, tn } from "../i18n/index.ts";
 import type { BrowseTitle, Channel, HistoryEntry } from "./types.ts";
 
 // Names and descriptions are read when the page draws them, so they follow the language in use.
@@ -381,7 +381,7 @@ export function catalogShelves(channels: Channel[]): CatalogShelf[] {
     .map(([genre, titles]) => ({
       id: `genre-${genre}`,
       title: genre,
-      subtitle: `${titles.length} ${titles.length === 1 ? "title" : "titles"} with this TMDB genre.`,
+      subtitle: tn("lib.shelf.genre", titles.length),
       channels: [...titles].sort(byRating).slice(0, SHELF_SIZE),
     }));
 

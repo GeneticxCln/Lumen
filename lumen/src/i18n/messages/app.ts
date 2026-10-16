@@ -45,7 +45,8 @@ export const app = {
   "app.error.retry": "Retry",
 
   "app.browse.eyebrow": "FROM YOUR OWN SOURCES",
-  "app.browse.libraryStat": "<strong>{count}</strong> titles",
+  "app.browse.libraryStat.one": "<strong>{count}</strong> title",
+  "app.browse.libraryStat.other": "<strong>{count}</strong> titles",
   "app.browse.count.one": "<strong>{count}</strong> title",
   "app.browse.count.other": "<strong>{count}</strong> titles",
   "app.browse.filtersApplied.one": "· {count} category applied",
@@ -152,5 +153,6 @@ export const app = {
   "facets.titlesNote": "Posters and details from TMDB when matched.",
   "facets.enriched": "{count} TMDB matched",
   "facets.emptyHint": "Clear a category, or try a different combination of group, genre, and year.",
-  "facets.gridLabel": "{count} titles",
+  "facets.gridLabel.one": "{count} title",
+  "facets.gridLabel.other": "{count} titles",
 } as const;
