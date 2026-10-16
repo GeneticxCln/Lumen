@@ -1,7 +1,6 @@
 pub mod auth;
 pub mod content_key;
 pub mod db;
-pub mod env;
 pub mod error;
 pub mod extract;
 pub mod harvest;

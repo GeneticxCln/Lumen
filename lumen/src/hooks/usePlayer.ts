@@ -17,7 +17,14 @@ import {
 import { DEFAULT_PLAYER_STATE } from "../lib/types";
 import type { PlayerTrackKind } from "../lib/types";
 
-export function usePlayer() {
+interface PlayerOptions {
+  /** Told when playback moves to another source by itself, so the user is not left guessing. */
+  onNotice?: (message: string) => void;
+}
+
+export function usePlayer(options: PlayerOptions = {}) {
+  const onNoticeRef = useRef(options.onNotice);
+  onNoticeRef.current = options.onNotice;
   const [playerState, setPlayerState] = useState<PlayerState>(DEFAULT_PLAYER_STATE);
   const [currentTitle, setCurrentTitle] = useState<string | null>(null);
   const currentTitleRef = useRef(currentTitle);
@@ -59,6 +66,7 @@ export function usePlayer() {
       .then(async (next) => {
         if (!next) return;
         await playUrl(next.url, next.headers ?? undefined, next.channel_id ?? undefined);
+        onNoticeRef.current?.(`${currentTitleRef.current ?? "This title"} failed to play from that source, so Lumen switched to another one.`);
         headersRef.current = next.headers ?? undefined;
         setCurrentUrl(next.url);
         setCurrentChannelId(next.channel_id ?? undefined);

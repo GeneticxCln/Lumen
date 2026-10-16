@@ -19,6 +19,15 @@ static DB_POOL: OnceLock<Pool<Sqlite>> = OnceLock::new();
 /// as a broken library. Held only while the pool is created; every later call returns early.
 static DB_INIT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Applies the schema. The one copy of the migrations lives in this crate, so the app and every
+/// test (including the desktop crate's) build the same database.
+pub async fn run_migrations(pool: &Pool<Sqlite>) -> Result<()> {
+    sqlx::migrate!("./migrations")
+        .run(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(format!("Migration failed: {}", e)))
+}
+
 pub async fn init_db(app_dir: &Path) -> Result<Pool<Sqlite>> {
     if let Some(existing) = DB_POOL.get() {
         return Ok(existing.clone());
@@ -46,11 +55,7 @@ pub async fn init_db(app_dir: &Path) -> Result<Pool<Sqlite>> {
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    // Run migrations
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .map_err(|e| PlayerError::Sql(format!("Migration failed: {}", e)))?;
+    run_migrations(&pool).await?;
 
     // sqlx records a migration as applied the first time it runs, so a new column added
     // to the migration file would never reach an existing database. Apply the additive

@@ -70,7 +70,7 @@ function App() {
   const searchRef = useRef<HTMLInputElement | null>(null);
   const library = useChannels(refresh);
   const [browseTitles, setBrowseTitles] = useState<BrowseTitle[]>([]);
-  const player = usePlayer();
+  const player = usePlayer({ onNotice: (message) => setNotice(message) });
   const details = library.allChannels.find((channel) => channel.id === detailId) || null;
   const currentProfile = profiles.find((profile) => profile.id === activeProfileId) || null;
   const setDetails = (channel: Channel | null) => setDetailId(channel?.id ?? null);
@@ -306,7 +306,7 @@ function App() {
         <button className="icon-button header-save" aria-label="Open My List" onClick={() => openSettings("mylist")}><Icon name="bookmark" size={19} /><span className="header-count">{myList.length}</span></button><span className="header-divider" /><button className="header-profile" aria-label={currentProfile ? `Open settings. Profile: ${currentProfile.name}` : "Open settings"} onClick={() => openSettings(settingsSection)}>{currentProfile ? currentProfile.name.slice(0, 1).toUpperCase() : "L"}</button></div>
     </header>
     <main id="main-content">
-      {notice && <div className="app-notice" role="alert"><span>{notice}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setNotice(null)}><Icon name="close" /></button></div>}
+      {notice && <div className="app-notice" role="alert"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notice" onClick={() => setNotice(null)}><Icon name="close" /></button></div>}
       {library.error && <div className="app-notice" role="alert"><div><strong>Couldn’t connect to your library</strong><p>{library.error}. Start the Lumen backend or desktop app, then retry.</p></div><button onClick={library.loadChannels}>Retry</button></div>}
 
       {page === "settings" ? <SettingsPage

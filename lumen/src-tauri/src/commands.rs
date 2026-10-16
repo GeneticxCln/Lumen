@@ -1400,7 +1400,7 @@ mod local_path_tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
 
         let temp = std::env::temp_dir().join(format!("lumen-poster-setting-{}", uuid::Uuid::new_v4().simple()));
         let cache = temp.join("thumbnails");
@@ -1438,9 +1438,7 @@ mod local_path_tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        // Apply only the schema this feature needs, so the test does not depend on the full migration set.
-        sqlx::raw_sql(include_str!("../migrations/001_initial.sql")).execute(&pool).await.unwrap();
-        sqlx::raw_sql(include_str!("../migrations/005_poster_frames.sql")).execute(&pool).await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
 
         let temp = std::env::temp_dir().join(format!("lumen-file-poster-{}", uuid::Uuid::new_v4().simple()));
         fs::create_dir_all(&temp).expect("fixture directory");
