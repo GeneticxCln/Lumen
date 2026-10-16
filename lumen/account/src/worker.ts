@@ -1,470 +1,338 @@
-// Account Worker for Lumen. Browser sign-in is handled by Freebuff (cookie
-// session). The desktop app cannot use that cookie, so it signs in through the
-// system browser: the Worker issues a one-time code to a loopback redirect, and
-// the app exchanges that code (with its PKCE verifier) for its own app token.
-import { createFreebuffAuth, isSameOriginRequest } from '@freebuff/auth'
-
-import { applySchema } from './schema'
-
-import type { FreebuffAuth } from '@freebuff/auth'
+// Sync server for Lumen. There are no accounts and no logins.
+//
+// A device creates a random secret and derives from it a public group id and an authentication
+// token (see src-tauri/src/sync_crypto.rs). It registers the group with SHA-256 of the token, then
+// stores encrypted records under opaque ids. This server never holds a key that can decrypt them:
+// it sees the group id, opaque item ids, timestamps, a deleted flag and blob sizes, and nothing
+// about what the records are.
+//
+// With no identity to rate-limit, abuse is bounded by a proof of work to create a group, a
+// per-IP daily cap on creations, a row cap per group, and expiry of idle groups.
 
 export interface Env {
   DB: D1Database
-  FREEBUFF_CLIENT_ID: string
-  FREEBUFF_ISSUER?: string
-  APP_ORIGIN: string
-  /** Set to "1" for local development only. */
-  ALLOW_INSECURE_LOCALHOST?: string
+  /** Leading zero bits required to create a group. Default 20 (about a million hashes). */
+  POW_BITS?: string
+  /** Groups one IP address may create per day. Default 20. */
+  GROUP_CREATE_LIMIT?: string
+  /** Rows one group may hold. Default 20000. */
+  MAX_ITEMS?: string
+  /** Mixed into the hashed IP used for the daily creation cap, so the hash cannot be reversed. */
+  RATE_SALT?: string
 }
 
-type Handler = (request: Request, env: Env, auth: FreebuffAuth) => Promise<Response>
-
-const CODE_TTL_MS = 60_000
 const DAY_MS = 24 * 60 * 60 * 1000
-// A token lasts two weeks and renews itself while the app keeps syncing, so a device that stops
-// being used drops out of the account on its own instead of holding a month-long credential.
-const TOKEN_TTL_MS = 14 * DAY_MS
-const TOKEN_RENEW_WITHIN_MS = 7 * DAY_MS
-/** Rows one account may hold. Far above real use; stops an account from filling the database. */
-const SYNC_MAX_ITEMS_PER_ACCOUNT = 20_000
-/** Deletion markers older than this are no longer needed by any device that syncs. */
+const GROUP_IDLE_EXPIRY_MS = 180 * DAY_MS
 const TOMBSTONE_KEEP_MS = 90 * DAY_MS
+const TOUCH_INTERVAL_MS = 60 * 60 * 1000
+const MAX_PUSH = 500
+const MAX_PULL = 500
+const MAX_BLOB_CHARS = 6144
+const MAX_BODY_BYTES = 4 * 1024 * 1024
 const NO_STORE = { 'Cache-Control': 'private, no-store' }
 
-const STATE_RE = /^[A-Za-z0-9_-]{16,128}$/
-const CHALLENGE_RE = /^[A-Za-z0-9_-]{43}$/
-const VERIFIER_RE = /^[A-Za-z0-9._~-]{43,128}$/
-const BEARER_RE = /^Bearer ([A-Za-z0-9_-]{43})$/
+const SYNC_ID_RE = /^[0-9a-f]{32}$/
+const ITEM_ID_RE = /^[0-9a-f]{32}$/
+const VERIFIER_RE = /^[0-9a-f]{64}$/
+const TOKEN_RE = /^Bearer ([A-Za-z0-9_-]{43})$/
+const BLOB_RE = /^[A-Za-z0-9_-]+$/
 
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: NO_STORE })
 }
 
-function base64url(bytes: Uint8Array): string {
-  let binary = ''
-  for (const byte of bytes) binary += String.fromCharCode(byte)
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+function intVar(value: string | undefined, fallback: number): number {
+  if (value === undefined || value === '') return fallback
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback
 }
 
-function randomToken(byteLength: number): string {
-  return base64url(crypto.getRandomValues(new Uint8Array(byteLength)))
+async function sha256Bytes(input: string): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input)))
 }
 
-async function sha256Base64url(input: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input))
-  return base64url(new Uint8Array(digest))
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-/** Loopback callbacks only: http://127.0.0.1:<port>/callback or http://localhost:<port>/callback. */
-function isLoopbackCallback(value: string): boolean {
-  let url: URL
-  try {
-    url = new URL(value)
-  } catch {
-    return false
+/** Compares two strings without stopping at the first difference. */
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  let difference = 0
+  for (let index = 0; index < a.length; index++) difference |= a.charCodeAt(index) ^ b.charCodeAt(index)
+  return difference === 0
+}
+
+function leadingZeroBits(hash: Uint8Array): number {
+  let bits = 0
+  for (const byte of hash) {
+    if (byte === 0) {
+      bits += 8
+      continue
+    }
+    return bits + Math.clz32(byte) - 24
   }
-  const port = Number(url.port)
-  return (
-    url.protocol === 'http:' &&
-    (url.hostname === '127.0.0.1' || url.hostname === 'localhost') &&
-    url.port !== '' &&
-    port >= 1024 &&
-    port <= 65535 &&
-    url.pathname === '/callback' &&
-    url.search === '' &&
-    url.hash === '' &&
-    url.username === '' &&
-    url.password === ''
-  )
+  return bits
 }
 
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string)
+async function readJson(request: Request): Promise<unknown | null> {
+  const declared = Number(request.headers.get('Content-Length') ?? '0')
+  if (declared > MAX_BODY_BYTES) return null
+  try {
+    const text = await request.text()
+    if (text.length > MAX_BODY_BYTES) return null
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
 }
 
-interface AuthorizeRequest {
-  redirectUri: string
-  state: string
-  challenge: string
-}
+/** The group this request is for, once its token checks out; otherwise the response to send. */
+async function authenticate(request: Request, env: Env): Promise<{ syncId: string } | Response> {
+  const syncId = request.headers.get('X-Sync-Id') ?? ''
+  const match = TOKEN_RE.exec(request.headers.get('Authorization') ?? '')
+  if (!SYNC_ID_RE.test(syncId) || !match) return json({ error: 'unauthorized' }, 401)
 
-/** Reads and validates the authorize parameters, or null if any is malformed. */
-function parseAuthorize(params: URLSearchParams | FormData): AuthorizeRequest | null {
-  const redirectUri = String(params.get('redirect_uri') ?? '')
-  const state = String(params.get('state') ?? '')
-  const challenge = String(params.get('code_challenge') ?? '')
-  if (String(params.get('code_challenge_method') ?? '') !== 'S256') return null
-  if (!isLoopbackCallback(redirectUri) || !STATE_RE.test(state) || !CHALLENGE_RE.test(challenge)) return null
-  return { redirectUri, state, challenge }
-}
+  const row = await env.DB.prepare('SELECT verifier, last_seen_at FROM sync_groups WHERE sync_id = ?')
+    .bind(syncId)
+    .first<{ verifier: string; last_seen_at: number }>()
+  // A sync id is 128 random bits, so telling "no such group" apart from "wrong token" leaks
+  // nothing guessable and lets a device with a valid key say so.
+  if (!row) return json({ error: 'group_not_found' }, 404)
+  if (!constantTimeEqual(toHex(await sha256Bytes(match[1])), row.verifier)) return json({ error: 'unauthorized' }, 401)
 
-/**
- * The page that asks the signed-in person to approve the app. Without it, any website could
- * navigate a signed-in browser to /desktop/authorize and hand a code to whatever listens on a
- * local port, which on a shared machine may be another user's process.
- */
-function consentPage(request: AuthorizeRequest): string {
-  const port = new URL(request.redirectUri).port
-  const field = (name: string, value: string) => `<input type="hidden" name="${name}" value="${escapeHtml(value)}">`
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Allow Lumen</title>
-<style>body{font:16px system-ui,sans-serif;max-width:30rem;margin:12vh auto;padding:0 1rem;color:#1e2531}button{font:inherit;padding:.6rem 1.2rem;margin-right:.5rem;cursor:pointer}</style></head><body>
-<h1>Allow Lumen on this computer?</h1>
-<p>A Lumen app on this computer (listening on port <strong>${escapeHtml(port)}</strong>) is asking to sync your profiles, favorites and watch progress with your account.</p>
-<p>Only continue if you just chose <em>Sign in</em> in Lumen.</p>
-<form method="post" action="/desktop/authorize">${field('redirect_uri', request.redirectUri)}${field('state', request.state)}${field('code_challenge', request.challenge)}${field('code_challenge_method', 'S256')}
-<button type="submit">Allow</button><a href="about:blank">Cancel</a></form></body></html>`
-}
-
-function htmlResponse(body: string): Response {
-  return new Response(body, {
-    status: 200,
-    headers: {
-      'Content-Type': 'text/html; charset=utf-8',
-      ...NO_STORE,
-      // The approval page must not be framed, and its form may only post back here; the redirect
-      // that follows goes to a loopback address, which form-action also governs.
-      'Content-Security-Policy':
-        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' http://127.0.0.1:* http://localhost:*; frame-ancestors 'none'; base-uri 'none'",
-      'X-Frame-Options': 'DENY',
-    },
-  })
-}
-
-/** Stores a one-time code for the signed-in user and sends the browser back to the app. */
-async function issueCode(env: Env, sub: string, request: AuthorizeRequest): Promise<Response> {
-  const code = randomToken(32)
   const now = Date.now()
-  await env.DB.batch([
-    env.DB.prepare('DELETE FROM desktop_codes WHERE expires_at < ?').bind(now),
-    env.DB.prepare(
-      'INSERT INTO desktop_codes (code_hash, sub, redirect_uri, code_challenge, expires_at) VALUES (?, ?, ?, ?, ?)',
-    ).bind(await sha256Base64url(code), sub, request.redirectUri, request.challenge, now + CODE_TTL_MS),
-  ])
-  const back = new URL(request.redirectUri)
-  back.searchParams.set('code', code)
-  back.searchParams.set('state', request.state)
-  return new Response(null, { status: 302, headers: { Location: back.toString(), ...NO_STORE } })
+  if (now - row.last_seen_at > TOUCH_INTERVAL_MS) {
+    await env.DB.prepare('UPDATE sync_groups SET last_seen_at = ? WHERE sync_id = ?').bind(now, syncId).run()
+  }
+  return { syncId }
 }
 
-/**
- * The desktop client starts here in the system browser. GET shows an approval page; only a
- * same-origin POST from that page issues the code.
- */
-async function desktopAuthorize(request: Request, env: Env, auth: FreebuffAuth): Promise<Response> {
-  if (request.method === 'POST') {
-    // Browsers always send Origin on a form POST. A missing or foreign one means the form was
-    // not ours, so refuse before reading anything.
-    if (!request.headers.has('Origin') || !isSameOriginRequest(request, env.APP_ORIGIN)) {
-      return json({ error: 'forbidden' }, 403)
-    }
-    let form: FormData
-    try {
-      form = await request.formData()
-    } catch {
-      return json({ error: 'invalid_request' }, 400)
-    }
-    const parsed = parseAuthorize(form)
-    if (!parsed) return json({ error: 'invalid_request' }, 400)
-    const user = await auth.getUser(request)
-    if (!user) return json({ error: 'Sign in required' }, 401)
-    return issueCode(env, user.sub, parsed)
-  }
-
-  const url = new URL(request.url)
-  const parsed = parseAuthorize(url.searchParams)
-  if (!parsed) return json({ error: 'invalid_request' }, 400)
-
-  const user = await auth.getUser(request)
-  if (!user) {
-    // Send the browser through sign-in, then back to this exact request.
-    const signIn = new URL('/auth/freebuff/signin', env.APP_ORIGIN)
-    signIn.searchParams.set('returnTo', url.pathname + url.search)
-    return new Response(null, { status: 302, headers: { Location: signIn.toString(), ...NO_STORE } })
-  }
-  return htmlResponse(consentPage(parsed))
-}
-
-/** The desktop client exchanges its one-time code for an app token. */
-async function desktopToken(request: Request, env: Env): Promise<Response> {
-  if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405)
-  // Browsers always send Origin on cross-site POSTs; the desktop client does not.
-  if (request.headers.has('Origin')) return json({ error: 'forbidden' }, 403)
-
-  let body: { code?: unknown; code_verifier?: unknown; redirect_uri?: unknown }
-  try {
-    body = await request.json()
-  } catch {
-    return json({ error: 'invalid_request' }, 400)
-  }
-  const { code, code_verifier: verifier, redirect_uri: redirectUri } = body
+async function createGroup(request: Request, env: Env): Promise<Response> {
+  const body = (await readJson(request)) as { sync_id?: unknown; verifier?: unknown; pow_nonce?: unknown } | null
+  if (!body || typeof body !== 'object') return json({ error: 'invalid_request' }, 400)
+  const { sync_id: syncId, verifier, pow_nonce: nonce } = body
   if (
-    typeof code !== 'string' ||
+    typeof syncId !== 'string' ||
+    !SYNC_ID_RE.test(syncId) ||
     typeof verifier !== 'string' ||
-    typeof redirectUri !== 'string' ||
     !VERIFIER_RE.test(verifier) ||
-    !isLoopbackCallback(redirectUri)
+    typeof nonce !== 'number' ||
+    !Number.isSafeInteger(nonce) ||
+    nonce < 0
   ) {
     return json({ error: 'invalid_request' }, 400)
   }
 
-  const codeHash = await sha256Base64url(code)
-  const row = await env.DB.prepare(
-    'SELECT sub, redirect_uri, code_challenge, expires_at, used FROM desktop_codes WHERE code_hash = ?',
-  )
-    .bind(codeHash)
-    .first<{ sub: string; redirect_uri: string; code_challenge: string; expires_at: number; used: number }>()
-
-  if (!row || row.used !== 0 || row.expires_at < Date.now() || row.redirect_uri !== redirectUri) {
-    return json({ error: 'invalid_grant' }, 400)
-  }
-  if ((await sha256Base64url(verifier)) !== row.code_challenge) {
-    return json({ error: 'invalid_grant' }, 400)
+  // Registering the same group again is how a second run of "turn on sync" recovers; a different
+  // verifier for an existing id is someone else's group.
+  const existing = await env.DB.prepare('SELECT verifier FROM sync_groups WHERE sync_id = ?')
+    .bind(syncId)
+    .first<{ verifier: string }>()
+  if (existing) {
+    return constantTimeEqual(existing.verifier, verifier) ? json({ created: false }) : json({ error: 'conflict' }, 409)
   }
 
-  // Consume the code atomically so it works exactly once.
-  const consumed = await env.DB.prepare('UPDATE desktop_codes SET used = 1 WHERE code_hash = ? AND used = 0')
-    .bind(codeHash)
-    .run()
-  if (consumed.meta.changes !== 1) return json({ error: 'invalid_grant' }, 400)
+  const bits = intVar(env.POW_BITS, 20)
+  if (leadingZeroBits(await sha256Bytes(`${syncId}:${nonce}`)) < bits) return json({ error: 'invalid_pow' }, 400)
 
-  const token = randomToken(32)
-  const expiresAt = Date.now() + TOKEN_TTL_MS
-  // Expired and revoked sessions are dead weight; clear them while we are writing anyway.
-  await env.DB.prepare('DELETE FROM app_sessions WHERE expires_at < ? OR (revoked = 1 AND created_at < ?)')
-    .bind(Date.now(), Date.now() - 30 * DAY_MS)
-    .run()
-  await env.DB.prepare(
-    'INSERT INTO app_sessions (token_hash, sub, created_at, expires_at) VALUES (?, ?, ?, ?)',
-  )
-    .bind(await sha256Base64url(token), row.sub, Date.now(), expiresAt)
-    .run()
-
-  return json({ access_token: token, token_type: 'Bearer', expires_at: expiresAt })
-}
-
-/** Resolves the Bearer app token to a user sub, or null. */
-async function sessionSub(request: Request, env: Env): Promise<string | null> {
-  const match = BEARER_RE.exec(request.headers.get('Authorization') ?? '')
-  if (!match) return null
-  const row = await env.DB.prepare('SELECT sub, expires_at, revoked FROM app_sessions WHERE token_hash = ?')
-    .bind(await sha256Base64url(match[1]))
-    .first<{ sub: string; expires_at: number; revoked: number }>()
   const now = Date.now()
-  if (!row || row.revoked !== 0 || row.expires_at < now) return null
-  if (row.expires_at - now < TOKEN_RENEW_WITHIN_MS) {
-    await env.DB.prepare('UPDATE app_sessions SET expires_at = ? WHERE token_hash = ?')
-      .bind(now + TOKEN_TTL_MS, await sha256Base64url(match[1]))
-      .run()
-  }
-  return row.sub
-}
-
-async function desktopMe(request: Request, env: Env): Promise<Response> {
-  const sub = await sessionSub(request, env)
-  if (!sub) return json({ error: 'Sign in required' }, 401)
-  return json({ sub })
-}
-
-async function desktopSignOut(request: Request, env: Env): Promise<Response> {
-  if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405)
-  const match = BEARER_RE.exec(request.headers.get('Authorization') ?? '')
-  if (!match) return json({ error: 'Sign in required' }, 401)
-  await env.DB.prepare('UPDATE app_sessions SET revoked = 1 WHERE token_hash = ?')
-    .bind(await sha256Base64url(match[1]))
+  const day = Math.floor(now / DAY_MS)
+  const ip = request.headers.get('cf-connecting-ip') ?? 'unknown'
+  const ipHash = toHex(await sha256Bytes(`${env.RATE_SALT ?? 'lumen'}:${day}:${ip}`)).slice(0, 32)
+  await env.DB.prepare(
+    `INSERT INTO group_creations (day, ip_hash, n) VALUES (?, ?, 1)
+     ON CONFLICT (day, ip_hash) DO UPDATE SET n = n + 1`,
+  )
+    .bind(day, ipHash)
     .run()
+  const counted = await env.DB.prepare('SELECT n FROM group_creations WHERE day = ? AND ip_hash = ?')
+    .bind(day, ipHash)
+    .first<{ n: number }>()
+  if ((counted?.n ?? 0) > intVar(env.GROUP_CREATE_LIMIT, 20)) return json({ error: 'rate_limited' }, 429)
+
+  // Clear what is no longer needed while writing anyway: idle groups and old counters.
+  const cutoff = now - GROUP_IDLE_EXPIRY_MS
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM sync_blobs WHERE sync_id IN (SELECT sync_id FROM sync_groups WHERE last_seen_at < ?)').bind(cutoff),
+    env.DB.prepare('DELETE FROM sync_groups WHERE last_seen_at < ?').bind(cutoff),
+    env.DB.prepare('DELETE FROM group_creations WHERE day < ?').bind(day - 2),
+    env.DB.prepare('INSERT INTO sync_groups (sync_id, verifier, created_at, last_seen_at) VALUES (?, ?, ?, ?)').bind(
+      syncId,
+      verifier,
+      now,
+      now,
+    ),
+  ])
+  return json({ created: true }, 201)
+}
+
+async function deleteGroup(request: Request, env: Env): Promise<Response> {
+  const auth = await authenticate(request, env)
+  if (auth instanceof Response) return auth
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM sync_blobs WHERE sync_id = ?').bind(auth.syncId),
+    env.DB.prepare('DELETE FROM sync_groups WHERE sync_id = ?').bind(auth.syncId),
+  ])
   return json({ ok: true })
 }
 
-const SYNC_KINDS = new Set(['profile', 'favorite', 'progress'])
-const SYNC_MAX_PUSH = 500
-const SYNC_MAX_PULL = 500
-const SYNC_MAX_PAYLOAD_BYTES = 4096
-const SYNC_MAX_KEY_LENGTH = 512
-
-interface SyncPush {
-  kind: string
-  key: string
-  payload: unknown
+interface PushItem {
+  id: string
   updated_at: number
   deleted: boolean
+  blob: string
 }
 
-function parseSyncPush(value: unknown): SyncPush[] | null {
+function parsePush(value: unknown): PushItem[] | null {
   if (!value || typeof value !== 'object' || !Array.isArray((value as { items?: unknown }).items)) return null
   const items = (value as { items: unknown[] }).items
-  if (items.length > SYNC_MAX_PUSH) return null
-  const parsed: SyncPush[] = []
+  if (items.length > MAX_PUSH) return null
+  const parsed: PushItem[] = []
   for (const item of items) {
     if (!item || typeof item !== 'object') return null
-    const { kind, key, payload, updated_at: updatedAt, deleted } = item as Record<string, unknown>
+    const { id, updated_at: updatedAt, deleted, blob } = item as Record<string, unknown>
     if (
-      typeof kind !== 'string' ||
-      !SYNC_KINDS.has(kind) ||
-      typeof key !== 'string' ||
-      key.length === 0 ||
-      key.length > SYNC_MAX_KEY_LENGTH ||
+      typeof id !== 'string' ||
+      !ITEM_ID_RE.test(id) ||
       typeof updatedAt !== 'number' ||
       !Number.isSafeInteger(updatedAt) ||
       updatedAt < 0 ||
       typeof deleted !== 'boolean' ||
-      payload === undefined
+      typeof blob !== 'string' ||
+      blob.length === 0 ||
+      blob.length > MAX_BLOB_CHARS ||
+      !BLOB_RE.test(blob)
     ) {
       return null
     }
-    const serialized = JSON.stringify(payload)
-    if (new TextEncoder().encode(serialized).length > SYNC_MAX_PAYLOAD_BYTES) return null
-    parsed.push({ kind, key, payload, updated_at: updatedAt, deleted })
+    parsed.push({ id, updated_at: updatedAt, deleted, blob })
   }
   return parsed
 }
 
-/**
- * GET: pull records changed after `since` (ms). POST: push local records.
- * Each row is keyed by the signed-in sub, so a token only ever touches its own data.
- */
-async function desktopSync(request: Request, env: Env): Promise<Response> {
-  // The desktop client sends no Origin. Refuse browser requests outright.
-  if (request.headers.has('Origin')) return json({ error: 'forbidden' }, 403)
-  const sub = await sessionSub(request, env)
-  if (!sub) return json({ error: 'Sign in required' }, 401)
+async function pushItems(request: Request, env: Env): Promise<Response> {
+  const auth = await authenticate(request, env)
+  if (auth instanceof Response) return auth
+  const items = parsePush(await readJson(request))
+  if (!items) return json({ error: 'invalid_request' }, 400)
+  if (items.length === 0) return json({ ok: true, received: 0 })
 
-  if (request.method === 'GET') {
-    const params = new URL(request.url).searchParams
-    const since = Number(params.get('since') ?? '0')
-    if (!Number.isSafeInteger(since) || since < 0) return json({ error: 'invalid_request' }, 400)
+  // Old deletion markers go first, so the cap never traps a group that holds mostly tombstones.
+  await env.DB.prepare('DELETE FROM sync_blobs WHERE sync_id = ? AND deleted = 1 AND updated_at < ?')
+    .bind(auth.syncId, Date.now() - TOMBSTONE_KEEP_MS)
+    .run()
+  const held = await env.DB.prepare('SELECT COUNT(*) AS n FROM sync_blobs WHERE sync_id = ?')
+    .bind(auth.syncId)
+    .first<{ n: number }>()
+  if ((held?.n ?? 0) + items.length > intVar(env.MAX_ITEMS, 20_000)) return json({ error: 'quota_exceeded' }, 413)
 
-    // Rows are paged in (updated_at, kind, item_key) order. A page boundary can fall in the middle
-    // of rows that share one updated_at (a bulk migration stamps them all alike), so the next
-    // request names the last row it received and the server resumes strictly after it. Without
-    // that, `updated_at > since` would skip every remaining row with the boundary's timestamp.
-    const afterKind = params.get('after_kind')
-    const afterKey = params.get('after_key')
-    if ((afterKind === null) !== (afterKey === null)) return json({ error: 'invalid_request' }, 400)
-    if (afterKey !== null && afterKey.length > SYNC_MAX_KEY_LENGTH) return json({ error: 'invalid_request' }, 400)
-
-    const statement =
-      afterKind !== null && afterKey !== null
-        ? env.DB.prepare(
-            `SELECT kind, item_key, payload, updated_at, deleted FROM sync_items
-             WHERE sub = ? AND (updated_at > ? OR (updated_at = ? AND (kind > ? OR (kind = ? AND item_key > ?))))
-             ORDER BY updated_at, kind, item_key LIMIT ?`,
-          ).bind(sub, since, since, afterKind, afterKind, afterKey, SYNC_MAX_PULL + 1)
-        : env.DB.prepare(
-            'SELECT kind, item_key, payload, updated_at, deleted FROM sync_items WHERE sub = ? AND updated_at > ? ORDER BY updated_at, kind, item_key LIMIT ?',
-          ).bind(sub, since, SYNC_MAX_PULL + 1)
-    const rows = await statement.all<{ kind: string; item_key: string; payload: string; updated_at: number; deleted: number }>()
-    const found = rows.results ?? []
-    const page = found.slice(0, SYNC_MAX_PULL)
-    return json({
-      items: page.map((row) => ({
-        kind: row.kind,
-        key: row.item_key,
-        payload: JSON.parse(row.payload) as unknown,
-        updated_at: row.updated_at,
-        deleted: row.deleted === 1,
-      })),
-      has_more: found.length > SYNC_MAX_PULL,
-    })
-  }
-
-  if (request.method === 'POST') {
-    let body: unknown
-    try {
-      body = await request.json()
-    } catch {
-      return json({ error: 'invalid_request' }, 400)
-    }
-    const items = parseSyncPush(body)
-    if (!items) return json({ error: 'invalid_request' }, 400)
-    if (items.length === 0) return json({ ok: true, received: 0 })
-
-    // Reclaim old deletion markers first, so the quota never traps an account that only has
-    // tombstones left. Then refuse growth past the cap.
-    await env.DB.prepare('DELETE FROM sync_items WHERE sub = ? AND deleted = 1 AND updated_at < ?')
-      .bind(sub, Date.now() - TOMBSTONE_KEEP_MS)
-      .run()
-    const held = await env.DB.prepare('SELECT COUNT(*) AS n FROM sync_items WHERE sub = ?')
-      .bind(sub)
-      .first<{ n: number }>()
-    if ((held?.n ?? 0) + items.length > SYNC_MAX_ITEMS_PER_ACCOUNT) {
-      return json({ error: 'quota_exceeded' }, 413)
-    }
-
-    // Last write wins: a stale push never overwrites a newer row.
-    const statements = items.map((item) =>
+  // Last write wins: a stale push never replaces a newer record.
+  await env.DB.batch(
+    items.map((item) =>
       env.DB.prepare(
-        `INSERT INTO sync_items (sub, kind, item_key, payload, updated_at, deleted) VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT (sub, kind, item_key) DO UPDATE SET
-           payload = excluded.payload,
+        `INSERT INTO sync_blobs (sync_id, item_id, updated_at, deleted, blob) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (sync_id, item_id) DO UPDATE SET
            updated_at = excluded.updated_at,
-           deleted = excluded.deleted
-         WHERE excluded.updated_at > sync_items.updated_at`,
-      ).bind(
-        sub,
-        item.kind,
-        item.key,
-        JSON.stringify(item.payload),
-        item.updated_at,
-        item.deleted ? 1 : 0,
-      ),
-    )
-    await env.DB.batch(statements)
-    return json({ ok: true, received: items.length })
-  }
-
-  return json({ error: 'method_not_allowed' }, 405)
+           deleted = excluded.deleted,
+           blob = excluded.blob
+         WHERE excluded.updated_at > sync_blobs.updated_at`,
+      ).bind(auth.syncId, item.id, item.updated_at, item.deleted ? 1 : 0, item.blob),
+    ),
+  )
+  return json({ ok: true, received: items.length })
 }
 
-const routes: Record<string, Handler> = {
-  '/api/desktop/sync': (request, env) => desktopSync(request, env),
-  '/desktop/authorize': (request, env, auth) => {
-    if (request.method !== 'GET' && request.method !== 'POST') {
-      return Promise.resolve(json({ error: 'method_not_allowed' }, 405))
-    }
-    return desktopAuthorize(request, env, auth)
-  },
-  '/api/desktop/token': (request, env) => desktopToken(request, env),
-  '/api/desktop/me': (request, env) => desktopMe(request, env),
-  '/api/desktop/signout': (request, env) => {
-    // Sign-out from a browser is a state change; require same origin as well.
-    if (request.headers.has('Origin') && !isSameOriginRequest(request, env.APP_ORIGIN)) {
-      return Promise.resolve(json({ error: 'forbidden' }, 403))
-    }
-    return desktopSignOut(request, env)
-  },
+async function pullItems(request: Request, env: Env): Promise<Response> {
+  const auth = await authenticate(request, env)
+  if (auth instanceof Response) return auth
+  const params = new URL(request.url).searchParams
+  const since = Number(params.get('since') ?? '0')
+  if (!Number.isSafeInteger(since) || since < 0) return json({ error: 'invalid_request' }, 400)
+  const afterId = params.get('after_id')
+  if (afterId !== null && !ITEM_ID_RE.test(afterId)) return json({ error: 'invalid_request' }, 400)
+
+  // Pages run in (updated_at, item_id) order. A page can end in the middle of records that share
+  // a timestamp, so the next request names the last record it received and resumes after it.
+  const statement =
+    afterId !== null
+      ? env.DB.prepare(
+          `SELECT item_id, updated_at, deleted, blob FROM sync_blobs
+           WHERE sync_id = ? AND (updated_at > ? OR (updated_at = ? AND item_id > ?))
+           ORDER BY updated_at, item_id LIMIT ?`,
+        ).bind(auth.syncId, since, since, afterId, MAX_PULL + 1)
+      : env.DB.prepare(
+          `SELECT item_id, updated_at, deleted, blob FROM sync_blobs
+           WHERE sync_id = ? AND updated_at > ? ORDER BY updated_at, item_id LIMIT ?`,
+        ).bind(auth.syncId, since, MAX_PULL + 1)
+  const rows = (await statement.all<{ item_id: string; updated_at: number; deleted: number; blob: string }>()).results ?? []
+  return json({
+    items: rows.slice(0, MAX_PULL).map((row) => ({
+      id: row.item_id,
+      updated_at: row.updated_at,
+      deleted: row.deleted === 1,
+      blob: row.blob,
+    })),
+    has_more: rows.length > MAX_PULL,
+  })
 }
 
-let auth: FreebuffAuth | undefined
-let app: ((request: Request, env: Env) => Promise<Response>) | undefined
+const SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS sync_groups (
+    sync_id TEXT PRIMARY KEY,
+    verifier TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS sync_blobs (
+    sync_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    blob TEXT NOT NULL,
+    PRIMARY KEY (sync_id, item_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS sync_blobs_pull ON sync_blobs (sync_id, updated_at, item_id)`,
+  `CREATE TABLE IF NOT EXISTS group_creations (
+    day INTEGER NOT NULL,
+    ip_hash TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    PRIMARY KEY (day, ip_hash)
+  )`,
+]
+
+// Applied once per isolate; every statement is idempotent.
 let schemaReady: Promise<unknown> | undefined
 
-function setup(env: Env) {
-  // One instance per isolate caches discovery and signing keys.
-  auth ??= createFreebuffAuth({
-    clientId: env.FREEBUFF_CLIENT_ID,
-    issuer: env.FREEBUFF_ISSUER,
-    baseUrl: env.APP_ORIGIN,
-    allowInsecureLocalhost: env.ALLOW_INSECURE_LOCALHOST === '1',
-  })
-  const signedIn = auth
-  app ??= signedIn.wrap(async (request: Request, env: Env) => {
-    try {
-      schemaReady ??= applySchema(env.DB)
-      await schemaReady
-    } catch (error) {
-      // Allow a retry on the next request instead of caching the failure.
-      schemaReady = undefined
-      throw error
-    }
-    const route = routes[new URL(request.url).pathname]
-    if (!route) return json({ error: 'not_found' }, 404)
-    return route(request, env, signedIn)
-  })
-  return app
+async function route(request: Request, env: Env): Promise<Response> {
+  // Only the desktop app talks to this server. A browser always sends Origin, so a web page cannot
+  // use a visitor's browser to reach it.
+  if (request.headers.has('Origin')) return json({ error: 'forbidden' }, 403)
+
+  const { pathname } = new URL(request.url)
+  const method = request.method
+  if (pathname === '/v1/groups') {
+    if (method === 'POST') return createGroup(request, env)
+    if (method === 'DELETE') return deleteGroup(request, env)
+    return json({ error: 'method_not_allowed' }, 405)
+  }
+  if (pathname === '/v1/items') {
+    if (method === 'GET') return pullItems(request, env)
+    if (method === 'POST') return pushItems(request, env)
+    return json({ error: 'method_not_allowed' }, 405)
+  }
+  return json({ error: 'not_found' }, 404)
 }
 
 export default {
-  fetch(request: Request, env: Env): Promise<Response> {
-    return setup(env)(request, env)
+  async fetch(request: Request, env: Env): Promise<Response> {
+    try {
+      schemaReady ??= env.DB.batch(SCHEMA.map((sql) => env.DB.prepare(sql)))
+      await schemaReady
+    } catch (error) {
+      schemaReady = undefined // retry on the next request instead of caching the failure
+      throw error
+    }
+    return route(request, env)
   },
 }
