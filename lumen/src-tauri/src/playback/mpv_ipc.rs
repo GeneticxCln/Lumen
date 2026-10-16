@@ -42,6 +42,16 @@ const LOAD_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Shown when Stop interrupts a load that had not finished.
 pub const CANCELLED_MESSAGE: &str = "Playback was stopped before the stream finished loading";
 
+/// The last lines mpv wrote to its error output, kept so a failed start can say why.
+pub type MpvLog = Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
+const MPV_LOG_LINES: usize = 20;
+
+/// How long a new mpv gets to open its control socket. A first start can be slow (shader cache,
+/// hardware decoding probe, audio device), so this is generous; a player that has already exited
+/// is noticed at once and does not wait this long.
+const SOCKET_WAIT: Duration = Duration::from_secs(20);
+const SOCKET_POLL: Duration = Duration::from_millis(75);
+
 /// What keeps the player behind the socket running.
 pub enum Engine {
     /// A separate mpv process, which opens its own window (or draws into a window it was given).
@@ -169,6 +179,84 @@ fn mpv_track(track: &MpvValue) -> Option<PlayerTrack> {
     })
 }
 
+/// Reads mpv's error output into `log` (bounded). With `LUMEN_DEBUG_MPV` set it is also printed.
+async fn collect_log(stderr: tokio::process::ChildStderr, log: MpvLog) {
+    let echo = std::env::var_os("LUMEN_DEBUG_MPV").is_some();
+    let mut lines = BufReader::new(stderr).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if echo {
+            eprintln!("mpv: {line}");
+        }
+        let mut guard = log.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.len() == MPV_LOG_LINES {
+            guard.pop_front();
+        }
+        guard.push_back(line);
+    }
+}
+
+/// The last lines of `log`, as one string for an error message.
+fn log_tail(log: Option<&MpvLog>) -> String {
+    let Some(log) = log else {
+        return String::new();
+    };
+    let guard = log.lock().unwrap_or_else(|p| p.into_inner());
+    let lines: Vec<&str> = guard
+        .iter()
+        .rev()
+        .take(6)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    lines.join("; ")
+}
+
+/// Waits for the control socket to accept a connection. A player process that has already
+/// exited ends the wait at once, with its exit status and what it printed.
+async fn wait_for_socket(
+    socket_path: &str,
+    engine: &mut Engine,
+    log: Option<&MpvLog>,
+) -> Result<UnixStream> {
+    let deadline = tokio::time::Instant::now() + SOCKET_WAIT;
+    loop {
+        if Path::new(socket_path).exists()
+            && let Ok(stream) = UnixStream::connect(socket_path).await
+        {
+            return Ok(stream);
+        }
+        if let Engine::Process(child) = engine
+            && let Ok(Some(status)) = child.try_wait()
+        {
+            // Give the error reader a moment to take the last lines.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let tail = log_tail(log);
+            return Err(PlayerError::Mpv(if tail.is_empty() {
+                format!("mpv stopped before it was ready ({status})")
+            } else {
+                format!("mpv stopped before it was ready ({status}): {tail}")
+            }));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let tail = log_tail(log);
+            return Err(PlayerError::Mpv(if tail.is_empty() {
+                format!(
+                    "mpv did not open its control socket within {} seconds",
+                    SOCKET_WAIT.as_secs()
+                )
+            } else {
+                format!(
+                    "mpv did not open its control socket within {} seconds: {tail}",
+                    SOCKET_WAIT.as_secs()
+                )
+            }));
+        }
+        tokio::time::sleep(SOCKET_POLL).await;
+    }
+}
+
 impl MpvIpcBackend {
     /// A fresh control-socket path in a directory only this user can enter.
     pub fn new_socket_path() -> Result<String> {
@@ -206,14 +294,16 @@ impl MpvIpcBackend {
             "--idle=yes",
             "--force-window=yes",
             &hwdec_arg,
-            "--vo=gpu-next",
+            // The newer renderer first, the older one if this machine cannot run it.
+            "--vo=gpu-next,gpu",
             "--keep-open=yes",
             &cache_arg,
             // Subtitles that sit beside a local file are picked up by name ("Movie.srt" for
             // "Movie.mkv"), also from the usual subtitle folders. Streams have no sidecars.
             "--sub-auto=fuzzy",
             "--sub-file-paths=subs:Subs:subtitles:Subtitles",
-            "--really-quiet",
+            // Warnings and errors only, kept (see `MpvLog`) to explain a start that fails.
+            "--msg-level=all=warn",
         ]);
 
         if !extra_args.trim().is_empty() {
@@ -222,17 +312,25 @@ impl MpvIpcBackend {
             }
         }
 
+        // Inside an AppImage, mpv must not load the AppImage's copies of system libraries.
+        lumen_core::child_env::scrub(mpv_cmd.as_std_mut());
         mpv_cmd
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let mpv_process = mpv_cmd
-            .spawn()
-            .map_err(|e| PlayerError::Mpv(format!("Failed to spawn mpv: {}", e)))?;
+        let mut mpv_process = mpv_cmd.spawn().map_err(|e| {
+            PlayerError::Mpv(format!(
+                "Failed to start mpv ({e}). Is mpv installed and on the PATH?"
+            ))
+        })?;
+        let log = MpvLog::default();
+        if let Some(stderr) = mpv_process.stderr.take() {
+            tokio::spawn(collect_log(stderr, log.clone()));
+        }
 
-        Self::connect(app, socket_path, Engine::Process(mpv_process)).await
+        Self::connect_logged(app, socket_path, Engine::Process(mpv_process), Some(log)).await
     }
 
     /// Connects to the control socket of a player that is starting (or running) and sets the
@@ -242,21 +340,17 @@ impl MpvIpcBackend {
         socket_path: String,
         engine: Engine,
     ) -> Result<Self> {
-        // Wait for socket to appear and accept connections
-        let mut connected_stream = None;
-        for _ in 0..60 {
-            if Path::new(&socket_path).exists()
-                && let Ok(s) = UnixStream::connect(&socket_path).await
-            {
-                connected_stream = Some(s);
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(75)).await;
-        }
+        Self::connect_logged(app, socket_path, engine, None).await
+    }
 
-        let stream = connected_stream.ok_or_else(|| {
-            PlayerError::Mpv("mpv IPC socket did not become ready in time".into())
-        })?;
+    /// `connect`, with the error output of the player (if it is a process) to explain a failure.
+    pub async fn connect_logged(
+        app: Option<AppHandle>,
+        socket_path: String,
+        mut engine: Engine,
+        log: Option<MpvLog>,
+    ) -> Result<Self> {
+        let stream = wait_for_socket(&socket_path, &mut engine, log.as_ref()).await?;
 
         let (reader_half, mut writer_half) = stream.into_split();
         let mut reader = BufReader::new(reader_half);
@@ -883,6 +977,57 @@ impl Drop for MpvIpcBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_player_that_exits_at_once_is_reported_with_what_it_printed() {
+        let mut child = Command::new("sh")
+            .args(["-c", "echo libfoo.so.1 needs FOO_2 >&2; exit 3"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let log = MpvLog::default();
+        tokio::spawn(collect_log(child.stderr.take().unwrap(), log.clone()));
+        let mut engine = Engine::Process(child);
+        let started = std::time::Instant::now();
+        let error = wait_for_socket("/nonexistent/lumen-test.sock", &mut engine, Some(&log))
+            .await
+            .map(drop)
+            .unwrap_err();
+        let text = String::from(error);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "gave up at once, not after the full wait"
+        );
+        assert!(text.contains("stopped before it was ready"), "{text}");
+        assert!(text.contains("exit status: 3"), "{text}");
+        assert!(
+            text.contains("FOO_2"),
+            "mpv's own words are in the message: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_socket_that_appears_late_is_still_found() {
+        let dir = std::env::temp_dir().join(format!("lumen-sock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("late.sock").to_string_lossy().into_owned();
+        let late = path.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            let listener = tokio::net::UnixListener::bind(&late).unwrap();
+            let _ = listener.accept().await;
+        });
+        let child = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut engine = Engine::Process(child);
+        assert!(wait_for_socket(&path, &mut engine, None).await.is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+    }
     use std::io::Write;
     use std::path::PathBuf;
 

@@ -23,6 +23,14 @@ use tauri::{Manager, RunEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // A way out for machines where the page engine's newer compositing path is slow or broken
+    // (some NVIDIA/Wayland setups): `LUMEN_WEBKIT_SAFE=1 lumen`. Not the default, because it
+    // trades speed elsewhere for safety.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("LUMEN_WEBKIT_SAFE").is_some() {
+        // SAFETY: first thing in `run`, before any thread that reads the environment exists.
+        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+    }
     let app = tauri::Builder::default()
         // First, so a second launch is handed to the running window before anything else starts.
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
@@ -38,6 +46,8 @@ pub fn run() {
             let args: Vec<String> = std::env::args().skip(1).collect();
             launch::handle_arguments(app.handle(), &args, std::env::current_dir().ok().as_deref());
             embed::detect_display();
+            #[cfg(target_os = "linux")]
+            tune_page_engine(app.handle());
             #[cfg(target_os = "linux")]
             mpris::start(app.handle().clone());
             let app_handle = app.handle().clone();
@@ -150,6 +160,21 @@ pub fn run() {
                     }
                 }
             });
+        }
+    });
+}
+
+/// Asks the page engine for smooth, hardware-accelerated scrolling and drawing.
+#[cfg(target_os = "linux")]
+fn tune_page_engine(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let _ = window.with_webview(|webview| {
+        use webkit2gtk::{HardwareAccelerationPolicy, SettingsExt, WebViewExt};
+        if let Some(settings) = webview.inner().settings() {
+            settings.set_enable_smooth_scrolling(true);
+            settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Always);
         }
     });
 }

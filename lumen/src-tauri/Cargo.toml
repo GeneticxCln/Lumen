@@ -1,6 +1,6 @@
 [package]
 name = "lumen"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Linux-first media library and player powered by Tauri, Rust, and mpv"
 authors = ["Lumen Contributors"]
 edition = "2024"
@@ -55,3 +55,5 @@ mpris-server = "0.10"
 # The same GTK the window is built on, to give mpv a native area to draw into (embedded player).
 gtk = "0.18"
 gdkx11 = "0.18"
+# The page engine's own settings (smooth scrolling, hardware acceleration); the version Tauri uses.
+webkit2gtk = "2"
