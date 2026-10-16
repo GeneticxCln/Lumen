@@ -11,6 +11,9 @@ url='https://github.com/GeneticxCln/Lumen'
 license=('MIT')
 depends=('webkit2gtk-4.1' 'gtk3' 'mpv')
 makedepends=('cargo' 'nodejs' 'npm' 'pkgconf' 'openssl' 'librsvg')
+# makepkg's default LTO flags make the bundled SQLite (built by the cc crate) unusable by rustc's
+# linker: the sqlx proc-macro then fails with "undefined symbol: sqlite3_bind_int64".
+options=('!lto')
 optdepends=('ffmpeg: thumbnails for local videos'
             'gnome-keyring: stores the sync key and API keys')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
