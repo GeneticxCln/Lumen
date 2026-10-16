@@ -7,6 +7,13 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Also runnable by hand (Actions -> Release -> Run workflow) for a tag that does not exist yet: the
+  # release creates the tag at the commit that was built.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to create and release, e.g. v0.1.0 (must match the app version)"
+        required: true
 
 permissions:
   contents: write
@@ -55,7 +62,9 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ contains(inputs.tag || github.ref_name, '-') }}
           generate_release_notes: true
           files: |
             lumen/target/release/bundle/deb/*.deb
