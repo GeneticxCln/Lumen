@@ -14,4 +14,5 @@ pub mod probe;
 pub mod search;
 pub mod secrets;
 pub mod sync;
+pub mod sync_crypto;
 pub mod tmdb;
