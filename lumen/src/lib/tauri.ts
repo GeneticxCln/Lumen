@@ -21,6 +21,7 @@ import type {
   SearchResponse,
   SyncState,
   SyncStatus,
+  PlayerPrefs,
   BrowseTitle,
 } from "./types";
 import type { PosterCandidate } from "./types";
@@ -112,6 +113,24 @@ export async function setPlayerTrack(kind: PlayerTrackKind, id: string) {
 
 export async function setPlayerQuality(id: string) {
   return callBackend("set_player_quality", { id });
+}
+
+export async function getPlayerPrefs() {
+  return callBackend<PlayerPrefs>("get_player_prefs_cmd");
+}
+
+/** Saves the active profile's audio and subtitle preferences and applies them to the running player. */
+export async function setPlayerPrefs(prefs: PlayerPrefs) {
+  return callBackend<PlayerPrefs>("set_player_prefs_cmd", { prefs });
+}
+
+/** Shifts the current file's subtitles by `seconds` (positive is later). Returns the applied delay. */
+export async function setSubtitleDelay(seconds: number) {
+  return callBackend<number>("set_subtitle_delay_cmd", { seconds });
+}
+
+export async function addSubtitleFile(path: string) {
+  return callBackend("add_subtitle_file_cmd", { path });
 }
 
 export async function stop() {

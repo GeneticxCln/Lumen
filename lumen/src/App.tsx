@@ -155,6 +155,13 @@ function App() {
     setBusy(false);
   }
 
+  // Lets the user pick a subtitle file for what is playing now.
+  async function chooseSubtitleFile() {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({ filters: [{ name: "Subtitles", extensions: ["srt", "ass", "ssa", "vtt", "sub"] }] });
+    if (typeof selected === "string") await player.addSubtitle(selected);
+  }
+
   async function playFile(path: string, name?: string, headers?: Record<string, string>, audioUrl?: string, channelId?: number) {
     try {
       await player.playMedia(path, name, headers, preferences.defaultVolume, audioUrl, channelId);
@@ -228,21 +235,21 @@ function App() {
   useEffect(() => {
     if (activeProfileId === null) return;
     let active = true;
-    listEpisodeMarks().then((list) => { if (active) setMarks(list); }).catch(() => { if (active) setMarks([]); });
+    listEpisodeMarks().then((list) => { if (active) setMarks(list ?? []); }).catch(() => { if (active) setMarks([]); });
     return () => { active = false; };
   }, [activeProfileId, refresh]);
   useEffect(() => {
     if (activeProfileId === null) return;
     let active = true;
     // Show what is stored at once, then let TMDB refresh stale schedules in the background.
-    upcomingEpisodes(false).then((list) => { if (active) setUpcoming(list); }).catch(() => {});
-    upcomingEpisodes(true).then((list) => { if (active) setUpcoming(list); }).catch(() => {});
+    upcomingEpisodes(false).then((list) => { if (active) setUpcoming(list ?? []); }).catch(() => {});
+    upcomingEpisodes(true).then((list) => { if (active) setUpcoming(list ?? []); }).catch(() => {});
     return () => { active = false; };
   }, [activeProfileId]);
   const markEpisodes = async (seriesKey: string, season: number, episodes: number[], watched: boolean) => {
     await run(async () => {
       await setEpisodesWatched(seriesKey, season, episodes, watched);
-      setMarks(await listEpisodeMarks());
+      setMarks((await listEpisodeMarks()) ?? []);
     });
   };
   const today = new Date().toISOString().slice(0, 10);
@@ -254,7 +261,7 @@ function App() {
   useEffect(() => {
     if (activeProfileId === null) return;
     let active = true;
-    boardNewChannelIds().then((ids) => { if (active) setNewChannelIds(ids); }).catch(() => { if (active) setNewChannelIds([]); });
+    boardNewChannelIds().then((ids) => { if (active) setNewChannelIds(ids ?? []); }).catch(() => { if (active) setNewChannelIds([]); });
     return () => { active = false; };
   }, [activeProfileId, library.allChannels]);
   const recommendations = useMemo(() => recommendChannels(available, preferences.personalizedRows ? history : [], preferences.personalizedRows ? library.favoriteIds : new Set()), [available, history, library.favoriteIds, preferences.personalizedRows]);
@@ -458,7 +465,7 @@ function App() {
       buffering={player.playerState.buffering}
       onTogglePause={() => void run(player.togglePause)}
       onToggleFullscreen={() => void run(toggleFullscreen)}
-      controls={<Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); closePlayer(); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} onSelectTrack={(kind, id) => void run(() => player.selectTrack(kind, id))} onSelectQuality={(id) => void run(() => player.selectQuality(id))} isFullscreen={isFullscreen} onToggleFullscreen={() => void run(toggleFullscreen)} />}
+      controls={<Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); closePlayer(); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} onSelectTrack={(kind, id) => void run(() => player.selectTrack(kind, id))} onSelectQuality={(id) => void run(() => player.selectQuality(id))} subtitleDelay={player.subtitleDelay} onSubtitleDelay={(direction) => void run(() => player.changeSubtitleDelay(direction))} onSubtitleScale={(direction) => void run(() => player.changeSubtitleScale(direction))} onAddSubtitle={() => void run(chooseSubtitleFile)} isFullscreen={isFullscreen} onToggleFullscreen={() => void run(toggleFullscreen)} />}
     >
       <div className="player-native-card"><Icon name="play" size={40} /><h2>{player.currentTitle}</h2><p>Your video plays in the native mpv window.</p></div>
     </PlayerOverlay>}

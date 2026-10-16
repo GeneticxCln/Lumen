@@ -1,5 +1,5 @@
 pub use lumen_core::{
-    auth, board, db, error, extract, harvest, media_tools, netguard, pin_guard, playlist, probe,
+    auth, board, db, error, extract, harvest, media_tools, netguard, pin_guard, player_prefs, playlist, probe,
     search, secrets, series, tmdb,
 };
 
@@ -51,6 +51,10 @@ pub fn run() {
             set_fullscreen,
             set_player_track,
             set_player_quality,
+            get_player_prefs_cmd,
+            set_player_prefs_cmd,
+            set_subtitle_delay_cmd,
+            add_subtitle_file_cmd,
             stop,
             import_playlist_file,
             import_playlist_url,

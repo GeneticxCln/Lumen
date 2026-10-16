@@ -266,3 +266,15 @@ export interface Profile {
   created_at: number;
   last_used_at: number;
 }
+
+/** Audio and subtitle preferences of the active profile. */
+export interface PlayerPrefs {
+  /** An ISO 639 code, or empty to leave the choice to the player. */
+  audioLang: string;
+  /** "auto", "off", or a language code. */
+  subtitles: string;
+  /** 1 is the player's default size. */
+  subScale: number;
+  /** 100 is the bottom of the picture, 0 the top. */
+  subPos: number;
+}

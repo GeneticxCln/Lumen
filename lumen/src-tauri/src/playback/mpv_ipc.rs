@@ -144,6 +144,10 @@ impl MpvIpcBackend {
             "--vo=gpu-next",
             "--keep-open=yes",
             &cache_arg,
+            // Subtitles that sit beside a local file are picked up by name ("Movie.srt" for
+            // "Movie.mkv"), also from the usual subtitle folders. Streams have no sidecars.
+            "--sub-auto=fuzzy",
+            "--sub-file-paths=subs:Subs:subtitles:Subtitles",
             "--really-quiet",
         ]);
 
@@ -610,11 +614,31 @@ impl MpvIpcBackend {
         self.set_property("hls-bitrate", MpvValue::String(quality.into())).await
     }
 
-    pub async fn add_external_subtitle(&self, sub_path: &str) -> Result<()> {
+    /// Applies a profile's audio and subtitle preferences. Done before each load (with
+    /// `reset_delay`, since a subtitle delay belongs to one file) and when the preferences change.
+    /// Best effort per property: one that mpv refuses must not stop the rest, or the playback.
+    pub async fn apply_prefs(&self, prefs: &lumen_core::player_prefs::PlayerPrefs, reset_delay: bool) {
+        for (name, value) in prefs.mpv_properties(reset_delay) {
+            if let Err(error) = self.set_property(name, value).await {
+                eprintln!("lumen: could not set {name}: {error}");
+            }
+        }
+    }
+
+    /// Shifts the subtitles of the current file by `seconds` (positive shows them later).
+    pub async fn set_subtitle_delay(&self, seconds: f64) -> Result<f64> {
+        let delay = lumen_core::player_prefs::clamp_delay(seconds)?;
+        self.set_property("sub-delay", serde_json::json!(delay)).await?;
+        Ok(delay)
+    }
+
+    /// Adds a subtitle file the user chose to the current file and shows it.
+    pub async fn add_subtitle_file(&self, path: &str) -> Result<()> {
+        let file = lumen_core::player_prefs::validate_subtitle_file(path)?;
         self.send_command(vec![
             MpvValue::String("sub-add".into()),
-            MpvValue::String(sub_path.into()),
-            MpvValue::String("auto".into()),
+            MpvValue::String(file.to_string_lossy().into_owned()),
+            MpvValue::String("select".into()),
         ])
         .await?;
         Ok(())
@@ -635,6 +659,7 @@ impl Drop for MpvIpcBackend {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
 
     /// These tests drive a real mpv. On a machine without it (a minimal CI image) they skip, with
     /// a message, rather than failing for a reason unrelated to the code under test.
@@ -770,5 +795,132 @@ mod tests {
         let error = outcome.expect_err("an interrupted load is an error");
         assert!(error.to_string().contains("stopped"), "unexpected error: {error}");
         held.abort();
+    }
+
+    fn ffmpeg_installed() -> bool {
+        let found = std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !found {
+            eprintln!("skipped: ffmpeg is not installed");
+        }
+        found
+    }
+
+    fn headless_backend_args() -> &'static str {
+        "--vo=null --ao=null --force-window=no"
+    }
+
+    async fn property(backend: &MpvIpcBackend, name: &str) -> serde_json::Value {
+        backend
+            .send_command(vec![MpvValue::String("get_property".into()), MpvValue::String(name.into())])
+            .await
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    /// A 3-second video with two audio tracks (English, Japanese) and two subtitle tracks
+    /// (English, Spanish), plus a sidecar `.srt` beside it.
+    fn write_multilingual_fixture(dir: &Path) -> PathBuf {
+        let srt = |text: &str| format!("1\n00:00:00,500 --> 00:00:02,500\n{text}\n");
+        std::fs::write(dir.join("en.srt"), srt("Hello")).unwrap();
+        std::fs::write(dir.join("es.srt"), srt("Hola")).unwrap();
+        std::fs::write(dir.join("episode.srt"), srt("Sidecar")).unwrap();
+        let out = dir.join("episode.mkv");
+        let status = std::process::Command::new("ffmpeg")
+            .current_dir(dir)
+            .args(["-v", "error", "-y",
+                "-f", "lavfi", "-i", "color=c=black:s=64x64:d=3",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+                "-f", "lavfi", "-i", "sine=frequency=880:duration=3",
+                "-i", "en.srt", "-i", "es.srt",
+                "-map", "0", "-map", "1", "-map", "2", "-map", "3", "-map", "4",
+                "-c:v", "libx264", "-c:a", "aac", "-c:s", "srt",
+                "-metadata:s:a:0", "language=eng", "-metadata:s:a:1", "language=jpn",
+                "-metadata:s:s:0", "language=eng", "-metadata:s:s:1", "language=spa",
+                "-shortest"])
+            .arg(&out)
+            .status()
+            .expect("ffmpeg should run");
+        assert!(status.success(), "fixture encode failed");
+        out
+    }
+
+    /// Preferences really change what mpv selects: audio language, subtitle language, hidden
+    /// subtitles, a sidecar file next to the video, a file added by hand, and a per-file delay.
+    #[tokio::test]
+    async fn test_audio_and_subtitle_preferences_drive_real_track_selection() {
+        if !mpv_installed() || !ffmpeg_installed() {
+            return;
+        }
+        use lumen_core::player_prefs::PlayerPrefs;
+        let dir = std::env::temp_dir().join(format!("lumen-subs-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let video = write_multilingual_fixture(&dir);
+        let url = video.to_string_lossy().to_string();
+        let backend = MpvIpcBackend::new(None, "no", "no", headless_backend_args()).await.expect("mpv starts");
+
+        // Default: mpv's own choice (first audio track).
+        backend.apply_prefs(&PlayerPrefs::default(), true).await;
+        backend.load(&url, None, None).await.expect("load");
+        assert_eq!(property(&backend, "aid").await, serde_json::json!(1), "first audio track by default");
+
+        // The sidecar file beside the video was found by name and selected: a file the user put next
+        // to the video wins over embedded tracks (mpv's rule, kept on purpose).
+        let tracks = property(&backend, "track-list").await;
+        let sidecar = tracks.as_array().unwrap().iter().find(|t| t["type"] == "sub" && t["external"] == true);
+        assert!(sidecar.is_some_and(|t| t["selected"] == true), "episode.srt beside episode.mkv is loaded and selected: {tracks}");
+
+        // Japanese audio and Spanish subtitles, on a copy with no sidecar so the embedded tracks decide.
+        let plain_dir = dir.join("plain");
+        std::fs::create_dir_all(&plain_dir).unwrap();
+        let plain = plain_dir.join("episode.mkv");
+        std::fs::copy(&video, &plain).unwrap();
+        let plain_url = plain.to_string_lossy().to_string();
+        let prefs = PlayerPrefs { audio_lang: "ja".into(), subtitles: "es".into(), ..Default::default() };
+        backend.apply_prefs(&prefs, true).await;
+        backend.load(&plain_url, None, None).await.expect("load");
+        assert_eq!(property(&backend, "aid").await, serde_json::json!(2), "Japanese audio is the second track");
+        let sid = property(&backend, "sid").await.as_i64().expect("a subtitle track is selected");
+        let tracks = property(&backend, "track-list").await;
+        let selected = tracks.as_array().unwrap().iter().find(|t| t["type"] == "sub" && t["id"] == sid).expect("selected sub exists");
+        assert_eq!(selected["lang"], "spa", "the Spanish subtitle is chosen: {selected}");
+        assert_eq!(property(&backend, "sub-visibility").await, serde_json::json!(true));
+
+        // English subtitles instead.
+        backend.apply_prefs(&PlayerPrefs { subtitles: "en".into(), ..Default::default() }, true).await;
+        backend.load(&plain_url, None, None).await.expect("load");
+        let sid = property(&backend, "sid").await.as_i64().expect("a subtitle track is selected");
+        let tracks = property(&backend, "track-list").await;
+        let selected = tracks.as_array().unwrap().iter().find(|t| t["type"] == "sub" && t["id"] == sid).unwrap();
+        assert_eq!(selected["lang"], "eng");
+
+        // Subtitles off hides them; size and position are applied.
+        let off = PlayerPrefs { subtitles: "off".into(), sub_scale: 1.5, sub_pos: 90, ..Default::default() };
+        backend.apply_prefs(&off, true).await;
+        assert_eq!(property(&backend, "sub-visibility").await, serde_json::json!(false));
+        assert_eq!(property(&backend, "sub-scale").await.as_f64(), Some(1.5));
+        assert_eq!(property(&backend, "sub-pos").await.as_f64(), Some(90.0));
+
+        // A delay applies to this file and is gone on the next load.
+        assert_eq!(backend.set_subtitle_delay(1.26).await.unwrap(), 1.3);
+        assert_eq!(property(&backend, "sub-delay").await.as_f64(), Some(1.3));
+        backend.apply_prefs(&PlayerPrefs::default(), true).await;
+        backend.load(&url, None, None).await.expect("load");
+        assert_eq!(property(&backend, "sub-delay").await.as_f64(), Some(0.0), "delay does not carry to the next file");
+
+        // A subtitle file added by hand becomes a selected track; junk is refused before mpv sees it.
+        let before = property(&backend, "track-list").await.as_array().unwrap().len();
+        let extra = dir.join("extra.srt");
+        std::fs::write(&extra, "1\n00:00:00,500 --> 00:00:01,500\nExtra\n").unwrap();
+        backend.add_subtitle_file(extra.to_str().unwrap()).await.expect("subtitle added");
+        let after = property(&backend, "track-list").await.as_array().unwrap().len();
+        assert_eq!(after, before + 1, "one track was added");
+        assert!(backend.add_subtitle_file("/etc/passwd").await.is_err());
+
+        let _ = backend.stop().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

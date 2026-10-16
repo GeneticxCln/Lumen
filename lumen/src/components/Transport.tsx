@@ -1,6 +1,7 @@
 import { Icon } from "./Icon";
 import type { PlayerState } from "../lib/types";
 import { PLAYER_SEEK_STEP_SECONDS } from "../lib/playerKeys";
+import { formatDelay } from "../lib/languages";
 
 interface TransportProps {
   state: PlayerState;
@@ -16,6 +17,10 @@ interface TransportProps {
   onToggleFullscreen: () => void;
   onSelectTrack: (kind: "audio" | "subtitle", id: string) => void;
   onSelectQuality: (id: string) => void;
+  subtitleDelay: number;
+  onSubtitleDelay: (direction: 1 | -1) => void;
+  onSubtitleScale: (direction: 1 | -1) => void;
+  onAddSubtitle: () => void;
 }
 
 export function Transport({
@@ -32,7 +37,12 @@ export function Transport({
   onToggleFullscreen,
   onSelectTrack,
   onSelectQuality,
+  subtitleDelay,
+  onSubtitleDelay,
+  onSubtitleScale,
+  onAddSubtitle,
 }: TransportProps) {
+  const hasSubtitles = state.tracks.some((track) => track.kind === "subtitle");
   const formatTime = (seconds: number) => {
     const safe = Math.max(0, Math.floor(seconds || 0));
     const hrs = Math.floor(safe / 3600);
@@ -135,6 +145,17 @@ export function Transport({
                 {state.tracks.filter((track) => track.kind === "subtitle").map((track) => <option key={track.id} value={track.id}>{track.label}</option>)}
               </select>
             </label>
+            <div className="player-option subtitle-tools" role="group" aria-label="Subtitle adjustments">
+              <span>Subtitle tools</span>
+              <div>
+                <button className="icon-button" disabled={!hasSubtitles} aria-label="Show subtitles earlier" title="Subtitles earlier" onClick={() => onSubtitleDelay(-1)}>−</button>
+                <output aria-label="Subtitle delay">{formatDelay(subtitleDelay)}</output>
+                <button className="icon-button" disabled={!hasSubtitles} aria-label="Show subtitles later" title="Subtitles later" onClick={() => onSubtitleDelay(1)}>+</button>
+                <button className="icon-button" disabled={!hasSubtitles} aria-label="Smaller subtitles" title="Smaller subtitles" onClick={() => onSubtitleScale(-1)}>A−</button>
+                <button className="icon-button" disabled={!hasSubtitles} aria-label="Larger subtitles" title="Larger subtitles" onClick={() => onSubtitleScale(1)}>A+</button>
+                <button className="icon-button" aria-label="Add a subtitle file" title="Add a subtitle file" onClick={onAddSubtitle}>＋ File</button>
+              </div>
+            </div>
             <label className="player-option">
               <span>Quality</span>
               <select aria-label="Playback quality" value={state.quality} onChange={(event) => onSelectQuality(event.target.value)} disabled={!state.qualityLevels.length} title={state.qualityHelp}>

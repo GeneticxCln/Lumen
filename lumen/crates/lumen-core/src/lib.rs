@@ -8,6 +8,7 @@ pub mod harvest;
 pub mod media_tools;
 pub mod netguard;
 pub mod pin_guard;
+pub mod player_prefs;
 pub mod playlist;
 pub mod probe;
 pub mod search;

@@ -578,3 +578,10 @@ kbd { background: var(--bg-secondary); border-color: var(--border); color: var(-
 .episode-rows li { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 12px; }
 .episode-rows li.is-watched .episode-name { color: var(--fg-secondary); }
 .episode-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Audio and subtitle preferences */
+.player-prefs-grid { display: grid; grid-template-columns: minmax(180px, 240px) minmax(180px, 320px); gap: 12px 18px; align-items: center; margin: 14px 0; }
+.player-prefs-grid label { margin: 0; }
+.player-prefs-grid input[type=range] { width: 100%; }
+.subtitle-tools output { display: inline-block; min-width: 52px; text-align: center; font-size: 11px; }
+.subtitle-tools > div { display: flex; align-items: center; gap: 4px; }

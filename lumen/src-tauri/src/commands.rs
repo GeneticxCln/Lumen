@@ -1,3 +1,4 @@
+use crate::player_prefs;
 use crate::db::*;
 use crate::error::{PlayerError, Result};
 use crate::extract::{self, ExtractorStatus};
@@ -116,6 +117,10 @@ pub async fn play_url(
         })
     });
 
+    // This profile's audio and subtitle preferences, and a fresh subtitle delay for the new file.
+    let prefs = player_prefs::load(pool, profile_id).await.unwrap_or_default();
+    backend.apply_prefs(&prefs, true).await;
+
     // Volume goes in before the file does, so playback never starts at mpv's default level.
     if let Some(volume) = volume {
         let _ = backend.set_volume(volume).await;
@@ -167,6 +172,40 @@ pub async fn set_fullscreen(enabled: bool) -> Result<()> {
 pub async fn set_player_track(kind: String, id: String) -> Result<()> {
     let backend = current_backend().await?;
     backend.set_track(&kind, &id).await
+}
+
+/// The active profile's audio and subtitle preferences.
+#[tauri::command]
+pub async fn get_player_prefs_cmd(app: AppHandle) -> Result<player_prefs::PlayerPrefs> {
+    let pool = ensure_db(&app).await?;
+    let profile_id = active_profile_id(pool).await?;
+    player_prefs::load(pool, profile_id).await
+}
+
+/// Saves the preferences for the active profile and applies them to the player that is running,
+/// so a size or position change shows at once. Language choices take effect on the next file.
+#[tauri::command]
+pub async fn set_player_prefs_cmd(prefs: player_prefs::PlayerPrefs, app: AppHandle) -> Result<player_prefs::PlayerPrefs> {
+    let pool = ensure_db(&app).await?;
+    let profile_id = active_profile_id(pool).await?;
+    let saved = player_prefs::save(pool, profile_id, &prefs).await?;
+    if let Ok(backend) = current_backend().await {
+        backend.apply_prefs(&saved, false).await;
+    }
+    Ok(saved)
+}
+
+/// Shifts the current file's subtitles, in seconds (positive shows them later). Returns the
+/// delay that was applied after rounding and limiting.
+#[tauri::command]
+pub async fn set_subtitle_delay_cmd(seconds: f64) -> Result<f64> {
+    current_backend().await?.set_subtitle_delay(seconds).await
+}
+
+/// Adds a subtitle file chosen by the user to the current file.
+#[tauri::command]
+pub async fn add_subtitle_file_cmd(path: String) -> Result<()> {
+    current_backend().await?.add_subtitle_file(&path).await
 }
 
 #[tauri::command]

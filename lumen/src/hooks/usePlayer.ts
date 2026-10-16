@@ -7,6 +7,10 @@ import {
   setVolume as setVolumeCmd,
   setPlayerTrack as setPlayerTrackCmd,
   setPlayerQuality as setPlayerQualityCmd,
+  getPlayerPrefs,
+  setPlayerPrefs,
+  setSubtitleDelay,
+  addSubtitleFile,
   stop as stopCmd,
   onPlayerState,
   saveProgress,
@@ -15,6 +19,7 @@ import {
   errorMessage,
 } from "../lib/tauri";
 import { DEFAULT_PLAYER_STATE } from "../lib/types";
+import { clampScale, SUB_DELAY_STEP, SUB_SCALE_STEP } from "../lib/languages";
 import type { PlayerTrackKind } from "../lib/types";
 
 interface PlayerOptions {
@@ -219,6 +224,23 @@ export function usePlayer(options: PlayerOptions = {}) {
     await setPlayerTrackCmd(kind, id);
   }, []);
 
+  // The subtitle delay belongs to the file that is playing: it starts again at zero for the next one.
+  const [subtitleDelay, setSubtitleDelayState] = useState(0);
+  useEffect(() => { setSubtitleDelayState(0); }, [currentUrl]);
+
+  const changeSubtitleDelay = useCallback(async (direction: 1 | -1) => {
+    const applied = await setSubtitleDelay(Math.round((subtitleDelay + direction * SUB_DELAY_STEP) * 10) / 10);
+    setSubtitleDelayState(applied);
+  }, [subtitleDelay]);
+
+  // Size is a profile preference, so a change here is saved, not just applied to this file.
+  const changeSubtitleScale = useCallback(async (direction: 1 | -1) => {
+    const prefs = await getPlayerPrefs();
+    await setPlayerPrefs({ ...prefs, subScale: clampScale(prefs.subScale + direction * SUB_SCALE_STEP) });
+  }, []);
+
+  const addSubtitle = useCallback(async (path: string) => { await addSubtitleFile(path); }, []);
+
   const selectQuality = useCallback(async (id: string) => {
     await setPlayerQualityCmd(id);
     setPlayerState((previous) => ({ ...previous, quality: id }));
@@ -241,5 +263,9 @@ export function usePlayer(options: PlayerOptions = {}) {
     stopPlayback,
     selectTrack,
     selectQuality,
+    subtitleDelay,
+    changeSubtitleDelay,
+    changeSubtitleScale,
+    addSubtitle,
   };
 }
