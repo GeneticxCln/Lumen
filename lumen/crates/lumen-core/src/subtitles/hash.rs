@@ -22,9 +22,9 @@ pub fn opensubtitles_hash(path: &Path) -> Result<Option<(String, u64)>> {
     for offset in [0, size - CHUNK] {
         file.seek(SeekFrom::Start(offset))?;
         file.read_exact(&mut buffer)?;
-        for word in buffer.chunks_exact(8) {
-            let value = u64::from_le_bytes(word.try_into().expect("eight bytes"));
-            hash = hash.wrapping_add(value);
+        for start in (0..buffer.len()).step_by(8) {
+            let word: [u8; 8] = buffer[start..start + 8].try_into().expect("eight bytes");
+            hash = hash.wrapping_add(u64::from_le_bytes(word));
         }
     }
     Ok(Some((format!("{hash:016x}"), size)))
