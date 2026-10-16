@@ -8,6 +8,8 @@ import {
   setProfilePin,
 } from "../lib/tauri";
 import type { Profile } from "../lib/types";
+import { Rich } from "../i18n/Rich.tsx";
+import { t } from "../i18n/index.ts";
 import { Icon } from "./Icon";
 
 interface ProfileSettingsProps {
@@ -74,7 +76,7 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
     if (pending.kind === "rename") {
       const trimmed = value.trim();
       if (!trimmed) {
-        setError("A profile needs a name.");
+        setError(t("profiles.needsName"));
         return;
       }
       void run(() => renameProfile(profile.id, trimmed, currentPin), closeAction);
@@ -100,7 +102,7 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
 
   const setPin = (profile: Profile) => {
     if (value.length < MIN_PIN_CHARS) {
-      setError(`A PIN needs at least ${MIN_PIN_CHARS} characters.`);
+      setError(t("profiles.pinTooShort", { min: MIN_PIN_CHARS }));
       return;
     }
     void run(() => setProfilePin(profile.id, value, currentPin), closeAction);
@@ -109,7 +111,7 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
   const addProfile = () => {
     const name = newName.trim();
     if (!name) {
-      setError("A profile needs a name.");
+      setError(t("profiles.needsName"));
       return;
     }
     void run(() => createProfile(name), () => setNewName(""));
@@ -118,7 +120,7 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
   return (
     <section className="profile-settings">
       {profiles.length === 0 ? (
-        <p className="muted-note">Profiles could not be loaded.</p>
+        <p className="muted-note">{t("profiles.loadFailed")}</p>
       ) : (
         <div className="profile-list">
           {profiles.map((profile) => {
@@ -134,28 +136,29 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
                 <div className="profile-row-main">
                   <h3>{profile.name}</h3>
                   <p>
-                    {profile.has_pin ? "Locked with a PIN" : "No PIN"} ·{" "}
-                    {isCurrent ? "Watch history and My List are saved here." : "Separate history and My List."}
+                    {t(profile.has_pin
+                      ? isCurrent ? "profiles.summary.pinCurrent" : "profiles.summary.pinOther"
+                      : isCurrent ? "profiles.summary.noPinCurrent" : "profiles.summary.noPinOther")}
                   </p>
                 </div>
-                {isCurrent && <span className="profile-badge current">Watching</span>}
-                {profile.has_pin && <span className="profile-badge">PIN</span>}
+                {isCurrent && <span className="profile-badge current">{t("profiles.badge.watching")}</span>}
+                {profile.has_pin && <span className="profile-badge">{t("profiles.badge.pin")}</span>}
 
                 <div className="profile-row-actions">
                   {!isCurrent && !switchOpen && (
-                    <button disabled={busy} onClick={() => switchTo(profile)}>Switch to</button>
+                    <button disabled={busy} onClick={() => switchTo(profile)}>{t("profiles.switchTo")}</button>
                   )}
                   {!isPending && (
-                    <button disabled={busy} onClick={() => openAction(profile, "rename")}>Rename</button>
+                    <button disabled={busy} onClick={() => openAction(profile, "rename")}>{t("profiles.rename")}</button>
                   )}
                   {!isPending && !profile.has_pin && (
-                    <button disabled={busy} onClick={() => openAction(profile, "pin")}>Set PIN</button>
+                    <button disabled={busy} onClick={() => openAction(profile, "pin")}>{t("profiles.setPin")}</button>
                   )}
                   {!isPending && profile.has_pin && (
                     <>
-                      <button disabled={busy} onClick={() => openAction(profile, "pin")}>Change PIN</button>
+                      <button disabled={busy} onClick={() => openAction(profile, "pin")}>{t("profiles.changePin")}</button>
                       <button disabled={busy} onClick={() => openAction(profile, "removePin")}>
-                        Remove PIN
+                        {t("profiles.removePin")}
                       </button>
                     </>
                   )}
@@ -163,7 +166,7 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
                     <button
                       className="danger"
                       disabled={busy || profiles.length < 2}
-                      title={profiles.length < 2 ? "The only profile cannot be deleted" : undefined}
+                      title={profiles.length < 2 ? t("profiles.deleteOnlyOne") : undefined}
                       onClick={() => {
                         setConfirmDeleteId(profile.id);
                         setPending(null);
@@ -171,7 +174,7 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
                         setError(null);
                       }}
                     >
-                      Delete
+                      {t("profiles.delete")}
                     </button>
                   ) : (
                     <>
@@ -180,8 +183,8 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
                           type="password"
                           inputMode="numeric"
                           autoComplete="off"
-                          aria-label={`Current PIN for ${profile.name}`}
-                          placeholder="Current PIN"
+                          aria-label={t("profiles.currentPinFor", { name: profile.name })}
+                          placeholder={t("profiles.currentPin")}
                           value={currentPin}
                           disabled={busy}
                           onChange={(event) => setCurrentPin(event.target.value)}
@@ -192,9 +195,9 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
                         disabled={busy}
                         onClick={() => void run(() => deleteProfile(profile.id, currentPin), () => { setConfirmDeleteId(null); setCurrentPin(""); })}
                       >
-                        Confirm delete
+                        {t("profiles.confirmDelete")}
                       </button>
-                      <button disabled={busy} onClick={() => setConfirmDeleteId(null)}>Cancel</button>
+                      <button disabled={busy} onClick={() => setConfirmDeleteId(null)}>{t("common.cancel")}</button>
                     </>
                   )}
                 </div>
@@ -212,14 +215,14 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
                         type="password"
                         inputMode="numeric"
                         autoComplete="off"
-                        aria-label={`Current PIN for ${profile.name}`}
-                        placeholder="Current PIN"
+                        aria-label={t("profiles.currentPinFor", { name: profile.name })}
+                        placeholder={t("profiles.currentPin")}
                         value={currentPin}
                         disabled={busy}
                         onChange={(event) => setCurrentPin(event.target.value)}
                       />
                     )}
-                    <label className="sr-only" htmlFor={`profile-rename-${profile.id}`}>New name</label>
+                    <label className="sr-only" htmlFor={`profile-rename-${profile.id}`}>{t("profiles.newName")}</label>
                     <input
                       id={`profile-rename-${profile.id}`}
                       value={value}
@@ -227,9 +230,9 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
                       disabled={busy}
                       onChange={(event) => setValue(event.target.value)}
                     />
-                    <button className="primary-button" type="submit" disabled={busy}>Save name</button>
+                    <button className="primary-button" type="submit" disabled={busy}>{t("profiles.saveName")}</button>
                     <button className="secondary-button" type="button" disabled={busy} onClick={closeAction}>
-                      Cancel
+                      {t("common.cancel")}
                     </button>
                   </form>
                 )}
@@ -248,8 +251,8 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
                         type="password"
                         inputMode="numeric"
                         autoComplete="off"
-                        aria-label={`Current PIN for ${profile.name}`}
-                        placeholder="Current PIN"
+                        aria-label={t("profiles.currentPinFor", { name: profile.name })}
+                        placeholder={t("profiles.currentPin")}
                         value={currentPin}
                         disabled={busy}
                         onChange={(event) => setCurrentPin(event.target.value)}
@@ -258,26 +261,26 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
                     {!removeOpen && (
                       <>
                         <label className="sr-only" htmlFor={`profile-pin-${profile.id}`}>
-                          {switchOpen ? `PIN for ${profile.name}` : `New PIN for ${profile.name}`}
+                          {switchOpen ? t("profiles.pinFor", { name: profile.name }) : t("profiles.newPinFor", { name: profile.name })}
                         </label>
                         <input
                           id={`profile-pin-${profile.id}`}
                           type="password"
                           inputMode="numeric"
                           autoComplete="off"
-                          placeholder={pinOpen ? "New PIN" : undefined}
+                          placeholder={pinOpen ? t("profiles.newPin") : undefined}
                           value={value}
                           disabled={busy}
                           onChange={(event) => setValue(event.target.value)}
                         />
-                        <small>{pinOpen ? `At least ${MIN_PIN_CHARS} characters.` : "Enter this profile's PIN."}</small>
+                        <small>{pinOpen ? t("profiles.pinMinHint", { min: MIN_PIN_CHARS }) : t("profiles.enterPin")}</small>
                       </>
                     )}
                     <button className="primary-button" type="submit" disabled={busy}>
-                      {pinOpen ? "Save PIN" : removeOpen ? "Remove PIN" : "Unlock"}
+                      {pinOpen ? t("profiles.savePin") : removeOpen ? t("profiles.removePin") : t("profileGate.unlockButton")}
                     </button>
                     <button className="secondary-button" type="button" disabled={busy} onClick={closeAction}>
-                      Cancel
+                      {t("common.cancel")}
                     </button>
                   </form>
                 )}
@@ -302,28 +305,25 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
           addProfile();
         }}
       >
-        <label className="sr-only" htmlFor="profile-new-name">New profile name</label>
+        <label className="sr-only" htmlFor="profile-new-name">{t("profiles.newProfileName")}</label>
         <input
           id="profile-new-name"
-          placeholder="Add a profile"
+          placeholder={t("profiles.addPlaceholder")}
           value={newName}
           maxLength={40}
           disabled={busy}
           onChange={(event) => setNewName(event.target.value)}
         />
         <button className="primary-button" type="submit" disabled={busy}>
-          <Icon name="plus" size={17} />Add profile
+          <Icon name="plus" size={17} />{t("profiles.add")}
         </button>
       </form>}
 
       <p className="profile-inline-note">
-        Deleting a profile removes its watch history and My List. The library of sources and its channels is
-        shared, so it stays.
+        {t("profiles.deleteNote")}
       </p>
       <p className="settings-note">
-        <strong>A PIN locks one profile on this device.</strong> Changing or removing it asks for the current
-        PIN. It is not encryption, and it is not synced to your other devices: the library, the database and
-        the media files are still readable by anyone with access to this machine.
+        <Rich id="profiles.pinNote" tags={{ strong: (text) => <strong>{text}</strong> }} />
       </p>
     </section>
   );
