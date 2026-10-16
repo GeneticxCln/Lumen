@@ -1,5 +1,5 @@
 pub use lumen_core::{
-    auth, db, error, extract, harvest, media_tools, netguard, pin_guard, playlist, probe,
+    auth, board, db, error, extract, harvest, media_tools, netguard, pin_guard, playlist, probe,
     search, secrets, tmdb,
 };
 
@@ -31,6 +31,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            board_new_channel_ids,
             sync::sync_now_cmd,
             sync::sync_status_cmd,
             sync::sync_state_cmd,

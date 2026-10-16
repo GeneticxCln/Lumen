@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types src/lib/discovery.test.ts && node --experimental-strip-types src/lib/errors.test.ts && node --experimental-strip-types src/lib/local.test.ts && node --experimental-strip-types src/lib/player.test.ts && node --experimental-strip-types src/lib/language.test.ts && node --experimental-strip-types src/lib/playerKeys.test.ts && node --experimental-strip-types src/lib/episodes.test.ts && node --experimental-strip-types src/lib/sync.test.ts",
+    "test": "node --experimental-strip-types src/lib/discovery.test.ts && node --experimental-strip-types src/lib/errors.test.ts && node --experimental-strip-types src/lib/local.test.ts && node --experimental-strip-types src/lib/player.test.ts && node --experimental-strip-types src/lib/language.test.ts && node --experimental-strip-types src/lib/playerKeys.test.ts && node --experimental-strip-types src/lib/episodes.test.ts && node --experimental-strip-types src/lib/sync.test.ts && node --experimental-strip-types src/lib/board.test.ts",
     "preview": "vite preview",
     "tauri": "tauri"
   },

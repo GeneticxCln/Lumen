@@ -219,6 +219,11 @@ export async function activateProfile(profileId: number, pin?: string) {
   return callBackend<Profile>("activate_profile_cmd", { profileId, pin: pin ? pin : null });
 }
 
+/** Library entries added since this profile last visited. Empty on the first visit. */
+export async function boardNewChannelIds() {
+  return callBackend<number[]>("board_new_channel_ids");
+}
+
 // Favorites & History
 export async function toggleFavorite(channelId: number) {
   return callBackend<boolean>("toggle_favorite_cmd", { channelId });

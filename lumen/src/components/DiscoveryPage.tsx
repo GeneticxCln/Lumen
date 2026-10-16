@@ -1,5 +1,6 @@
 import { Icon } from "./Icon";
-import { BrowseShelf, MediaShelf } from "./MediaShelf";
+import { BrowseShelf, ContinueShelf, MediaShelf } from "./MediaShelf";
+import type { Board } from "../lib/board";
 import type { BrowseTitle, Channel } from "../lib/types";
 import type { CatalogShelf } from "../lib/discovery";
 
@@ -7,6 +8,7 @@ interface DiscoveryPageProps {
   query: string;
   catalog: CatalogShelf[];
   recommended: Channel[];
+  board: Board;
   browse: BrowseTitle[];
   personalized: boolean;
   libraryMatches: Channel[];
@@ -15,6 +17,7 @@ interface DiscoveryPageProps {
   onPlayChannel: (channel: Channel) => void;
   onDetails: (channel: Channel) => void;
   onFavorite: (id: number) => void;
+  onPlayFile: (path: string, name: string) => void;
   onOpenSources: () => void;
 }
 
@@ -27,6 +30,7 @@ export function DiscoveryPage({
   query,
   catalog,
   recommended,
+  board,
   browse,
   personalized,
   libraryMatches,
@@ -35,10 +39,11 @@ export function DiscoveryPage({
   onPlayChannel,
   onDetails,
   onFavorite,
+  onPlayFile,
   onOpenSources,
 }: DiscoveryPageProps) {
   const shelfProps = { favorites, onPlay: onPlayChannel, onDetails, onFavorite, compact };
-  const showFallback = !query && catalog.length === 0 && recommended.length > 0;
+  const showFallback = !query && catalog.length === 0 && board.recommended.length > 0;
 
   return <div className="discovery-page">
     <div className="discovery-body">
@@ -48,6 +53,13 @@ export function DiscoveryPage({
         channels={libraryMatches}
         {...shelfProps}
       />}
+
+      {!query && <>
+        <ContinueShelf items={board.continueWatching} compact={compact} onPlayChannel={onPlayChannel} onPlayFile={onPlayFile} />
+        <MediaShelf title="Next up" subtitle="The next episode of what you have been watching." channels={board.nextUp.map((item) => item.channel)} {...shelfProps} />
+        <MediaShelf title="New since your last visit" subtitle="Added to your sources since you last opened Lumen." channels={board.fresh} {...shelfProps} />
+        <MediaShelf title="My List" subtitle="Titles you saved." channels={board.myList} {...shelfProps} />
+      </>}
 
       {!query && <BrowseShelf
         title="Popular on TMDB"
@@ -69,7 +81,7 @@ export function DiscoveryPage({
         <MediaShelf
           title={personalized ? "Because it’s your kind of thing" : "From your sources"}
           subtitle={personalized ? "Picked from your recently watched categories and saved titles." : "A selection from your own playlists."}
-          channels={recommended.slice(0, 20)}
+          channels={board.recommended}
           {...shelfProps}
         />
         <p className="muted-note">Genre shelves and posters appear once your titles are matched on TMDB. Add a TMDB key in Settings → Metadata.</p>
@@ -81,7 +93,7 @@ export function DiscoveryPage({
         <p>Nothing in your sources matches that. Try a shorter word, or clear the search.</p>
       </div>}
 
-      {!query && catalog.length === 0 && recommended.length === 0 && browse.length === 0 && <div className="empty-state">
+      {!query && catalog.length === 0 && recommended.length === 0 && browse.length === 0 && board.continueWatching.length === 0 && board.myList.length === 0 && <div className="empty-state">
         <div className="empty-symbol"><Icon name="compass" size={32} /></div>
         <h2>Nothing to discover yet.</h2>
         <p>Add a playlist or catalogue source and its titles will show up here. Files on this computer are on the Local Device page.</p>

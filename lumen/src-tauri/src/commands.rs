@@ -244,6 +244,19 @@ pub async fn next_fallback_source(
     }))
 }
 
+/// Library entries that are new since this profile last used Lumen (empty on the very first
+/// visit). The first call of a session also records this visit, so "since last visit" means
+/// since the previous session, however many times the page asks.
+#[tauri::command]
+pub async fn board_new_channel_ids(app: AppHandle) -> Result<Vec<i64>> {
+    let pool = ensure_db(&app).await?;
+    let profile_id = active_profile_id(pool).await?;
+    match crate::board::begin_visit(pool, profile_id, Utc::now().timestamp_millis()).await? {
+        Some(previous) => crate::board::new_title_channel_ids(pool, previous, 40).await,
+        None => Ok(Vec::new()),
+    }
+}
+
 #[tauri::command]
 pub async fn list_playlists_cmd(app: AppHandle) -> Result<Vec<Playlist>> {
     let pool = ensure_db(&app).await?;

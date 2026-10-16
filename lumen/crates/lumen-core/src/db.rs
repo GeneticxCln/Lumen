@@ -1367,24 +1367,6 @@ pub async fn extract_origin_for_channel(pool: &Pool<Sqlite>, channel_id: i64) ->
     Ok(origin.flatten().filter(|origin| !origin.trim().is_empty()))
 }
 
-/// Resolves the preferred/ranked stream URL for a content key at play time.
-/// Returns (stream_url, headers, channel_id).
-pub async fn resolve_playback_source(
-    pool: &Pool<Sqlite>,
-    content_key: &str,
-) -> Result<Option<(String, Option<String>, Option<i64>)>> {
-    let row = sqlx::query(
-        "SELECT stream_url, headers, channel_id FROM title_sources \
-         WHERE content_key = ? ORDER BY rank DESC, id ASC LIMIT 1",
-    )
-    .bind(content_key)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| PlayerError::Sql(e.to_string()))?;
-
-    Ok(row.map(|r| (r.get("stream_url"), r.get("headers"), r.get("channel_id"))))
-}
-
 /// Lists all available sources for a title in order of rank (for fallback).
 pub async fn list_ranked_sources(
     pool: &Pool<Sqlite>,

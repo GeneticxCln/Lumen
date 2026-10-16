@@ -17,12 +17,13 @@ import { LocalDevicePage } from "./components/LocalDevicePage";
 import { SearchEnginePage } from "./components/SearchEnginePage";
 import { usePlayer } from "./hooks/usePlayer";
 import { useChannels } from "./hooks/useChannels";
-import { activeProfile, browseTmdb, errorMessage, getHistory, listProfiles, setPlayerFullscreen, tmdbStatus } from "./lib/tauri";
+import { activeProfile, boardNewChannelIds, browseTmdb, errorMessage, getHistory, listProfiles, setPlayerFullscreen, tmdbStatus } from "./lib/tauri";
 import type { BrowseTitle } from "./lib/types";
 import type { Channel, HistoryEntry, Profile } from "./lib/types";
 import { readPreferences, recommendChannels, catalogShelves, contentKind, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
 import { isLocalPath } from "./lib/local";
 import { nextEpisode } from "./lib/episodes";
+import { buildBoard } from "./lib/board";
 import type { FacetSelection, Preferences } from "./lib/discovery";
 import "./App.css";
 
@@ -214,7 +215,21 @@ function App() {
     live: available.filter((channel) => contentKind(channel) === "live"),
   }), [available]);
   const myList = useMemo(() => library.allChannels.filter((channel) => library.favoriteIds.has(channel.id) && !isLocalPath(channel.url)), [library.allChannels, library.favoriteIds]);
+  // Entries added since this profile last used Lumen. The backend answers the same way for the
+  // whole session, so this is "since the previous session" however often it is asked.
+  const [newChannelIds, setNewChannelIds] = useState<number[]>([]);
+  useEffect(() => {
+    if (activeProfileId === null) return;
+    let active = true;
+    boardNewChannelIds().then((ids) => { if (active) setNewChannelIds(ids); }).catch(() => { if (active) setNewChannelIds([]); });
+    return () => { active = false; };
+  }, [activeProfileId, library.allChannels]);
   const recommendations = useMemo(() => recommendChannels(available, preferences.personalizedRows ? history : [], preferences.personalizedRows ? library.favoriteIds : new Set()), [available, history, library.favoriteIds, preferences.personalizedRows]);
+
+  const board = useMemo(
+    () => buildBoard({ channels: available, history, favorites: library.favoriteIds, newChannelIds, recommended: recommendations }),
+    [available, history, library.favoriteIds, newChannelIds, recommendations],
+  );
 
   // The page decides the base set (everything, or one content kind); the facets then
   // narrow it. Group, Genre and Year are all built from that same base set.
@@ -340,6 +355,7 @@ function App() {
         query={library.searchQuery}
         catalog={catalog}
         recommended={recommendations}
+        board={board}
         browse={browseTitles}
         personalized={preferences.personalizedRows}
         libraryMatches={available}
@@ -348,6 +364,7 @@ function App() {
         onPlayChannel={(channel) => void play(channel)}
         onDetails={setDetails}
         onFavorite={(id) => void library.handleToggleFavorite(id)}
+        onPlayFile={(path, name) => void playFile(path, name).catch(() => {})}
         onOpenSources={() => openSettings("sources")}
       /> : page === "local" ? <LocalDevicePage
         query={library.searchQuery}
