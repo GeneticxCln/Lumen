@@ -9,8 +9,15 @@ const KEYCHAIN_SERVICE: &str = "dev.lumen.app.search-providers";
 const TMDB_KEYCHAIN_SERVICE: &str = "dev.lumen.app.tmdb";
 const TMDB_KEYCHAIN_ACCOUNT: &str = "api-key";
 
+/// On Linux the keychain is the Secret Service; a session without one (a bare window manager)
+/// cannot store secrets until one is started.
+#[cfg(target_os = "linux")]
+const KEYCHAIN_HINT: &str = ". On Linux, start a Secret Service such as GNOME Keyring or KWallet";
+#[cfg(not(target_os = "linux"))]
+const KEYCHAIN_HINT: &str = "";
+
 fn keychain_error(error: keyring::Error) -> PlayerError {
-    PlayerError::Io(format!("OS keychain unavailable: {error}"))
+    PlayerError::Io(format!("OS keychain unavailable: {error}{KEYCHAIN_HINT}"))
 }
 
 fn entry(service: &str, provider_id: &str) -> Result<keyring::Entry> {

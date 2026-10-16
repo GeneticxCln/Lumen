@@ -4,6 +4,7 @@ pub use lumen_core::{
 };
 
 mod commands;
+mod launch;
 mod playback;
 mod sync;
 
@@ -14,9 +15,18 @@ use tauri::{Manager, RunEvent};
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        // First, so a second launch is handed to the running window before anything else starts.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            let args: Vec<String> = argv.into_iter().skip(1).collect();
+            launch::handle_arguments(app, &args, Some(std::path::Path::new(&cwd)));
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .manage(launch::PendingLaunch::default())
         .setup(|app| {
+            // What this launch was asked to open ("Open with Lumen", a lumen:// link).
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            launch::handle_arguments(app.handle(), &args, std::env::current_dir().ok().as_deref());
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Ok(app_dir) = app_handle.path().app_data_dir() {
@@ -31,6 +41,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            launch::take_launch_targets,
+            launch::classify_open_targets,
             board_new_channel_ids,
             set_episodes_watched_cmd,
             list_episode_marks_cmd,

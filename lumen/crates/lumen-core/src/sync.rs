@@ -821,7 +821,13 @@ pub async fn status(pool: &Pool<Sqlite>) -> Result<SyncStatus> {
 
 /// Pushes queued changes, then pulls and applies remote ones. Does nothing while sync is off.
 pub async fn sync_now(pool: &Pool<Sqlite>) -> Result<SyncStatus> {
-    let Some(remote) = crate::sync_keys::remote(pool, &crate::sync_keys::KeyringStore).await? else {
+    use crate::sync_keys::{KeyringStore, RootStore};
+    // Without a usable keychain there cannot be a sync key, so there is nothing to sync and
+    // nothing worth reporting every few minutes. (Turning sync on reports the problem.)
+    if !matches!(KeyringStore.load(), Ok(Some(_))) {
+        return status(pool).await;
+    }
+    let Some(remote) = crate::sync_keys::remote(pool, &KeyringStore).await? else {
         return status(pool).await;
     };
     sync_with(pool, &remote).await

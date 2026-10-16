@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Lumen
+GenericName=Media Player
+Comment={{comment}}
+Exec={{exec}} %U
+Icon={{icon}}
+Terminal=false
+Categories=AudioVideo;Video;Player;
+StartupWMClass={{exec}}
+MimeType={{mime_type}}

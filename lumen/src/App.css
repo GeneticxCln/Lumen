@@ -585,3 +585,7 @@ kbd { background: var(--bg-secondary); border-color: var(--border); color: var(-
 .player-prefs-grid input[type=range] { width: 100%; }
 .subtitle-tools output { display: inline-block; min-width: 52px; text-align: center; font-size: 11px; }
 .subtitle-tools > div { display: flex; align-items: center; gap: 4px; }
+
+/* Drop files anywhere to open them */
+.drop-overlay { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; background: #000a; border: 3px dashed var(--accent, #e50914); pointer-events: none; }
+.drop-overlay > div { font-size: 22px; font-weight: 800; padding: 18px 28px; border-radius: 10px; background: #1b1b1b; }

@@ -723,7 +723,8 @@ async fn fetch_airing(
 /// most `limit` per call and politely spaced. Returns how many were refreshed. A series TMDB has
 /// no record of is skipped, not retried in a loop: its failure is recorded as "checked".
 pub async fn refresh_airing(pool: &Pool<Sqlite>, profile_id: i64, limit: i64) -> Result<i64> {
-    let Some((key, _source)) = api_key(pool).await? else {
+    // No key, or no keychain to hold one, means no schedule lookups; that is not an error here.
+    let Ok(Some((key, _source))) = api_key(pool).await else {
         return Ok(0);
     };
     let now = chrono::Utc::now().timestamp_millis();

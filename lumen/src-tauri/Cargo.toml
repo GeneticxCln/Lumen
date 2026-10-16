@@ -42,4 +42,5 @@ scraper = "0.27"
 # Provider API tokens live in the OS keychain, never in the SQLite settings table.
 # keyring 4's default `v1` feature covers macOS, Windows and Linux (Secret Service).
 keyring = "4"
+tauri-plugin-single-instance = "2"
 

@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Lumen — Your media. Your rules.",
+        "title": "Lumen \u2014 Your media. Your rules.",
         "width": 1440,
         "height": 900,
         "minWidth": 360,
@@ -32,6 +32,164 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "fileAssociations": [
+      {
+        "ext": [
+          "mp4",
+          "m4v"
+        ],
+        "mimeType": "video/mp4",
+        "name": "Video",
+        "role": "Viewer"
+      },
+      {
+        "ext": [
+          "mkv"
+        ],
+        "mimeType": "video/x-matroska",
+        "name": "Matroska video",
+        "role": "Viewer"
+      },
+      {
+        "ext": [
+          "webm"
+        ],
+        "mimeType": "video/webm",
+        "name": "WebM video",
+        "role": "Viewer"
+      },
+      {
+        "ext": [
+          "avi"
+        ],
+        "mimeType": "video/x-msvideo",
+        "name": "AVI video",
+        "role": "Viewer"
+      },
+      {
+        "ext": [
+          "mov"
+        ],
+        "mimeType": "video/quicktime",
+        "name": "QuickTime video",
+        "role": "Viewer"
+      },
+      {
+        "ext": [
+          "ts",
+          "m2ts"
+        ],
+        "mimeType": "video/mp2t",
+        "name": "MPEG transport stream",
+        "role": "Viewer"
+      },
+      {
+        "ext": [
+          "mpg",
+          "mpeg"
+        ],
+        "mimeType": "video/mpeg",
+        "name": "MPEG video",
+        "role": "Viewer"
+      },
+      {
+        "ext": [
+          "ogv"
+        ],
+        "mimeType": "video/ogg",
+        "name": "Ogg video",
+        "role": "Viewer"
+      },
+      {
+        "ext": [
+          "mp3"
+        ],
+        "mimeType": "audio/mpeg",
+        "name": "MP3 audio",
+        "role": "Viewer"
+      },
+      {
+        "ext": [
+          "flac"
+        ],
+        "mimeType": "audio/flac",
+        "name": "FLAC audio",
+        "role": "Viewer"
+      },
+      {
+        "ext": [
+          "wav"
+        ],
+        "mimeType": "audio/x-wav",
+        "name": "WAV audio",
+        "role": "Viewer"
+      },
+      {
+        "ext": [
+          "ogg",
+          "opus"
+        ],
+        "mimeType": "audio/ogg",
+        "name": "Ogg audio",
+        "role": "Viewer"
+      },
+      {
+        "ext": [
+          "m4a",
+          "aac"
+        ],
+        "mimeType": "audio/mp4",
+        "name": "AAC audio",
+        "role": "Viewer"
+      },
+      {
+        "ext": [
+          "m3u8"
+        ],
+        "mimeType": "application/vnd.apple.mpegurl",
+        "name": "HLS playlist",
+        "role": "Viewer"
+      },
+      {
+        "ext": [
+          "m3u"
+        ],
+        "mimeType": "audio/x-mpegurl",
+        "name": "M3U playlist",
+        "role": "Viewer"
+      }
+    ],
+    "category": "Video",
+    "shortDescription": "Media library and player",
+    "linux": {
+      "deb": {
+        "depends": [
+          "mpv"
+        ],
+        "recommends": [
+          "ffmpeg"
+        ],
+        "desktopTemplate": "linux/lumen.desktop"
+      },
+      "rpm": {
+        "depends": [
+          "mpv"
+        ],
+        "recommends": [
+          "ffmpeg"
+        ],
+        "desktopTemplate": "linux/lumen.desktop"
+      }
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "lumen"
+        ]
+      }
+    }
   }
 }
