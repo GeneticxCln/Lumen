@@ -22,6 +22,7 @@ interface TransportProps {
   onSubtitleScale: (direction: 1 | -1) => void;
   onAddSubtitle: () => void;
   onFindSubtitles: () => void;
+  onCast: () => void;
   /** Seconds the skip buttons jump. */
   seekStep: number;
   speed: number;
@@ -47,6 +48,7 @@ export function Transport({
   onSubtitleScale,
   onAddSubtitle,
   onFindSubtitles,
+  onCast,
   seekStep,
   speed,
   onSpeed,
@@ -172,6 +174,10 @@ export function Transport({
                 {(SPEEDS.includes(speed) ? SPEEDS : [...SPEEDS, speed].sort((a, b) => a - b)).map((value) => <option key={value} value={value}>{t("transport.speedValue", { speed: value })}</option>)}
               </select>
             </label>
+            <div className="player-option">
+              <span>{t("cast.button")}</span>
+              <button className="icon-button" aria-label={t("cast.title")} title={t("cast.buttonHint")} onClick={onCast}>{t("cast.open")}</button>
+            </div>
             <label className="player-option">
               <span>{t("transport.quality")}</span>
               <select aria-label={t("transport.qualityLabel")} value={state.quality} onChange={(event) => onSelectQuality(event.target.value)} disabled={!state.qualityLevels.length} title={state.qualityHelp}>

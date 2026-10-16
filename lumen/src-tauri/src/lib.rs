@@ -3,6 +3,7 @@ pub use lumen_core::{
     playlist, probe, search, secrets, series, tmdb,
 };
 
+mod cast;
 mod commands;
 #[cfg(target_os = "linux")]
 mod embed;
@@ -66,6 +67,10 @@ pub fn run() {
             sync::sync_join,
             sync::sync_show_key,
             sync::sync_disable,
+            cast::cast_discover_cmd,
+            cast::cast_start_cmd,
+            cast::cast_control_cmd,
+            cast::cast_state_cmd,
             play_url,
             next_fallback_source,
             pause,

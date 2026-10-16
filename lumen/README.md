@@ -52,6 +52,15 @@ By default video plays in a separate mpv window. **Settings → Playback → Pla
 
 Controls are shown beside the video, not drawn over it. Fullscreen in this mode makes the whole window fullscreen. `LUMEN_GL_DEBUG=1` prints the size of the picture and how much of it is lit, for diagnosing a black video.
 
+## Casting to a TV
+
+In the player's settings, **Cast…** lists TVs, receivers and speakers on your network that accept video over UPnP / DLNA and sends what is playing to the one you pick. Lumen then stops its own player and shows a small control bar (play, pause, skip, stop) while the device plays it.
+
+- A web address is fetched by the device itself, so streams that need special headers or a sign-in may not play there. A title already playing in Lumen starts where it was.
+- A file on this computer is served to that one device only, under a random address, for as long as the cast lasts. Only media files are served.
+- Devices must be on the local network: anything that announces a public address is ignored, and addresses on your network are only used as sources if you turned on local-network sources in Settings.
+- Chromecast and AirPlay are different protocols and are not supported. Subtitles added in Lumen are not sent to the device.
+
 ## Sync
 
 Sync is optional and there are no accounts. The library, files, and playback all work without it.

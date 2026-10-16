@@ -614,3 +614,24 @@ kbd { background: var(--bg-secondary); border-color: var(--border); color: var(-
 .player-nextup .muted-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .player-nextup .settings-actions { border: 0; background: none; box-shadow: none; padding: 0; margin: 0; display: flex; gap: 8px; }
 
+
+/* The controls shown while a TV plays what was sent from Lumen. */
+.cast-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  max-width: min(720px, calc(100vw - 32px));
+  padding: 10px 16px;
+  border-radius: 14px;
+  background: var(--surface-raised, rgba(24, 24, 28, 0.96));
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+.cast-bar-text { display: flex; flex-direction: column; min-width: 0; }
+.cast-bar-text strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cast-bar-buttons { display: flex; gap: 6px; flex-shrink: 0; }

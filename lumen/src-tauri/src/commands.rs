@@ -513,7 +513,7 @@ const EMBED_PLAYER_SETTING: &str = "embed_player";
 /// The user's opt-in to fetch from their own network (a NAS, Jellyfin on this machine).
 const ALLOW_LAN_SETTING: &str = "allow_lan_sources";
 
-async fn allow_lan_sources(pool: &sqlx::Pool<sqlx::Sqlite>) -> bool {
+pub(crate) async fn allow_lan_sources(pool: &sqlx::Pool<sqlx::Sqlite>) -> bool {
     matches!(get_setting(pool, ALLOW_LAN_SETTING).await, Ok(Some(value)) if value == "true")
 }
 

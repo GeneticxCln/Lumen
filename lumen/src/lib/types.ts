@@ -330,3 +330,24 @@ export interface SubtitleState {
   online: boolean;
   services: { id: string; enabled: boolean }[];
 }
+
+/** A TV or speaker on the network that can be sent a video. */
+export interface CastDevice {
+  id: string;
+  name: string;
+  address: string;
+}
+
+/** What a device reports about the cast: a UPnP state name, and seconds. */
+export interface CastStatus {
+  state: string;
+  position: number;
+  duration: number;
+}
+
+/** The cast in progress. `status` is missing when the device did not answer. */
+export interface CastState {
+  device: string;
+  title: string;
+  status: CastStatus | null;
+}

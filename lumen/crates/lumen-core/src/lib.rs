@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod board;
+pub mod cast;
 pub mod content_key;
 pub mod db;
 pub mod error;
