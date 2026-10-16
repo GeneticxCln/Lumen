@@ -9,7 +9,6 @@ runtime: org.gnome.Platform
 runtime-version: '48'
 sdk: org.gnome.Sdk
 sdk-extensions:
-  - org.freedesktop.Sdk.Extension.rust-stable
   - org.freedesktop.Sdk.Extension.node22
 command: lumen
 
@@ -108,10 +107,14 @@ modules:
     build-options:
       build-args:
         - --share=network
-      append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node22/bin
+      append-path: /usr/lib/sdk/node22/bin:/run/build/lumen/cargo/bin
       env:
         CARGO_HOME: /run/build/lumen/cargo
+        RUSTUP_HOME: /run/build/lumen/rustup
     build-commands:
+      # The runtime's Rust extension is older than the Rust Lumen's dependencies need, so the
+      # current stable toolchain is installed for the build.
+      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path
       - npm ci
       - npx tauri build --no-bundle
       - install -Dm755 target/release/lumen /app/bin/lumen
