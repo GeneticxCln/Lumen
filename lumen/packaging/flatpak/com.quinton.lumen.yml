@@ -115,10 +115,17 @@ modules:
       - npm ci
       - npx tauri build --no-bundle
       - install -Dm755 target/release/lumen /app/bin/lumen
+      - install -Dm644 ../LICENSE /app/share/licenses/com.quinton.lumen/LICENSE
       - install -Dm644 packaging/com.quinton.lumen.desktop /app/share/applications/com.quinton.lumen.desktop
       - install -Dm644 packaging/com.quinton.lumen.metainfo.xml /app/share/metainfo/com.quinton.lumen.metainfo.xml
       - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/com.quinton.lumen.png
       - install -Dm644 src-tauri/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/com.quinton.lumen.png
+    subdir: lumen
     sources:
       - type: dir
-        path: ../..
+        path: ../../..
+        skip:
+          - .git
+          - lumen/node_modules
+          - lumen/target
+          - lumen/dist

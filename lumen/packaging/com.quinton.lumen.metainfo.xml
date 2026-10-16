@@ -4,8 +4,7 @@
   <name>Lumen</name>
   <summary>Media library and player</summary>
   <metadata_license>CC0-1.0</metadata_license>
-  <!-- No license has been chosen for the project yet; set the real one before publishing anywhere. -->
-  <project_license>LicenseRef-proprietary</project_license>
+  <project_license>MIT</project_license>
   <developer_name>Lumen Contributors</developer_name>
   <url type="homepage">https://github.com/GeneticxCln/Lumen</url>
   <url type="bugtracker">https://github.com/GeneticxCln/Lumen/issues</url>

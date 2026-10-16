@@ -10,7 +10,7 @@ import { SyncSettings } from "./SyncSettings";
 import { PlayerPrefsSettings } from "./PlayerPrefsSettings";
 import { OnlineSubtitlesSettings } from "./OnlineSubtitlesSettings";
 import { LanguageSetting } from "./LanguageSetting";
-import { UpdateSettings } from "./UpdateSettings";
+import { AboutLumen } from "./AboutLumen";
 import { EpisodeAlertsSetting } from "./EpisodeAlertsSetting";
 import { EmbeddedPlayerToggle } from "./EmbeddedPlayerToggle";
 import { LanSourcesToggle } from "./LanSourcesToggle";
@@ -19,7 +19,7 @@ import { MediaShelf } from "./MediaShelf";
 import { Icon } from "./Icon";
 import type { IconName } from "./Icon";
 
-export type SettingsSection = "account" | "sources" | "mylist" | "metadata" | "playback" | "appearance" | "shortcuts";
+export type SettingsSection = "account" | "sources" | "mylist" | "metadata" | "playback" | "appearance" | "shortcuts" | "about";
 
 interface SettingsPageProps {
   preferences: Preferences;
@@ -43,12 +43,13 @@ interface SettingsPageProps {
 
 const posterFrameChoices = POSTER_FRAME_OPTIONS.map((option) => ({ seconds: String(option.seconds), label: option.label }));
 
-type SettingsGroup = "you" | "library" | "preferences";
+type SettingsGroup = "you" | "library" | "preferences" | "app";
 
 const groupLabels: Record<SettingsGroup, () => string> = {
   you: () => t("settings.group.you"),
   library: () => t("settings.group.library"),
   preferences: () => t("settings.group.preferences"),
+  app: () => t("settings.group.app"),
 };
 
 function buildSections(): { id: SettingsSection; label: string; description: string; icon: IconName; group: SettingsGroup }[] {
@@ -60,6 +61,7 @@ function buildSections(): { id: SettingsSection; label: string; description: str
     { id: "playback", label: t("settings.section.playback.label"), description: t("settings.section.playback.description"), icon: "play", group: "preferences" },
     { id: "appearance", label: t("settings.section.appearance.label"), description: t("settings.section.appearance.description"), icon: "palette", group: "preferences" },
     { id: "shortcuts", label: t("settings.section.shortcuts.label"), description: t("settings.section.shortcuts.description"), icon: "keyboard", group: "preferences" },
+    { id: "about", label: t("settings.section.about.label"), description: t("settings.section.about.description"), icon: "info", group: "app" },
   ];
 }
 
@@ -673,7 +675,6 @@ export function SettingsPage({
             {toggle("reduceMotion", t("settings.appearance.reduceMotionLabel"), t("settings.appearance.reduceMotionDescription"))}
             {toggle("personalizedRows", t("settings.appearance.personalizedLabel"), t("settings.appearance.personalizedDescription"))}
             {toggle("hideUnavailable", t("settings.appearance.hideUnavailableLabel"), t("settings.appearance.hideUnavailableDescription"))}
-            <UpdateSettings />
           </>
         )}
 
@@ -699,6 +700,8 @@ export function SettingsPage({
             </div>
           </>
         )}
+
+        {section === "about" && <AboutLumen />}
 
         {(section === "playback" || section === "appearance" || section === "shortcuts") && (
           <div className="settings-actions">
