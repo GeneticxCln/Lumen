@@ -564,3 +564,24 @@ kbd { background: var(--bg-secondary); border-color: var(--border); color: var(-
 .sync-settings .danger-button { background: #4b2225; color: #ffb4b8; border: 0; border-radius: 4px; padding: 12px 20px; font-size: 12px; font-weight: 700; }
 .sync-settings { margin-bottom: 32px; }
 .sync-settings .settings-actions { border: 0; background: none; box-shadow: none; padding: 0; margin-top: 18px; }
+
+/* Continue watching progress bar */
+.card-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: #ffffff33; z-index: 3; }
+.card-progress > span { display: block; height: 100%; background: var(--accent, #e50914); }
+
+/* Episodes in the details dialog */
+.episode-list { margin-top: 22px; }
+.episode-list details { border-top: 1px solid var(--border); padding: 10px 0; }
+.episode-list summary { cursor: pointer; font-size: 13px; font-weight: 700; display: flex; gap: 12px; align-items: baseline; }
+.episode-list .settings-actions { margin: 10px 0 6px; }
+.episode-rows { list-style: none; margin: 0; padding: 0; }
+.episode-rows li { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 12px; }
+.episode-rows li.is-watched .episode-name { color: var(--fg-secondary); }
+.episode-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Audio and subtitle preferences */
+.player-prefs-grid { display: grid; grid-template-columns: minmax(180px, 240px) minmax(180px, 320px); gap: 12px 18px; align-items: center; margin: 14px 0; }
+.player-prefs-grid label { margin: 0; }
+.player-prefs-grid input[type=range] { width: 100%; }
+.subtitle-tools output { display: inline-block; min-width: 52px; text-align: center; font-size: 11px; }
+.subtitle-tools > div { display: flex; align-items: center; gap: 4px; }

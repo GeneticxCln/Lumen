@@ -17,12 +17,17 @@ import { LocalDevicePage } from "./components/LocalDevicePage";
 import { SearchEnginePage } from "./components/SearchEnginePage";
 import { usePlayer } from "./hooks/usePlayer";
 import { useChannels } from "./hooks/useChannels";
-import { activeProfile, browseTmdb, errorMessage, getHistory, listProfiles, setPlayerFullscreen, tmdbStatus } from "./lib/tauri";
+import { activeProfile, boardNewChannelIds, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, listProfiles, setPlayerFullscreen, tmdbStatus } from "./lib/tauri";
 import type { BrowseTitle } from "./lib/types";
 import type { Channel, HistoryEntry, Profile } from "./lib/types";
 import { readPreferences, recommendChannels, catalogShelves, contentKind, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
 import { isLocalPath } from "./lib/local";
 import { nextEpisode } from "./lib/episodes";
+import { buildBoard } from "./lib/board";
+import { describeUpcoming } from "./lib/series";
+import type { EpisodeMark, UpcomingSeries } from "./lib/series";
+import { EpisodeList } from "./components/EpisodeList";
+import type { UpcomingCard } from "./components/MediaShelf";
 import type { FacetSelection, Preferences } from "./lib/discovery";
 import "./App.css";
 
@@ -70,7 +75,7 @@ function App() {
   const searchRef = useRef<HTMLInputElement | null>(null);
   const library = useChannels(refresh);
   const [browseTitles, setBrowseTitles] = useState<BrowseTitle[]>([]);
-  const player = usePlayer();
+  const player = usePlayer({ onNotice: (message) => setNotice(message) });
   const details = library.allChannels.find((channel) => channel.id === detailId) || null;
   const currentProfile = profiles.find((profile) => profile.id === activeProfileId) || null;
   const setDetails = (channel: Channel | null) => setDetailId(channel?.id ?? null);
@@ -150,9 +155,16 @@ function App() {
     setBusy(false);
   }
 
-  async function playFile(path: string, name?: string, headers?: Record<string, string>, audioUrl?: string) {
+  // Lets the user pick a subtitle file for what is playing now.
+  async function chooseSubtitleFile() {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({ filters: [{ name: "Subtitles", extensions: ["srt", "ass", "ssa", "vtt", "sub"] }] });
+    if (typeof selected === "string") await player.addSubtitle(selected);
+  }
+
+  async function playFile(path: string, name?: string, headers?: Record<string, string>, audioUrl?: string, channelId?: number) {
     try {
-      await player.playMedia(path, name, headers, preferences.defaultVolume, audioUrl);
+      await player.playMedia(path, name, headers, preferences.defaultVolume, audioUrl, channelId);
       setPlayerOpen(true);
     } catch (error) {
       setNotice(errorMessage(error));
@@ -214,7 +226,50 @@ function App() {
     live: available.filter((channel) => contentKind(channel) === "live"),
   }), [available]);
   const myList = useMemo(() => library.allChannels.filter((channel) => library.favoriteIds.has(channel.id) && !isLocalPath(channel.url)), [library.allChannels, library.favoriteIds]);
+  // Entries added since this profile last used Lumen. The backend answers the same way for the
+  // whole session, so this is "since the previous session" however often it is asked.
+  const [newChannelIds, setNewChannelIds] = useState<number[]>([]);
+  // Watched marks set by hand, and the schedules of followed series.
+  const [marks, setMarks] = useState<EpisodeMark[]>([]);
+  const [upcoming, setUpcoming] = useState<UpcomingSeries[]>([]);
+  useEffect(() => {
+    if (activeProfileId === null) return;
+    let active = true;
+    listEpisodeMarks().then((list) => { if (active) setMarks(list ?? []); }).catch(() => { if (active) setMarks([]); });
+    return () => { active = false; };
+  }, [activeProfileId, refresh]);
+  useEffect(() => {
+    if (activeProfileId === null) return;
+    let active = true;
+    // Show what is stored at once, then let TMDB refresh stale schedules in the background.
+    upcomingEpisodes(false).then((list) => { if (active) setUpcoming(list ?? []); }).catch(() => {});
+    upcomingEpisodes(true).then((list) => { if (active) setUpcoming(list ?? []); }).catch(() => {});
+    return () => { active = false; };
+  }, [activeProfileId]);
+  const markEpisodes = async (seriesKey: string, season: number, episodes: number[], watched: boolean) => {
+    await run(async () => {
+      await setEpisodesWatched(seriesKey, season, episodes, watched);
+      setMarks((await listEpisodeMarks()) ?? []);
+    });
+  };
+  const today = new Date().toISOString().slice(0, 10);
+  const upcomingCards = useMemo<UpcomingCard[]>(() => upcoming.flatMap((item) => {
+    const label = describeUpcoming(item, today);
+    if (!label) return [];
+    return [{ key: `tv-${item.tmdbId}`, name: item.name, text: label.text, kind: label.kind, channel: library.allChannels.find((channel) => channel.id === item.channelId) }];
+  }), [upcoming, today, library.allChannels]);
+  useEffect(() => {
+    if (activeProfileId === null) return;
+    let active = true;
+    boardNewChannelIds().then((ids) => { if (active) setNewChannelIds(ids ?? []); }).catch(() => { if (active) setNewChannelIds([]); });
+    return () => { active = false; };
+  }, [activeProfileId, library.allChannels]);
   const recommendations = useMemo(() => recommendChannels(available, preferences.personalizedRows ? history : [], preferences.personalizedRows ? library.favoriteIds : new Set()), [available, history, library.favoriteIds, preferences.personalizedRows]);
+
+  const board = useMemo(
+    () => buildBoard({ channels: available, history, favorites: library.favoriteIds, newChannelIds, recommended: recommendations, marks }),
+    [available, history, library.favoriteIds, newChannelIds, recommendations, marks],
+  );
 
   // The page decides the base set (everything, or one content kind); the facets then
   // narrow it. Group, Genre and Year are all built from that same base set.
@@ -306,7 +361,7 @@ function App() {
         <button className="icon-button header-save" aria-label="Open My List" onClick={() => openSettings("mylist")}><Icon name="bookmark" size={19} /><span className="header-count">{myList.length}</span></button><span className="header-divider" /><button className="header-profile" aria-label={currentProfile ? `Open settings. Profile: ${currentProfile.name}` : "Open settings"} onClick={() => openSettings(settingsSection)}>{currentProfile ? currentProfile.name.slice(0, 1).toUpperCase() : "L"}</button></div>
     </header>
     <main id="main-content">
-      {notice && <div className="app-notice" role="alert"><span>{notice}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setNotice(null)}><Icon name="close" /></button></div>}
+      {notice && <div className="app-notice" role="alert"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notice" onClick={() => setNotice(null)}><Icon name="close" /></button></div>}
       {library.error && <div className="app-notice" role="alert"><div><strong>Couldn’t connect to your library</strong><p>{library.error}. Start the Lumen backend or desktop app, then retry.</p></div><button onClick={library.loadChannels}>Retry</button></div>}
 
       {page === "settings" ? <SettingsPage
@@ -340,6 +395,8 @@ function App() {
         query={library.searchQuery}
         catalog={catalog}
         recommended={recommendations}
+        board={board}
+        upcoming={upcomingCards}
         browse={browseTitles}
         personalized={preferences.personalizedRows}
         libraryMatches={available}
@@ -348,6 +405,7 @@ function App() {
         onPlayChannel={(channel) => void play(channel)}
         onDetails={setDetails}
         onFavorite={(id) => void library.handleToggleFavorite(id)}
+        onPlayFile={(path, name) => void playFile(path, name).catch(() => {})}
         onOpenSources={() => openSettings("sources")}
       /> : page === "local" ? <LocalDevicePage
         query={library.searchQuery}
@@ -396,7 +454,7 @@ function App() {
 
     {player.currentUrl && <aside className="now-playing-dock" aria-label="Now playing"><button className="dock-title" onClick={() => setPlayerOpen(true)}><span className="dock-play-icon"><Icon name="play" /></span><span><small>NOW PLAYING</small><strong>{player.currentTitle || player.playerState.title}</strong></span></button><button className="secondary-button" onClick={() => setPlayerOpen(true)}>Player controls</button><button className="icon-button" aria-label="Stop playback" onClick={() => void run(player.stopPlayback)}><Icon name="stop" /></button></aside>}
     <SourceDialog isOpen={showSource} onClose={() => setShowSource(false)} onSourceAdded={() => setRefresh((value) => value + 1)} onPlayFile={playFile} />
-    <Modal open={details !== null} onClose={() => setDetails(null)} title="Title details" className="details-dialog">{details && <><ChannelArtwork key={details.id} channel={details} /><div className="dialog-content"><p className="eyebrow">{details.group_title || "YOUR LIBRARY"}</p><h2>{details.name}</h2><p>From {library.playlists.find((source) => source.id === details.playlist_id)?.name || "your sources"}. Playback uses native mpv on desktop.</p><p className="muted-note">{details.last_error ? `Last check failed: ${details.last_error}` : details.last_ok ? `Last successful check: ${new Date(details.last_ok * 1000).toLocaleString()}. Availability can change.` : "Availability has not been checked yet."}</p><div className="hero-buttons"><button className="primary-button" disabled={busy} onClick={() => void play(details)}><Icon name="play" />Play</button><button className="secondary-button" aria-pressed={library.favoriteIds.has(details.id)} onClick={() => void library.handleToggleFavorite(details.id)}><Icon name={library.favoriteIds.has(details.id) ? "check" : "plus"} />My List</button><button className="secondary-button" disabled={library.probing} onClick={() => void library.handleProbeVisible([details.id])}>{library.probing ? "Checking…" : "Check stream"}</button></div></div></>}</Modal>
+    <Modal open={details !== null} onClose={() => setDetails(null)} title="Title details" className="details-dialog">{details && <><ChannelArtwork key={details.id} channel={details} /><div className="dialog-content"><p className="eyebrow">{details.group_title || "YOUR LIBRARY"}</p><h2>{details.name}</h2><p>From {library.playlists.find((source) => source.id === details.playlist_id)?.name || "your sources"}. Playback uses native mpv on desktop.</p><p className="muted-note">{details.last_error ? `Last check failed: ${details.last_error}` : details.last_ok ? `Last successful check: ${new Date(details.last_ok * 1000).toLocaleString()}. Availability can change.` : "Availability has not been checked yet."}</p><div className="hero-buttons"><button className="primary-button" disabled={busy} onClick={() => void play(details)}><Icon name="play" />Play</button><button className="secondary-button" aria-pressed={library.favoriteIds.has(details.id)} onClick={() => void library.handleToggleFavorite(details.id)}><Icon name={library.favoriteIds.has(details.id) ? "check" : "plus"} />My List</button><button className="secondary-button" disabled={library.probing} onClick={() => void library.handleProbeVisible([details.id])}>{library.probing ? "Checking…" : "Check stream"}</button></div><EpisodeList current={details} channels={library.allChannels} marks={marks} history={history} busy={busy} onPlay={(channel) => void play(channel)} onMark={(key, season, episodes, watched) => void markEpisodes(key, season, episodes, watched)} /></div></>}</Modal>
     {player.currentUrl && <PlayerOverlay
       title={player.currentTitle || player.playerState.title || "Now playing"}
       paused={player.playerState.paused}
@@ -407,7 +465,7 @@ function App() {
       buffering={player.playerState.buffering}
       onTogglePause={() => void run(player.togglePause)}
       onToggleFullscreen={() => void run(toggleFullscreen)}
-      controls={<Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); closePlayer(); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} onSelectTrack={(kind, id) => void run(() => player.selectTrack(kind, id))} onSelectQuality={(id) => void run(() => player.selectQuality(id))} isFullscreen={isFullscreen} onToggleFullscreen={() => void run(toggleFullscreen)} />}
+      controls={<Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); closePlayer(); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} onSelectTrack={(kind, id) => void run(() => player.selectTrack(kind, id))} onSelectQuality={(id) => void run(() => player.selectQuality(id))} subtitleDelay={player.subtitleDelay} onSubtitleDelay={(direction) => void run(() => player.changeSubtitleDelay(direction))} onSubtitleScale={(direction) => void run(() => player.changeSubtitleScale(direction))} onAddSubtitle={() => void run(chooseSubtitleFile)} isFullscreen={isFullscreen} onToggleFullscreen={() => void run(toggleFullscreen)} />}
     >
       <div className="player-native-card"><Icon name="play" size={40} /><h2>{player.currentTitle}</h2><p>Your video plays in the native mpv window.</p></div>
     </PlayerOverlay>}

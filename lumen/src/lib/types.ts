@@ -160,9 +160,13 @@ export interface Settings {
 
 export interface ExtractResponse {
   title: string;
+  /** The resolved stream, for display only. It expires, so it is never what gets saved or played later. */
   url: string;
   audio_url?: string;
   headers: Record<string, string>;
+  /** The library entry saved for the page. Play it by id; the stream is resolved at play time. */
+  channel_id: number;
+  page_url: string;
 }
 
 export interface ExtractorStatus {
@@ -261,4 +265,16 @@ export interface Profile {
   has_pin: boolean;
   created_at: number;
   last_used_at: number;
+}
+
+/** Audio and subtitle preferences of the active profile. */
+export interface PlayerPrefs {
+  /** An ISO 639 code, or empty to leave the choice to the player. */
+  audioLang: string;
+  /** "auto", "off", or a language code. */
+  subtitles: string;
+  /** 1 is the player's default size. */
+  subScale: number;
+  /** 100 is the bottom of the picture, 0 the top. */
+  subPos: number;
 }

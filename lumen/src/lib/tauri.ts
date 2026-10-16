@@ -21,9 +21,11 @@ import type {
   SearchResponse,
   SyncState,
   SyncStatus,
+  PlayerPrefs,
   BrowseTitle,
 } from "./types";
 import type { PosterCandidate } from "./types";
+import type { EpisodeMark, UpcomingSeries } from "./series";
 
 export type {
   Channel,
@@ -111,6 +113,24 @@ export async function setPlayerTrack(kind: PlayerTrackKind, id: string) {
 
 export async function setPlayerQuality(id: string) {
   return callBackend("set_player_quality", { id });
+}
+
+export async function getPlayerPrefs() {
+  return callBackend<PlayerPrefs>("get_player_prefs_cmd");
+}
+
+/** Saves the active profile's audio and subtitle preferences and applies them to the running player. */
+export async function setPlayerPrefs(prefs: PlayerPrefs) {
+  return callBackend<PlayerPrefs>("set_player_prefs_cmd", { prefs });
+}
+
+/** Shifts the current file's subtitles by `seconds` (positive is later). Returns the applied delay. */
+export async function setSubtitleDelay(seconds: number) {
+  return callBackend<number>("set_subtitle_delay_cmd", { seconds });
+}
+
+export async function addSubtitleFile(path: string) {
+  return callBackend("add_subtitle_file_cmd", { path });
 }
 
 export async function stop() {
@@ -217,6 +237,26 @@ export async function setProfilePin(profileId: number, pin?: string, currentPin?
  */
 export async function activateProfile(profileId: number, pin?: string) {
   return callBackend<Profile>("activate_profile_cmd", { profileId, pin: pin ? pin : null });
+}
+
+/** Watched marks the active profile set by hand. */
+export async function listEpisodeMarks() {
+  return callBackend<EpisodeMark[]>("list_episode_marks_cmd");
+}
+
+/** Marks episodes of one season watched or unwatched. The mark overrides what history says. */
+export async function setEpisodesWatched(seriesKey: string, season: number, episodes: number[], watched: boolean) {
+  return callBackend("set_episodes_watched_cmd", { seriesKey, season, episodes, watched });
+}
+
+/** Followed series with an episode still to air or one that just aired. `refresh` re-reads TMDB first. */
+export async function upcomingEpisodes(refresh = false) {
+  return callBackend<UpcomingSeries[]>("upcoming_episodes_cmd", { refresh });
+}
+
+/** Library entries added since this profile last visited. Empty on the first visit. */
+export async function boardNewChannelIds() {
+  return callBackend<number[]>("board_new_channel_ids");
 }
 
 // Favorites & History

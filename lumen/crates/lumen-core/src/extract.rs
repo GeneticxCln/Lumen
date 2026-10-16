@@ -10,6 +10,7 @@ use crate::netguard;
 use crate::playlist::import::read_capped_body;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::LazyLock;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -146,6 +147,10 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Parses a `SHA2-256SUMS` file and returns the expected hex digest for `asset_name`.
 pub fn parse_checksum_for_asset(checksums_text: &str, asset_name: &str) -> Option<String> {
     for line in checksums_text.lines() {
@@ -166,8 +171,8 @@ pub fn parse_checksum_for_asset(checksums_text: &str, asset_name: &str) -> Optio
     None
 }
 
-/// Verifies downloaded binary bytes against both the pinned manifest checksum (if enforced)
-/// and the published `SHA2-256SUMS` content.
+/// Verifies downloaded binary bytes against the pinned manifest checksum (when given) and the
+/// published `SHA2-256SUMS` content (when given).
 pub fn verify_binary_checksum(
     bytes: &[u8],
     asset_name: &str,
@@ -189,7 +194,7 @@ pub fn verify_binary_checksum(
     }
     if let Some(expected) = expected_sha256 {
         let expected_lower = expected.trim().to_ascii_lowercase();
-        if !expected_lower.is_empty() && actual != expected_lower {
+        if actual != expected_lower {
             return Err(PlayerError::InvalidArg(format!(
                 "SHA-256 mismatch against pinned manifest for {asset_name}: expected {expected_lower}, got {actual}"
             )));
@@ -251,19 +256,17 @@ pub async fn update_managed_extractor(
         crate::playlist::import::append_capped(&mut bin_bytes, &chunk, MAX_BINARY_BYTES)?;
     }
 
-    // Verify against SHA2-256SUMS (and against manifest if using custom base_url_override is None or matches).
-    let expected_manifest_hash = if base_url_override.is_some() {
-        Some(asset_info.sha256.as_str())
-    } else {
-        // Check published SHA2-256SUMS; if manifest hash is also present, check it when it matches the published one.
-        None
-    };
-    verify_binary_checksum(
-        &bin_bytes,
-        &asset_info.asset,
-        Some(&sums_text),
-        expected_manifest_hash,
-    )?;
+    // The binary must match the hash pinned in this repository's manifest AND the release's
+    // published SHA2-256SUMS. The pin is what makes the version "known good": the checksum file
+    // comes from the same host as the binary, so on its own it would not stop a tampered release.
+    let pinned = asset_info.sha256.trim().to_ascii_lowercase();
+    if !is_sha256_hex(&pinned) {
+        return Err(PlayerError::Parse(format!(
+            "The pinned yt-dlp manifest has no valid SHA-256 for {}",
+            asset_info.asset
+        )));
+    }
+    verify_binary_checksum(&bin_bytes, &asset_info.asset, Some(&sums_text), Some(&pinned))?;
 
     let dest = managed_binary_path(app_data_dir);
     if let Some(parent) = dest.parent() {
@@ -279,6 +282,63 @@ pub async fn update_managed_extractor(
     std::fs::rename(&temp, &dest)?;
 
     extractor_status(Some(app_data_dir))
+}
+
+/// How long a resolved stream link is reused. Extracted links expire (hours, not days) and often
+/// carry tokens, so they are never stored in the library; this only covers "extract, then play"
+/// and quick replays, so the page is not resolved twice in a row.
+pub const RESOLVE_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const RESOLVE_CACHE_MAX: usize = 32;
+
+/// A small in-memory cache of resolved links keyed by page URL.
+#[derive(Default)]
+pub struct ResolveCache {
+    entries: HashMap<String, (std::time::Instant, ExtractResponse)>,
+}
+
+impl ResolveCache {
+    pub fn get(&self, page_url: &str, now: std::time::Instant) -> Option<ExtractResponse> {
+        self.entries
+            .get(page_url)
+            .filter(|(stored, _)| now.saturating_duration_since(*stored) < RESOLVE_CACHE_TTL)
+            .map(|(_, response)| response.clone())
+    }
+
+    pub fn put(&mut self, page_url: &str, response: ExtractResponse, now: std::time::Instant) {
+        self.entries
+            .retain(|_, (stored, _)| now.saturating_duration_since(*stored) < RESOLVE_CACHE_TTL);
+        if self.entries.len() >= RESOLVE_CACHE_MAX
+            && let Some(oldest) = self.entries.iter().min_by_key(|(_, (stored, _))| *stored).map(|(key, _)| key.clone())
+        {
+            self.entries.remove(&oldest);
+        }
+        self.entries.insert(page_url.to_string(), (now, response));
+    }
+}
+
+static RESOLVED: LazyLock<std::sync::Mutex<ResolveCache>> = LazyLock::new(Default::default);
+
+/// Remembers a freshly resolved link for the page it came from.
+pub fn remember_resolved(page_url: &str, response: &ExtractResponse) {
+    if let Ok(mut cache) = RESOLVED.lock() {
+        cache.put(page_url, response.clone(), std::time::Instant::now());
+    }
+}
+
+/// Resolves a page URL to a playable stream now, reusing a recent result when there is one.
+pub async fn resolve_stream(
+    page_url: &str,
+    app_data_dir: Option<PathBuf>,
+    allow_lan: bool,
+) -> Result<ExtractResponse> {
+    if let Ok(cache) = RESOLVED.lock()
+        && let Some(hit) = cache.get(page_url, std::time::Instant::now())
+    {
+        return Ok(hit);
+    }
+    let resolved = extract_stream(page_url, app_data_dir, allow_lan).await?;
+    remember_resolved(page_url, &resolved);
+    Ok(resolved)
 }
 
 /// Runs a command with both a time limit and an output byte cap on stdout.
@@ -466,16 +526,14 @@ pub fn parse_ytdlp_json(raw_json: &[u8], fallback_title: &str, allow_lan: bool) 
     // Fallback to `formats` list.
     if video_url.is_none()
         && let Some(formats) = info.get("formats").and_then(|f| f.as_array())
-    {
-        if let Some(last) = formats
+        && let Some(last) = formats
             .iter()
             .rev()
             .find(|f| f.get("url").and_then(|u| u.as_str()).is_some_and(|s| !s.trim().is_empty()))
-        {
-            video_url = last.get("url").and_then(|u| u.as_str()).map(|s| s.trim().to_string());
-            if headers.is_empty() {
-                headers = clean_headers(last.get("http_headers"));
-            }
+    {
+        video_url = last.get("url").and_then(|u| u.as_str()).map(|s| s.trim().to_string());
+        if headers.is_empty() {
+            headers = clean_headers(last.get("http_headers"));
         }
     }
 
@@ -619,5 +677,71 @@ mod tests {
         assert!(verify_binary_checksum(b"tampered", "yt-dlp_linux", Some(&sums), Some(&digest)).is_err());
         // Missing asset in SHA2-256SUMS fails verification
         assert!(verify_binary_checksum(payload, "missing_asset", Some(&sums), None).is_err());
+    }
+
+    /// The two lines of the real upstream `SHA2-256SUMS` for the pinned release (downloaded from
+    /// the release page and the binary itself hashed). The manifest once shipped with different
+    /// values, and nothing noticed because the pin was not enforced.
+    const UPSTREAM_SUMS_2026_02_04: &str = "\
+051ed827a836f56772d662c38ebfabd8d613a21a39376737d56893184bcc53f8  yt-dlp_linux
+6b83f090768a9d428456b7998a5b8fc1c628895647df2763f54f9552601b732e  yt-dlp_linux_aarch64
+";
+
+    #[test]
+    fn the_pinned_manifest_matches_the_upstream_release_checksums() {
+        let manifest = pinned_manifest().unwrap();
+        assert_eq!(manifest.version, "2026.02.04", "update UPSTREAM_SUMS_2026_02_04 when the pin moves");
+        assert!(!manifest.assets.is_empty());
+        for (target, asset) in &manifest.assets {
+            let published = parse_checksum_for_asset(UPSTREAM_SUMS_2026_02_04, &asset.asset)
+                .unwrap_or_else(|| panic!("no upstream checksum recorded for {target} ({})", asset.asset));
+            assert_eq!(asset.sha256, published, "pinned hash for {target}");
+            assert!(is_sha256_hex(&asset.sha256));
+        }
+    }
+
+    #[test]
+    fn an_empty_pin_cannot_disable_verification() {
+        let payload = b"binary";
+        assert!(verify_binary_checksum(payload, "yt-dlp_linux", None, Some("")).is_err());
+        assert!(!is_sha256_hex(""));
+    }
+
+    /// Downloads the pinned yt-dlp from GitHub, verifies it against the manifest and the release
+    /// checksums, installs it and runs it. Needs network: `cargo test -p lumen-core live_ -- --ignored`.
+    #[tokio::test]
+    #[ignore = "downloads about 36 MB from GitHub"]
+    async fn live_update_installs_and_runs_the_pinned_extractor() {
+        let dir = std::env::temp_dir().join(format!("lumen-ytdlp-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let status = update_managed_extractor(&dir, None, false).await.expect("pinned download verifies");
+        assert!(status.available);
+        assert_eq!(status.source, "managed");
+        assert_eq!(status.version.as_deref(), Some("2026.02.04"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolved_links_are_reused_briefly_and_then_dropped() {
+        let mut cache = ResolveCache::default();
+        let start = std::time::Instant::now();
+        let response = ExtractResponse { title: "T".into(), url: "https://cdn.example/v.mp4?sig=abc".into(), audio_url: None, headers: HashMap::new() };
+        assert!(cache.get("https://page.example/watch", start).is_none());
+        cache.put("https://page.example/watch", response.clone(), start);
+        assert_eq!(cache.get("https://page.example/watch", start + Duration::from_secs(60)), Some(response));
+        assert!(cache.get("https://page.example/watch", start + RESOLVE_CACHE_TTL).is_none(), "expired links are not served");
+        assert!(cache.get("https://other.example/", start).is_none());
+    }
+
+    #[test]
+    fn the_resolve_cache_is_bounded() {
+        let mut cache = ResolveCache::default();
+        let start = std::time::Instant::now();
+        let response = ExtractResponse { title: "T".into(), url: "https://cdn.example/v".into(), audio_url: None, headers: HashMap::new() };
+        for index in 0..(RESOLVE_CACHE_MAX + 10) {
+            cache.put(&format!("https://page.example/{index}"), response.clone(), start + Duration::from_millis(index as u64));
+        }
+        assert_eq!(cache.entries.len(), RESOLVE_CACHE_MAX);
+        assert!(cache.get("https://page.example/0", start + Duration::from_secs(1)).is_none(), "the oldest was evicted");
     }
 }

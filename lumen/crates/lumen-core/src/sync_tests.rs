@@ -510,3 +510,33 @@ async fn live_two_clients_through_the_real_worker() {
     assert!(!live.exists().await.unwrap(), "the group is gone after deletion");
     live.delete_group().await.expect("deleting a missing group is not an error");
 }
+
+#[tokio::test]
+async fn hand_set_watched_marks_sync_between_devices_and_the_newer_one_wins() {
+    let (origin, mock) = start_mock().await;
+    let root = generate_root().unwrap();
+    remote(&origin, &root).register(POW_BITS).await.unwrap();
+    let a = device().await;
+    let b = device().await;
+
+    let now = chrono::Utc::now().timestamp_millis();
+    crate::series::set_episodes_watched(&a, 1, "tmdb:tv:42", 1, &[1, 2], true, now).await.unwrap();
+    sync_with(&a, &remote(&origin, &root)).await.unwrap();
+    sync_with(&b, &remote(&origin, &root)).await.unwrap();
+    let marks = crate::series::list_episode_marks(&b, 1).await.unwrap();
+    assert_eq!(marks.iter().map(|m| (m.season, m.episode, m.watched)).collect::<Vec<_>>(), vec![(1, 1, true), (1, 2, true)]);
+
+    // "Not watched" on B is newer, so it replaces A's mark on both devices.
+    crate::series::set_episodes_watched(&b, 1, "tmdb:tv:42", 1, &[2], false, now + 60_000).await.unwrap();
+    sync_with(&b, &remote(&origin, &root)).await.unwrap();
+    sync_with(&a, &remote(&origin, &root)).await.unwrap();
+    let marks = crate::series::list_episode_marks(&a, 1).await.unwrap();
+    assert_eq!(marks.iter().map(|m| m.watched).collect::<Vec<_>>(), vec![true, false]);
+
+    // The server saw none of it.
+    let stored = {
+        let guard = mock.lock().unwrap();
+        serde_json::to_string(&guard.groups.values().next().unwrap().items).unwrap()
+    };
+    assert!(!stored.contains("tmdb:tv:42") && !stored.contains("episode"), "{stored}");
+}

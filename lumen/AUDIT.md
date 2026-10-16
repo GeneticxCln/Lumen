@@ -1,67 +1,49 @@
-# Lumen audit and frontend redesign
+# Lumen audit
 
-## Scope and acceptance
+Current state of correctness, security boundaries and release readiness. The earlier version of this file described the Python sidecar and browser bridge, which no longer exist.
 
-Reviewed React views/hooks/API bridge, Rust commands/SQLite/M3U parsing/mpv IPC/sidecar lifecycle, Python extraction/harvesting/probing/browser bridge, Tauri capabilities/configuration, and build/packaging scripts.
+## Architecture in one paragraph
 
-The requested frontend overhaul is implemented in the existing React + TypeScript + Vite app. It follows Netflix's visual browsing pattern while retaining Lumen branding and original local artwork, not Netflix's logo, catalog, or proprietary assets. This is not a pixel-for-pixel Netflix replica.
+Tauri v2 shell (`src-tauri`) over a UI-agnostic Rust core (`crates/lumen-core`: M3U parsing, SQLite, search, TMDB, extraction, harvesting, probing, sync, network guard). Video plays in a separate native mpv window controlled over JSON IPC. The React UI talks only to Tauri commands. There is no browser mode and no local HTTP server. Extraction runs a pinned, checksum-verified `yt-dlp` binary as a subprocess.
 
-- Cinematic hero, dark navigation, media shelves, title details, responsive layouts.
-- Real-library search across imported sources, category/source filters, saved favorites and history-based discovery.
-- Virtualized horizontal shelves using the project's existing TanStack dependency.
-- Device-local presentation/volume/keyboard preferences and SQLite-backed engine settings.
-- Source import/removal, local file browsing, keyboard-accessible dialogs.
-- Desktop remains native mpv; the concurrently added browser player is preserved and lazy-loaded. Browser codec/CORS/header restrictions still apply.
+## Security boundaries (verified by tests unless noted)
 
-The shared checkout was edited concurrently during this task. The final navigation structure is Discovery, Movies, Series, Live TV and Settings: Discovery is the local media on this device, search lives in the top bar, and saved titles/local files are managed in Settings. No Git repository was available, so no commit or diff-based ownership review was possible.
+- **Network guard.** User-directed fetches (playlist import, harvest, search providers, extractor update, probes) go through `netguard`: public addresses only unless "allow local network sources" is on, every redirect hop and every resolved address is checked.
+- **Profile PINs.** Enforced in the backend (`authorize_profile`) with a process-wide attempt limiter. A PIN protects against other people using the app, not against reading the database file.
+- **Settings.** Only an allowlist of keys is writable from the UI; internal state (active profile, sync cursors) is not.
+- **Secrets.** TMDB and search-provider tokens and the sync key live in the OS keychain, never in the settings table. Error text from HTTP failures has the request URL removed.
+- **yt-dlp.** The managed binary must match the SHA-256 pinned in `crates/lumen-core/yt-dlp-manifest.json` and the release's published `SHA2-256SUMS`. A test ties the manifest to the upstream checksums, and an ignored live test downloads, verifies, installs and runs it. The pin moves only by editing the manifest in a commit.
+- **Sync.** End-to-end encrypted; the server holds opaque blobs (see README "Sync" for exactly what it can see). Tested against an in-process server and, with `SYNC_TEST_URL`, against the real Worker.
+- **ffmpeg.** Local files only, with a timeout, a concurrency limit and a bounded, stable-named thumbnail cache.
+- **mpv.** IPC socket in `$XDG_RUNTIME_DIR` (or a private directory), bounded pending requests.
 
-## Resolved findings
+## Identity and extraction
 
-1. **Critical: browser bridge exposed sensitive local commands.** The filesystem/database browser bridge is now registered only in explicit standalone development mode. Native sidecars retain bearer-protected extraction APIs and no longer import/initialize the Python bridge database. Browser development requests require loopback Host, an exact configured loopback Origin when supplied, and a non-simple client header. Wildcard CORS was removed. Media-element requests use a fixed client marker instead of a custom header (not a secret/auth credential); foreign Origins are still rejected. This is local-development defense, not authentication suitable for hosting.
-2. **High: stale library data after import and out-of-order filter loads.** Full-library refresh is cancellation-safe; source reads are batched four at a time; search/filtering is local and works across playlists. New imports reload the actual rows, not only playlist names.
-3. **High: failures were presented as success.** Changed playback/import/settings paths expose errors. File picker failures are caught. Playback commands do not blindly swallow failures. Stream-check timestamps are not portrayed as guaranteed current availability. Seeded streams are no longer automatically marked verified.
-4. **Medium: database connections leaked in Python.** The bridge connection context manager now commits/rolls back and always closes connections; tests run with ResourceWarning treated as an error.
-5. **Medium: mute volume 0 became 80.** The bridge now distinguishes zero from a missing volume.
-6. **Medium: progress save interval reset with each time update.** Progress is read through a ref on a stable interval.
-7. **Medium: inaccessible overlay dialogs and local list items.** Native dialogs provide modal focus behavior and Escape; local entries are buttons; controls have accessible names; focus outlines, reduced motion, and mobile layouts are supported.
-8. **Medium: unbounded HLS recovery.** Browser-player fatal-error recovery is capped and produces a visible failure. The player remains mounted when its controls dialog closes so browsing does not immediately destroy playback.
-9. **Low: template identity and unsuitable desktop size.** Branded document title/favicon and a 1440×900 default desktop window replace the starter template/800×600 dashboard.
+- Library entries are keyed by stable URLs and `content_key`s (`titles`, `title_sources`); favorites and history store a `content_key` and are matched on it as well as on the URL.
+- An extracted page is saved as the **page** URL. Its stream link (which expires and may carry tokens) is resolved when the entry plays and is never stored, so replays work and split audio is never lost.
+- When a stream fails, playback moves to the next ranked source of the same title and shows a notice.
 
-## Remaining risks / next work
+## Known limitations and open work
 
-### High priority
+- **Release packaging is not proven.** No `.deb`, AppImage or Flatpak has been built or installed on a clean machine, and there is no CI workflow in the repository yet.
+- **Native playback is not verified on every desktop.** Rust tests pass and mpv IPC is exercised, but end-to-end playback on GNOME Wayland, Hyprland and X11 has not been checked here. Video is still a separate mpv window (single-window playback is not done).
+- **Sync data model.** Synced records still carry the (credential-stripped) stream URL beside the `content_key`; the server cannot read either. Query parameters whose names contain `key`, `auth`, `token`, `secret` or `pass` are removed from synced URLs, which can break a stream whose identity lives in such a parameter on the other device.
+- **Search and discovery** classify movies, series and live TV from names and groups, not catalog metadata. All library rows are held in memory; shelves virtualize the DOM but very large libraries need pagination.
+- **Clippy** reports a few style lints in `extract.rs`, `harvest.rs` and `search.rs`; they are not enforced.
+- Extra mpv arguments are a trusted-local feature: whitespace-split, no shell involved.
 
-- **Release packaging is not proven.** The sidecar build script's PyInstaller path runs a file with package-relative imports; the native-development wrapper is not a portable release bundle. Tauri's build/bundle configuration does not yet stage a verified sidecar artifact. Test .deb/AppImage on clean machines before claiming readiness.
-- **Content Security Policy remains disabled** in Tauri configuration. Define a policy compatible with runtime media/logos and test in WebKitGTK; do not blindly apply a restrictive policy that breaks playback.
-- **Network fetch hardening remains incomplete.** Extract/harvest/import accept user-directed destinations but do not consistently enforce private-network restrictions, response-size ceilings, or aggregate time limits. Local application use may intentionally need LAN sources; establish that policy before deploying any bridge. Never publish the development bridge.
-- **Playback engine integration is not fully verified on Linux desktop.** Rust unit tests pass, but this task did not complete end-to-end native mpv playback on both Wayland and X11. Resume currently seeks immediately after load rather than explicitly waiting for file-loaded.
+## Checks
 
-### Medium priority
+```bash
+npm run typecheck && npm test && npm run build
+cargo test -p lumen-core          # needs no GTK/WebKit
+cd src-tauri && cargo test --lib  # needs the Tauri system libraries, ffmpeg; mpv tests skip without mpv
+```
 
-- M3U parsing does not distinguish an HLS manifest from a channel playlist or resolve all relative stream URLs. A raw HLS manifest can be mis-imported as segment entries.
-- History writes append rows without retention/compaction; imports create playlist/channel records across separate operations in Rust rather than one encompassing transaction.
-- mpv IPC has unbounded command/pending structures; timeout cleanup and child-sidecar stdout/stderr draining should be reviewed for long sessions. Sidecar ready announcement precedes fully verified HTTP readiness.
-- Python bridge duplicates Rust storage/import logic. Both share schema assumptions and can drift; keep parity tests or retire the bridge outside development.
-- Arbitrary extra mpv arguments are an advanced trusted-local feature; whitespace splitting does not implement shell quoting. No shell is invoked for these args.
-- Browser playback cannot forward arbitrary stream headers and may fail for CORS, codecs, mixed content, expired URLs, or split audio/video formats from extraction. Native mpv remains the dependable path for those formats. Browser resume/completion behavior needs further work.
-- Movies/series/live classification is a keyword heuristic over names/groups, not authoritative catalog metadata or a live schedule. Discovery is deterministic local ranking, not Netflix-scale collaborative filtering.
-- All library metadata is loaded in memory. Shelves virtualize DOM elements, but very large category counts and startup payloads need pagination/row virtualization.
-- HLS player chunk is about 577 kB minified (180 kB gzip). It is lazy-loaded, but Vite still reports its large-chunk warning. No warning threshold was weakened.
-- Python dependencies use loose lower bounds (including yt-dlp), despite the plan's pinning requirement. Lock and validate extraction updates before release.
+Ignored tests that need the network or a running server:
 
-### Low priority
+```bash
+cargo test -p lumen-core live_ -- --ignored   # downloads yt-dlp; set SYNC_TEST_URL for the sync server test
+```
 
-- Locally generated video-frame thumbnails are now available for on-device files through FFmpeg and are cached by source file identity. A frame is a cinematic preview rather than official poster artwork; audio, playlists, and unsupported formats keep their branded fallbacks.
-- Older dashboard components and a settings-dialog variant remain in the shared checkout. Remove obsolete code after the concurrent frontend changes settle.
-
-## Verification
-
-- `npm test`: deterministic filtering, ranking, preference validation, history ordering/deduplication, and a 10,000-entry correctness/timing check. Representative run: ~5–11 ms for filtering + ranking on this machine. This is not a claimed speedup or full-UI benchmark.
-- `npm run typecheck` and `npm run build`: passing. The lazy HLS chunk warning remains explicitly noted.
-- `cargo test --lib`: 3 passing tests covering M3U parsing, SQLite/favorites/settings, and actual sidecar lifecycle/probe.
-- Python unittest suite: passing; covers Origin/Host/header rejection, native endpoint isolation and bearer auth, settings round trip, import/favorite/cascade removal, zero volume, and concurrently added stale-channel progress regression.
-- Live browser checks at 1440×1000 and 390×844: screenshots inspected, no horizontal page overflow; search category matching and SQLite-backed save-to-list verified; preference persistence and dialog Escape verified.
-- Imported an isolated test playlist through the real Add source UI and confirmed it immediately appeared. A generated local WebM played through the browser interface: 640px decoded video, readyState 4, 12-second duration, advancing playback time. This does not verify every external HLS catalog or native mpv playback.
-- Preview uses an isolated `/tmp/lumen-preview-data` database rather than the user's media database. The project supports `LUMEN_DATA_DIR`, `LUMEN_BRIDGE_URL`, and `LUMEN_PREVIEW_PORT` for independent local previews.
-
-This is a source-level review plus targeted tests, not a penetration test, release certification, or exhaustive verification of every stream/provider.
+This is a source-level review plus targeted tests, not a penetration test or release certification.

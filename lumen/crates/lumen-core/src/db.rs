@@ -19,6 +19,15 @@ static DB_POOL: OnceLock<Pool<Sqlite>> = OnceLock::new();
 /// as a broken library. Held only while the pool is created; every later call returns early.
 static DB_INIT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Applies the schema. The one copy of the migrations lives in this crate, so the app and every
+/// test (including the desktop crate's) build the same database.
+pub async fn run_migrations(pool: &Pool<Sqlite>) -> Result<()> {
+    sqlx::migrate!("./migrations")
+        .run(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(format!("Migration failed: {}", e)))
+}
+
 pub async fn init_db(app_dir: &Path) -> Result<Pool<Sqlite>> {
     if let Some(existing) = DB_POOL.get() {
         return Ok(existing.clone());
@@ -46,11 +55,7 @@ pub async fn init_db(app_dir: &Path) -> Result<Pool<Sqlite>> {
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    // Run migrations
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .map_err(|e| PlayerError::Sql(format!("Migration failed: {}", e)))?;
+    run_migrations(&pool).await?;
 
     // sqlx records a migration as applied the first time it runs, so a new column added
     // to the migration file would never reach an existing database. Apply the additive
@@ -1346,22 +1351,20 @@ pub async fn get_resume_position(
     Ok(row.map(|r| r.get("position")))
 }
 
-/// Resolves the preferred/ranked stream URL for a content key at play time.
-/// Returns (stream_url, headers, channel_id).
-pub async fn resolve_playback_source(
-    pool: &Pool<Sqlite>,
-    content_key: &str,
-) -> Result<Option<(String, Option<String>, Option<i64>)>> {
-    let row = sqlx::query(
-        "SELECT stream_url, headers, channel_id FROM title_sources \
-         WHERE content_key = ? ORDER BY rank DESC, id ASC LIMIT 1",
+/// The page an extracted entry was made from, when `channel_id` belongs to an extracted source.
+/// Such an entry's stream link is resolved when it is played: links expire and often carry tokens.
+/// Entries saved by older versions hold a stream link as their URL, and still resolve from the
+/// source's origin.
+pub async fn extract_origin_for_channel(pool: &Pool<Sqlite>, channel_id: i64) -> Result<Option<String>> {
+    let origin: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT p.origin FROM channels c JOIN playlists p ON p.id = c.playlist_id \
+         WHERE c.id = ? AND p.source = 'extract'",
     )
-    .bind(content_key)
+    .bind(channel_id)
     .fetch_optional(pool)
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
-
-    Ok(row.map(|r| (r.get("stream_url"), r.get("headers"), r.get("channel_id"))))
+    Ok(origin.flatten().filter(|origin| !origin.trim().is_empty()))
 }
 
 /// Lists all available sources for a title in order of rank (for fallback).
@@ -1475,6 +1478,38 @@ mod tests {
         // `list_channels` reads the enrichment columns, which `init_db` adds after migrating.
         migrate_tmdb_columns(&pool).await.unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn extracted_entries_resolve_from_their_page_not_a_stored_link() {
+        let pool = test_pool().await;
+        let now = 1_700_000_000;
+        let make = |name: &str, source: &str, origin: Option<&str>, url: &str| {
+            (
+                Playlist { id: None, name: name.into(), source: source.into(), origin: origin.map(String::from), created_at: now, updated_at: now },
+                Channel {
+                    id: None, playlist_id: 0, name: name.into(), url: url.into(), group_title: None, tvg_id: None,
+                    tvg_logo: None, language: None, extra_headers: None, last_ok: None, last_error: None, is_live: None,
+                },
+            )
+        };
+        let (extract_pl, extract_ch) = make("Clip", "extract", Some("https://video.example/watch?v=1"), "https://video.example/watch?v=1");
+        let (legacy_pl, legacy_ch) = make("Old clip", "extract", Some("https://video.example/watch?v=2"), "https://cdn.example/expired.mp4?sig=x");
+        let (m3u_pl, m3u_ch) = make("Playlist", "url", Some("https://lists.example/a.m3u"), "https://cdn.example/live.m3u8");
+        let mut ids = Vec::new();
+        for (playlist, channel) in [(extract_pl, extract_ch), (legacy_pl, legacy_ch), (m3u_pl, m3u_ch)] {
+            let playlist_id = import_playlist(&pool, &playlist, &[channel]).await.unwrap();
+            let id: i64 = sqlx::query_scalar("SELECT id FROM channels WHERE playlist_id = ?").bind(playlist_id).fetch_one(&pool).await.unwrap();
+            ids.push(id);
+        }
+        assert_eq!(extract_origin_for_channel(&pool, ids[0]).await.unwrap().as_deref(), Some("https://video.example/watch?v=1"));
+        assert_eq!(
+            extract_origin_for_channel(&pool, ids[1]).await.unwrap().as_deref(),
+            Some("https://video.example/watch?v=2"),
+            "an entry saved by an older version holds a stream link, but still resolves from its page"
+        );
+        assert_eq!(extract_origin_for_channel(&pool, ids[2]).await.unwrap(), None, "playlist entries play their own URL");
+        assert_eq!(extract_origin_for_channel(&pool, 9_999).await.unwrap(), None);
     }
 
     #[tokio::test]

@@ -7,6 +7,10 @@ import {
   setVolume as setVolumeCmd,
   setPlayerTrack as setPlayerTrackCmd,
   setPlayerQuality as setPlayerQualityCmd,
+  getPlayerPrefs,
+  setPlayerPrefs,
+  setSubtitleDelay,
+  addSubtitleFile,
   stop as stopCmd,
   onPlayerState,
   saveProgress,
@@ -15,9 +19,17 @@ import {
   errorMessage,
 } from "../lib/tauri";
 import { DEFAULT_PLAYER_STATE } from "../lib/types";
+import { clampScale, SUB_DELAY_STEP, SUB_SCALE_STEP } from "../lib/languages";
 import type { PlayerTrackKind } from "../lib/types";
 
-export function usePlayer() {
+interface PlayerOptions {
+  /** Told when playback moves to another source by itself, so the user is not left guessing. */
+  onNotice?: (message: string) => void;
+}
+
+export function usePlayer(options: PlayerOptions = {}) {
+  const onNoticeRef = useRef(options.onNotice);
+  onNoticeRef.current = options.onNotice;
   const [playerState, setPlayerState] = useState<PlayerState>(DEFAULT_PLAYER_STATE);
   const [currentTitle, setCurrentTitle] = useState<string | null>(null);
   const currentTitleRef = useRef(currentTitle);
@@ -59,6 +71,7 @@ export function usePlayer() {
       .then(async (next) => {
         if (!next) return;
         await playUrl(next.url, next.headers ?? undefined, next.channel_id ?? undefined);
+        onNoticeRef.current?.(`${currentTitleRef.current ?? "This title"} failed to play from that source, so Lumen switched to another one.`);
         headersRef.current = next.headers ?? undefined;
         setCurrentUrl(next.url);
         setCurrentChannelId(next.channel_id ?? undefined);
@@ -124,15 +137,15 @@ export function usePlayer() {
   }, [applyStartVolume]);
 
   const playMedia = useCallback(
-    async (url: string, title?: string, headers?: Record<string, string>, startVolume?: number, audioUrl?: string) => {
+    async (url: string, title?: string, headers?: Record<string, string>, startVolume?: number, audioUrl?: string, channelId?: number) => {
       fallbackFromRef.current = null;
-      await playUrl(url, headers, undefined, startVolume, audioUrl);
+      await playUrl(url, headers, channelId, startVolume, audioUrl);
       applyStartVolume(startVolume);
       headersRef.current = headers;
       const label = title || url.split("/").pop() || url;
       setCurrentTitle(label);
       setCurrentUrl(url);
-      setCurrentChannelId(undefined);
+      setCurrentChannelId(channelId);
       setPlayerState((prev) => ({
         ...prev,
         paused: false,
@@ -211,6 +224,23 @@ export function usePlayer() {
     await setPlayerTrackCmd(kind, id);
   }, []);
 
+  // The subtitle delay belongs to the file that is playing: it starts again at zero for the next one.
+  const [subtitleDelay, setSubtitleDelayState] = useState(0);
+  useEffect(() => { setSubtitleDelayState(0); }, [currentUrl]);
+
+  const changeSubtitleDelay = useCallback(async (direction: 1 | -1) => {
+    const applied = await setSubtitleDelay(Math.round((subtitleDelay + direction * SUB_DELAY_STEP) * 10) / 10);
+    setSubtitleDelayState(applied);
+  }, [subtitleDelay]);
+
+  // Size is a profile preference, so a change here is saved, not just applied to this file.
+  const changeSubtitleScale = useCallback(async (direction: 1 | -1) => {
+    const prefs = await getPlayerPrefs();
+    await setPlayerPrefs({ ...prefs, subScale: clampScale(prefs.subScale + direction * SUB_SCALE_STEP) });
+  }, []);
+
+  const addSubtitle = useCallback(async (path: string) => { await addSubtitleFile(path); }, []);
+
   const selectQuality = useCallback(async (id: string) => {
     await setPlayerQualityCmd(id);
     setPlayerState((previous) => ({ ...previous, quality: id }));
@@ -233,5 +263,9 @@ export function usePlayer() {
     stopPlayback,
     selectTrack,
     selectQuality,
+    subtitleDelay,
+    changeSubtitleDelay,
+    changeSubtitleScale,
+    addSubtitle,
   };
 }

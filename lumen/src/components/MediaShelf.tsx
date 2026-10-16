@@ -2,6 +2,8 @@ import { useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { BrowseTitle, Channel } from "../lib/types";
 import { artworkCategory, browseCaption } from "../lib/discovery";
+import { remainingLabel } from "../lib/board";
+import type { ContinueItem } from "../lib/board";
 import { TMDB_BACKDROP_SIZE, tmdbImage } from "../lib/tauri";
 import { Icon } from "./Icon";
 
@@ -103,6 +105,71 @@ export function MediaShelf({ title, subtitle, channels, favorites, onPlay, onDet
             <div className="card-bottom"><div><h3>{channel.name}</h3><p>{channel.group_title || "Your library"}</p></div><button className={`icon-button circle ${favorite ? "is-saved" : ""}`} aria-label={`${favorite ? "Remove" : "Add"} ${channel.name} ${favorite ? "from" : "to"} My List`} aria-pressed={favorite} onClick={() => onFavorite(channel.id)}><Icon name={favorite ? "check" : "plus"} size={17} /></button><button className="icon-button circle" aria-label={`Details for ${channel.name}`} onClick={() => onDetails(channel)}><Icon name="info" size={17} /></button></div>
           </article>;
         })}
+      </div>
+    </div>
+  </section>;
+}
+
+interface ContinueShelfProps {
+  items: ContinueItem[];
+  compact: boolean;
+  onPlayChannel: (channel: Channel) => void;
+  onPlayFile: (path: string, name: string) => void;
+}
+
+/** Things you started and can pick up where you stopped: library streams and files on this computer. */
+export function ContinueShelf({ items, compact, onPlayChannel, onPlayFile }: ContinueShelfProps) {
+  const ref = useRef<HTMLDivElement>(null);
+  const width = compact ? 224 : 280;
+  if (!items.length) return null;
+  const title = "Continue watching";
+  return <section className="media-shelf" aria-label={title}>
+    <div className="shelf-heading"><div><h2>{title}<span className="shelf-count">{items.length}</span></h2><p>Pick up exactly where you stopped.</p></div></div>
+    <div className="shelf-track" ref={ref} tabIndex={0} aria-label={`${title} titles`}>
+      <div style={{ display: "flex", gap: 12, width: "max-content", paddingRight: 12 }}>
+        {items.map((item) => <article className="media-card" key={item.key} style={{ width: width - 12 }}>
+          <button className="card-art-button" aria-label={`Resume ${item.title}`} onClick={() => item.channel ? onPlayChannel(item.channel) : onPlayFile(item.path!, item.title)}>
+            {item.channel
+              ? <ChannelArtwork channel={item.channel} />
+              : <div className="channel-art"><img className="landscape-art" src="/artwork/landscape.svg" alt="" aria-hidden="true" /><span className="art-title">{item.title}</span></div>}
+            <span className="card-play"><Icon name="play" size={24} /></span>
+            <span className="card-progress" role="progressbar" aria-label={`${item.title} progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(item.progress * 100)}><span style={{ width: `${Math.round(item.progress * 100)}%` }} /></span>
+          </button>
+          <div className="card-bottom"><div><h3>{item.title}</h3><p>{remainingLabel(item.remainingSeconds)}{item.path ? " · On this computer" : ""}</p></div></div>
+        </article>)}
+      </div>
+    </div>
+  </section>;
+}
+
+export interface UpcomingCard {
+  key: string;
+  name: string;
+  /** "S03E04 airs tomorrow". */
+  text: string;
+  kind: "upcoming" | "aired";
+  /** A library entry of the series, when there is one. */
+  channel?: Channel;
+}
+
+/** Series you follow with an episode on the way or just out. Opens the series' details. */
+export function UpcomingShelf({ items, compact, onDetails }: { items: UpcomingCard[]; compact: boolean; onDetails: (channel: Channel) => void }) {
+  const width = compact ? 224 : 280;
+  if (!items.length) return null;
+  const title = "Coming up";
+  return <section className="media-shelf" aria-label={title}>
+    <div className="shelf-heading"><div><h2>{title}<span className="shelf-count">{items.length}</span></h2><p>New and upcoming episodes of series you follow, from TMDB.</p></div></div>
+    <div className="shelf-track" tabIndex={0} aria-label={`${title} series`}>
+      <div style={{ display: "flex", gap: 12, width: "max-content", paddingRight: 12 }}>
+        {items.map((item) => <article className="media-card" key={item.key} style={{ width: width - 12 }}>
+          <button className="card-art-button" aria-label={`${item.name}: ${item.text}`} disabled={!item.channel} onClick={() => item.channel && onDetails(item.channel)}>
+            {item.channel
+              ? <ChannelArtwork channel={item.channel} />
+              : <div className="channel-art"><img className="landscape-art" src="/artwork/landscape.svg" alt="" aria-hidden="true" /><span className="art-title">{item.name}</span></div>}
+            <span className="card-badge">{item.kind === "aired" ? "New episode" : "Upcoming"}</span>
+          </button>
+          <div className="card-bottom"><div><h3>{item.name}</h3><p>{item.text}</p></div></div>
+        </article>)}
       </div>
     </div>
   </section>;

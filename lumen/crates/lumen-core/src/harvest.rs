@@ -64,12 +64,10 @@ fn collect_from_json_ld(data: &serde_json::Value, base: &Url, found: &mut Vec<St
         serde_json::Value::Object(map) => {
             for (k, v) in map {
                 if let Some(s) = v.as_str() {
-                    if matches!(k.as_str(), "contentUrl" | "embedUrl" | "url")
-                        || RELATIVE_M3U_RE.is_match(s)
+                    if (matches!(k.as_str(), "contentUrl" | "embedUrl" | "url") || RELATIVE_M3U_RE.is_match(s))
+                        && let Some(resolved) = resolve_candidate(base, s)
                     {
-                        if let Some(resolved) = resolve_candidate(base, s) {
-                            found.push(resolved);
-                        }
+                        found.push(resolved);
                     }
                 } else {
                     collect_from_json_ld(v, base, found);

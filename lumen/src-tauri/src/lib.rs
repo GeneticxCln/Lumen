@@ -1,6 +1,6 @@
 pub use lumen_core::{
-    auth, db, env, error, extract, harvest, media_tools, netguard, pin_guard, playlist, probe,
-    search, secrets, tmdb,
+    auth, board, db, error, extract, harvest, media_tools, netguard, pin_guard, player_prefs, playlist, probe,
+    search, secrets, series, tmdb,
 };
 
 mod commands;
@@ -31,6 +31,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            board_new_channel_ids,
+            set_episodes_watched_cmd,
+            list_episode_marks_cmd,
+            upcoming_episodes_cmd,
             sync::sync_now_cmd,
             sync::sync_status_cmd,
             sync::sync_state_cmd,
@@ -47,6 +51,10 @@ pub fn run() {
             set_fullscreen,
             set_player_track,
             set_player_quality,
+            get_player_prefs_cmd,
+            set_player_prefs_cmd,
+            set_subtitle_delay_cmd,
+            add_subtitle_file_cmd,
             stop,
             import_playlist_file,
             import_playlist_url,
