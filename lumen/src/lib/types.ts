@@ -383,3 +383,25 @@ export interface UpdateEventPayload {
   tag: string;
   page: string;
 }
+
+/** What testing one playlist link found. */
+export type LinkOutcome =
+  | { kind: "playlist"; name: string; channels: number; sampled: number; responding: number }
+  | { kind: "stream"; name: string }
+  | { kind: "failed"; reason: string };
+
+export interface LinkCheck {
+  url: string;
+  outcome: LinkOutcome;
+}
+
+/** The links found in a text, minus the ones that are already sources. */
+export interface FoundLinks {
+  links: string[];
+  already: number;
+}
+
+export interface BulkAdded {
+  added: { url: string; playlist_id: number }[];
+  failed: { url: string; reason: string }[];
+}

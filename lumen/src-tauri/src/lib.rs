@@ -3,6 +3,7 @@ pub use lumen_core::{
     playlist, probe, search, secrets, series, tmdb,
 };
 
+mod bulk;
 mod cast;
 mod commands;
 #[cfg(target_os = "linux")]
@@ -84,6 +85,11 @@ pub fn run() {
             updater::update_check_cmd,
             updater::update_install_cmd,
             updater::update_restart_cmd,
+            bulk::bulk_read_file_cmd,
+            bulk::bulk_extract_text_cmd,
+            bulk::bulk_check_cmd,
+            bulk::bulk_cancel_cmd,
+            bulk::bulk_add_cmd,
             cast::cast_discover_cmd,
             cast::cast_start_cmd,
             cast::cast_control_cmd,

@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod board;
+pub mod bulk;
 pub mod cast;
 pub mod child_env;
 pub mod content_key;

@@ -8,10 +8,11 @@
  */
 import { app } from "./messages/app.ts";
 import { base } from "./messages/base.ts";
+import { bulk } from "./messages/bulk.ts";
 import { cast } from "./messages/cast.ts";
 import { lib } from "./messages/lib.ts";
 import { local } from "./messages/local.ts";
 import { settings } from "./messages/settings.ts";
 import { update } from "./messages/update.ts";
 
-export const en = { ...base, ...cast, ...lib, ...settings, ...app, ...local, ...update } as const;
+export const en = { ...base, ...bulk, ...cast, ...lib, ...settings, ...app, ...local, ...update } as const;
