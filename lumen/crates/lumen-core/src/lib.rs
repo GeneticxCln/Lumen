@@ -1,4 +1,3 @@
-pub mod account;
 pub mod auth;
 pub mod content_key;
 pub mod db;
@@ -15,4 +14,8 @@ pub mod search;
 pub mod secrets;
 pub mod sync;
 pub mod sync_crypto;
+pub mod sync_keys;
 pub mod tmdb;
+
+#[cfg(test)]
+mod sync_tests;
