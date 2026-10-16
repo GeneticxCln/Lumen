@@ -146,6 +146,10 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Parses a `SHA2-256SUMS` file and returns the expected hex digest for `asset_name`.
 pub fn parse_checksum_for_asset(checksums_text: &str, asset_name: &str) -> Option<String> {
     for line in checksums_text.lines() {
@@ -166,8 +170,8 @@ pub fn parse_checksum_for_asset(checksums_text: &str, asset_name: &str) -> Optio
     None
 }
 
-/// Verifies downloaded binary bytes against both the pinned manifest checksum (if enforced)
-/// and the published `SHA2-256SUMS` content.
+/// Verifies downloaded binary bytes against the pinned manifest checksum (when given) and the
+/// published `SHA2-256SUMS` content (when given).
 pub fn verify_binary_checksum(
     bytes: &[u8],
     asset_name: &str,
@@ -189,7 +193,7 @@ pub fn verify_binary_checksum(
     }
     if let Some(expected) = expected_sha256 {
         let expected_lower = expected.trim().to_ascii_lowercase();
-        if !expected_lower.is_empty() && actual != expected_lower {
+        if actual != expected_lower {
             return Err(PlayerError::InvalidArg(format!(
                 "SHA-256 mismatch against pinned manifest for {asset_name}: expected {expected_lower}, got {actual}"
             )));
@@ -251,19 +255,17 @@ pub async fn update_managed_extractor(
         crate::playlist::import::append_capped(&mut bin_bytes, &chunk, MAX_BINARY_BYTES)?;
     }
 
-    // Verify against SHA2-256SUMS (and against manifest if using custom base_url_override is None or matches).
-    let expected_manifest_hash = if base_url_override.is_some() {
-        Some(asset_info.sha256.as_str())
-    } else {
-        // Check published SHA2-256SUMS; if manifest hash is also present, check it when it matches the published one.
-        None
-    };
-    verify_binary_checksum(
-        &bin_bytes,
-        &asset_info.asset,
-        Some(&sums_text),
-        expected_manifest_hash,
-    )?;
+    // The binary must match the hash pinned in this repository's manifest AND the release's
+    // published SHA2-256SUMS. The pin is what makes the version "known good": the checksum file
+    // comes from the same host as the binary, so on its own it would not stop a tampered release.
+    let pinned = asset_info.sha256.trim().to_ascii_lowercase();
+    if !is_sha256_hex(&pinned) {
+        return Err(PlayerError::Parse(format!(
+            "The pinned yt-dlp manifest has no valid SHA-256 for {}",
+            asset_info.asset
+        )));
+    }
+    verify_binary_checksum(&bin_bytes, &asset_info.asset, Some(&sums_text), Some(&pinned))?;
 
     let dest = managed_binary_path(app_data_dir);
     if let Some(parent) = dest.parent() {
@@ -619,5 +621,47 @@ mod tests {
         assert!(verify_binary_checksum(b"tampered", "yt-dlp_linux", Some(&sums), Some(&digest)).is_err());
         // Missing asset in SHA2-256SUMS fails verification
         assert!(verify_binary_checksum(payload, "missing_asset", Some(&sums), None).is_err());
+    }
+
+    /// The two lines of the real upstream `SHA2-256SUMS` for the pinned release (downloaded from
+    /// the release page and the binary itself hashed). The manifest once shipped with different
+    /// values, and nothing noticed because the pin was not enforced.
+    const UPSTREAM_SUMS_2026_02_04: &str = "\
+051ed827a836f56772d662c38ebfabd8d613a21a39376737d56893184bcc53f8  yt-dlp_linux
+6b83f090768a9d428456b7998a5b8fc1c628895647df2763f54f9552601b732e  yt-dlp_linux_aarch64
+";
+
+    #[test]
+    fn the_pinned_manifest_matches_the_upstream_release_checksums() {
+        let manifest = pinned_manifest().unwrap();
+        assert_eq!(manifest.version, "2026.02.04", "update UPSTREAM_SUMS_2026_02_04 when the pin moves");
+        assert!(!manifest.assets.is_empty());
+        for (target, asset) in &manifest.assets {
+            let published = parse_checksum_for_asset(UPSTREAM_SUMS_2026_02_04, &asset.asset)
+                .unwrap_or_else(|| panic!("no upstream checksum recorded for {target} ({})", asset.asset));
+            assert_eq!(asset.sha256, published, "pinned hash for {target}");
+            assert!(is_sha256_hex(&asset.sha256));
+        }
+    }
+
+    #[test]
+    fn an_empty_pin_cannot_disable_verification() {
+        let payload = b"binary";
+        assert!(verify_binary_checksum(payload, "yt-dlp_linux", None, Some("")).is_err());
+        assert!(!is_sha256_hex(""));
+    }
+
+    /// Downloads the pinned yt-dlp from GitHub, verifies it against the manifest and the release
+    /// checksums, installs it and runs it. Needs network: `cargo test -p lumen-core live_ -- --ignored`.
+    #[tokio::test]
+    #[ignore = "downloads about 36 MB from GitHub"]
+    async fn live_update_installs_and_runs_the_pinned_extractor() {
+        let dir = std::env::temp_dir().join(format!("lumen-ytdlp-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let status = update_managed_extractor(&dir, None, false).await.expect("pinned download verifies");
+        assert!(status.available);
+        assert_eq!(status.source, "managed");
+        assert_eq!(status.version.as_deref(), Some("2026.02.04"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
