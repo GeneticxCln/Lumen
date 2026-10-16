@@ -5,8 +5,8 @@ import { t } from "../i18n/index.ts";
 
 /**
  * Experimental: play video inside the Lumen window instead of a separate mpv window. It needs an
- * X11 window (a native Wayland window cannot host another program's video), so the switch explains
- * itself when it is unavailable. Saved at once; it applies the next time playback starts.
+ * X11 window or, on native Wayland, libmpv on the system, so the switch explains itself when it is
+ * unavailable. Saved at once; it applies the next time playback starts.
  */
 export function EmbeddedPlayerToggle() {
   const [enabled, setEnabled] = useState<boolean | null>(null);

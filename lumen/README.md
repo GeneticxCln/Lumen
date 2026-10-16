@@ -45,7 +45,12 @@ Lumen starts the regular `mpv`, so your own `~/.config/mpv/mpv.conf` and scripts
 
 ### Playing inside the window (experimental)
 
-By default video plays in a separate mpv window. **Settings → Playback → Play video inside the Lumen window** puts the video in the main window instead, above the controls. It is off by default and needs an X11 window: it works when Lumen runs on X11 or XWayland (`GDK_BACKEND=x11 lumen`), and is unavailable (with an explanation in Settings) in a native Wayland window, which cannot host another program's video. Controls are shown beside the video, not drawn over it. Fullscreen in this mode makes the whole window fullscreen and has only been exercised under a virtual display.
+By default video plays in a separate mpv window. **Settings → Playback → Play video inside the Lumen window** puts the video in the main window instead, above the controls. It is off by default and works in two ways:
+
+- **X11 / XWayland** (`GDK_BACKEND=x11 lumen`): mpv draws into a native area above the page.
+- **Native Wayland**: Lumen loads `libmpv` (the `libmpv2` package on Debian and Ubuntu, `mpv-libs` on Fedora, `mpv` on Arch) at run time and draws the video into an OpenGL area in the window. Nothing is needed at build time, and without `libmpv` Settings says so and the separate window is used. The same mpv settings, subtitles, media keys and controls apply; Lumen talks to the in-window player through the same control socket.
+
+Controls are shown beside the video, not drawn over it. Fullscreen in this mode makes the whole window fullscreen. `LUMEN_GL_DEBUG=1` prints the size of the picture and how much of it is lit, for diagnosing a black video.
 
 ## Sync
 
