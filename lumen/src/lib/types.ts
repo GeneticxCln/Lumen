@@ -279,6 +279,18 @@ export interface PlayerPrefs {
   subScale: number;
   /** 100 is the bottom of the picture, 0 the top. */
   subPos: number;
+  /** `#RRGGBB`. */
+  subColor: string;
+  subOutlineColor: string;
+  /** `#RRGGBB`, or empty for no box behind the text. */
+  subBackColor: string;
+  subBold: boolean;
+  /** A font family name, or empty for the player's default. */
+  subFont: string;
+  /** Seconds the back and forward buttons and arrow keys skip. */
+  seekStep: number;
+  /** Seconds before the end to offer the next episode; 0 is off. */
+  autoplayCountdown: number;
 }
 
 /** What is playing, for subtitle lookups. */

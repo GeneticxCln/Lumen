@@ -1,7 +1,6 @@
 import { Icon } from "./Icon";
 import type { PlayerState } from "../lib/types";
-import { PLAYER_SEEK_STEP_SECONDS } from "../lib/playerKeys";
-import { formatDelay } from "../lib/languages";
+import { formatDelay, SPEEDS } from "../lib/languages";
 import { t } from "../i18n/index.ts";
 
 interface TransportProps {
@@ -23,6 +22,10 @@ interface TransportProps {
   onSubtitleScale: (direction: 1 | -1) => void;
   onAddSubtitle: () => void;
   onFindSubtitles: () => void;
+  /** Seconds the skip buttons jump. */
+  seekStep: number;
+  speed: number;
+  onSpeed: (speed: number) => void;
 }
 
 export function Transport({
@@ -44,6 +47,9 @@ export function Transport({
   onSubtitleScale,
   onAddSubtitle,
   onFindSubtitles,
+  seekStep,
+  speed,
+  onSpeed,
 }: TransportProps) {
   const hasSubtitles = state.tracks.some((track) => track.kind === "subtitle");
   const formatTime = (seconds: number) => {
@@ -60,7 +66,7 @@ export function Transport({
   };
 
   const displayTime = Math.min(Math.max(0, state.time), state.duration || 0);
-  const step = PLAYER_SEEK_STEP_SECONDS;
+  const step = seekStep;
 
   return (
     <div className="transport">
@@ -160,6 +166,12 @@ export function Transport({
                 <button className="icon-button" aria-label={t("transport.findSubtitles")} title={t("transport.findSubtitles")} onClick={onFindSubtitles}>{t("transport.findSubtitlesGlyph")}</button>
               </div>
             </div>
+            <label className="player-option">
+              <span>{t("transport.speed")}</span>
+              <select aria-label={t("transport.speedLabel")} value={speed} onChange={(event) => onSpeed(Number(event.target.value))}>
+                {(SPEEDS.includes(speed) ? SPEEDS : [...SPEEDS, speed].sort((a, b) => a - b)).map((value) => <option key={value} value={value}>{t("transport.speedValue", { speed: value })}</option>)}
+              </select>
+            </label>
             <label className="player-option">
               <span>{t("transport.quality")}</span>
               <select aria-label={t("transport.qualityLabel")} value={state.quality} onChange={(event) => onSelectQuality(event.target.value)} disabled={!state.qualityLevels.length} title={state.qualityHelp}>

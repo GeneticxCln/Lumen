@@ -29,7 +29,28 @@ pub struct PlayerPrefs {
     pub sub_scale: f64,
     /// Vertical position: 100 is the bottom of the picture, 0 the top.
     pub sub_pos: i64,
+    /// Subtitle text colour, `#RRGGBB`.
+    pub sub_color: String,
+    /// Colour of the outline around the text, `#RRGGBB`.
+    pub sub_outline_color: String,
+    /// Colour of a box behind the text, `#RRGGBB`, or empty for none.
+    pub sub_back_color: String,
+    pub sub_bold: bool,
+    /// A font family name, or empty for the player's default.
+    pub sub_font: String,
+    /// What the back and forward buttons and arrow keys skip, in seconds.
+    pub seek_step: u32,
+    /// Seconds before the end of an episode to offer the next one and then start it; 0 turns it off.
+    pub autoplay_countdown: u32,
 }
+
+pub const SEEK_STEPS: [u32; 5] = [5, 10, 15, 30, 60];
+pub const AUTOPLAY_COUNTDOWNS: [u32; 6] = [0, 5, 10, 15, 20, 30];
+const DEFAULT_SUB_COLOR: &str = "#FFFFFF";
+const DEFAULT_SUB_OUTLINE: &str = "#000000";
+const MAX_FONT_NAME: usize = 64;
+/// Opacity of the box behind subtitles, as the alpha byte mpv expects first in `#AARRGGBB`.
+const SUB_BACK_ALPHA: &str = "CC";
 
 impl Default for PlayerPrefs {
     fn default() -> Self {
@@ -38,6 +59,13 @@ impl Default for PlayerPrefs {
             subtitles: "auto".into(),
             sub_scale: 1.0,
             sub_pos: 100,
+            sub_color: DEFAULT_SUB_COLOR.into(),
+            sub_outline_color: DEFAULT_SUB_OUTLINE.into(),
+            sub_back_color: String::new(),
+            sub_bold: false,
+            sub_font: String::new(),
+            seek_step: 10,
+            autoplay_countdown: 10,
         }
     }
 }
@@ -52,6 +80,35 @@ fn clean_language(raw: &str) -> Result<String> {
             "\"{raw}\" is not a language code (use e.g. en, ja, por)"
         )))
     }
+}
+
+/// `#RRGGBB` in upper case, or an error naming the setting.
+fn clean_color(raw: &str, what: &str) -> Result<String> {
+    let text = raw.trim();
+    let valid = text.len() == 7
+        && text.starts_with('#')
+        && text[1..].chars().all(|c| c.is_ascii_hexdigit());
+    if valid {
+        Ok(text.to_ascii_uppercase())
+    } else {
+        Err(PlayerError::InvalidArg(format!(
+            "{what} must be a colour like #FFFFFF"
+        )))
+    }
+}
+
+/// A font family name: letters, digits, spaces and a few separators, so nothing odd reaches mpv.
+fn clean_font(raw: &str) -> Result<String> {
+    let name = raw.trim();
+    let allowed = |c: char| {
+        c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | ',' | '(' | ')' | '\'')
+    };
+    if name.chars().count() > MAX_FONT_NAME || !name.chars().all(allowed) {
+        return Err(PlayerError::InvalidArg(
+            "The subtitle font must be a font name of at most 64 letters, digits and spaces".into(),
+        ));
+    }
+    Ok(name.to_string())
 }
 
 impl PlayerPrefs {
@@ -78,12 +135,34 @@ impl PlayerPrefs {
                 "Subtitle position must be between 0 and 100".into(),
             ));
         }
+        if !SEEK_STEPS.contains(&self.seek_step) {
+            return Err(PlayerError::InvalidArg(
+                "Skip length must be 5, 10, 15, 30 or 60 seconds".into(),
+            ));
+        }
+        if !AUTOPLAY_COUNTDOWNS.contains(&self.autoplay_countdown) {
+            return Err(PlayerError::InvalidArg(
+                "Next-episode countdown must be off or 5, 10, 15, 20 or 30 seconds".into(),
+            ));
+        }
+        let sub_back_color = if self.sub_back_color.trim().is_empty() {
+            String::new()
+        } else {
+            clean_color(&self.sub_back_color, "The subtitle background")?
+        };
         // Rounded so a slider's float noise does not leak into the saved value.
         Ok(Self {
             audio_lang,
             subtitles,
             sub_scale: (self.sub_scale * 100.0).round() / 100.0,
             sub_pos: self.sub_pos,
+            sub_color: clean_color(&self.sub_color, "The subtitle colour")?,
+            sub_outline_color: clean_color(&self.sub_outline_color, "The subtitle outline")?,
+            sub_back_color,
+            sub_bold: self.sub_bold,
+            sub_font: clean_font(&self.sub_font)?,
+            seek_step: self.seek_step,
+            autoplay_countdown: self.autoplay_countdown,
         })
     }
 
@@ -110,9 +189,30 @@ impl PlayerPrefs {
             ("sub-visibility", json!(self.subtitles != "off")),
             ("sub-scale", json!(self.sub_scale)),
             ("sub-pos", json!(self.sub_pos)),
+            ("sub-color", json!(self.sub_color)),
+            ("sub-border-color", json!(self.sub_outline_color)),
+            (
+                "sub-back-color",
+                json!(if self.sub_back_color.is_empty() {
+                    "#00000000".to_string()
+                } else {
+                    format!("#{SUB_BACK_ALPHA}{}", &self.sub_back_color[1..])
+                }),
+            ),
+            ("sub-bold", json!(self.sub_bold)),
+            (
+                "sub-font",
+                json!(if self.sub_font.is_empty() {
+                    "sans-serif"
+                } else {
+                    &self.sub_font
+                }),
+            ),
         ];
         if reset_delay {
             properties.push(("sub-delay", json!(0.0)));
+            // Speed belongs to one file too: the next one starts at normal speed.
+            properties.push(("speed", json!(1.0)));
         }
         properties
     }
@@ -152,6 +252,17 @@ pub fn clamp_delay(seconds: f64) -> Result<f64> {
         ));
     }
     Ok((seconds.clamp(-MAX_SUB_DELAY_SECONDS, MAX_SUB_DELAY_SECONDS) * 10.0).round() / 10.0)
+}
+
+pub const MIN_SPEED: f64 = 0.25;
+pub const MAX_SPEED: f64 = 4.0;
+
+/// A playback speed limited to what is sensible, rounded to 0.05.
+pub fn clamp_speed(speed: f64) -> Result<f64> {
+    if !speed.is_finite() {
+        return Err(PlayerError::InvalidArg("Speed must be a number".into()));
+    }
+    Ok((speed.clamp(MIN_SPEED, MAX_SPEED) * 20.0).round() / 20.0)
 }
 
 /// Checks a subtitle file the user picked: a real local file with a subtitle extension and a
@@ -195,6 +306,7 @@ mod tests {
             subtitles: "EN".into(),
             sub_scale: 1.2345,
             sub_pos: 90,
+            ..Default::default()
         }
         .validated()
         .unwrap();
@@ -282,6 +394,7 @@ mod tests {
             subtitles: "en".into(),
             sub_scale: 1.5,
             sub_pos: 95,
+            ..Default::default()
         }
         .mpv_properties(true);
         assert_eq!(get(&japanese, "alang"), Some(json!(["ja"])));
@@ -297,6 +410,112 @@ mod tests {
         .mpv_properties(false);
         assert_eq!(get(&off, "sub-visibility"), Some(json!(false)));
         assert_eq!(get(&off, "slang"), Some(json!([])));
+    }
+
+    #[test]
+    fn subtitle_style_is_validated_and_mapped() {
+        let styled = PlayerPrefs {
+            sub_color: " #ffee00 ".into(),
+            sub_outline_color: "#112233".into(),
+            sub_back_color: "#000000".into(),
+            sub_bold: true,
+            sub_font: "  DejaVu Sans Mono ".into(),
+            ..Default::default()
+        }
+        .validated()
+        .unwrap();
+        assert_eq!(styled.sub_color, "#FFEE00");
+        assert_eq!(styled.sub_font, "DejaVu Sans Mono");
+        let props = styled.mpv_properties(false);
+        let get = |name: &str| {
+            props
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(get("sub-color"), Some(json!("#FFEE00")));
+        assert_eq!(get("sub-border-color"), Some(json!("#112233")));
+        assert_eq!(
+            get("sub-back-color"),
+            Some(json!("#CC000000")),
+            "alpha comes first"
+        );
+        assert_eq!(get("sub-bold"), Some(json!(true)));
+        assert_eq!(get("sub-font"), Some(json!("DejaVu Sans Mono")));
+
+        // Defaults leave the box transparent and the font as mpv's own.
+        let plain = PlayerPrefs::default().mpv_properties(false);
+        let get = |name: &str| {
+            plain
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(get("sub-back-color"), Some(json!("#00000000")));
+        assert_eq!(get("sub-font"), Some(json!("sans-serif")));
+        assert_eq!(get("speed"), None, "speed is only reset on load");
+        let loaded = PlayerPrefs::default().mpv_properties(true);
+        assert!(
+            loaded
+                .iter()
+                .any(|(n, v)| *n == "speed" && *v == json!(1.0))
+        );
+
+        for bad in [
+            PlayerPrefs {
+                sub_color: "red".into(),
+                ..Default::default()
+            },
+            PlayerPrefs {
+                sub_color: "#12345".into(),
+                ..Default::default()
+            },
+            PlayerPrefs {
+                sub_outline_color: "#GGGGGG".into(),
+                ..Default::default()
+            },
+            PlayerPrefs {
+                sub_back_color: "black".into(),
+                ..Default::default()
+            },
+            PlayerPrefs {
+                sub_font: "evil\nfont".into(),
+                ..Default::default()
+            },
+            PlayerPrefs {
+                sub_font: "a".repeat(65),
+                ..Default::default()
+            },
+            PlayerPrefs {
+                seek_step: 7,
+                ..Default::default()
+            },
+            PlayerPrefs {
+                autoplay_countdown: 3,
+                ..Default::default()
+            },
+        ] {
+            assert!(bad.validated().is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn speed_is_limited_and_rounded() {
+        assert_eq!(clamp_speed(1.0).unwrap(), 1.0);
+        assert_eq!(clamp_speed(1.26).unwrap(), 1.25);
+        assert_eq!(clamp_speed(0.0).unwrap(), 0.25);
+        assert_eq!(clamp_speed(99.0).unwrap(), 4.0);
+        assert!(clamp_speed(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn preferences_saved_before_these_settings_existed_still_load() {
+        let old = r#"{"audioLang":"ja","subtitles":"en","subScale":1.5,"subPos":90}"#;
+        let loaded: PlayerPrefs = serde_json::from_str(old).unwrap();
+        assert_eq!(loaded.audio_lang, "ja");
+        assert_eq!(loaded.seek_step, 10);
+        assert_eq!(loaded.sub_color, "#FFFFFF");
+        assert!(loaded.validated().is_ok());
     }
 
     #[tokio::test]

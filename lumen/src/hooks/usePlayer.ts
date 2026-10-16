@@ -10,6 +10,7 @@ import {
   getPlayerPrefs,
   setPlayerPrefs,
   setSubtitleDelay,
+  setSpeed,
   addSubtitleFile,
   stop as stopCmd,
   onPlayerState,
@@ -228,6 +229,13 @@ export function usePlayer(options: PlayerOptions = {}) {
   const [subtitleDelay, setSubtitleDelayState] = useState(0);
   useEffect(() => { setSubtitleDelayState(0); }, [currentUrl]);
 
+  // Speed also belongs to one file: the player starts the next one at normal speed.
+  const [speed, setSpeedState] = useState(1);
+  useEffect(() => { setSpeedState(1); }, [currentUrl]);
+  const changeSpeed = useCallback(async (next: number) => {
+    setSpeedState(await setSpeed(next));
+  }, []);
+
   const changeSubtitleDelay = useCallback(async (direction: 1 | -1) => {
     const applied = await setSubtitleDelay(Math.round((subtitleDelay + direction * SUB_DELAY_STEP) * 10) / 10);
     setSubtitleDelayState(applied);
@@ -263,6 +271,8 @@ export function usePlayer(options: PlayerOptions = {}) {
     stopPlayback,
     selectTrack,
     selectQuality,
+    speed,
+    changeSpeed,
     subtitleDelay,
     changeSubtitleDelay,
     changeSubtitleScale,

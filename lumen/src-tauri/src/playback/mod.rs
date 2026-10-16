@@ -91,6 +91,8 @@ pub trait PlaybackBackend: Send + Sync {
     async fn apply_prefs(&self, prefs: &lumen_core::player_prefs::PlayerPrefs, reset_delay: bool);
     /// Shifts the current file's subtitles; returns the delay actually applied.
     async fn set_subtitle_delay(&self, seconds: f64) -> Result<f64>;
+    /// Sets the playback speed of the current file (1.0 is normal); returns the speed applied.
+    async fn set_speed(&self, speed: f64) -> Result<f64>;
     async fn add_subtitle_file(&self, path: &str) -> Result<()>;
     async fn set_fullscreen(&self, enabled: bool) -> Result<()>;
     /// False once the player has exited or is being closed.

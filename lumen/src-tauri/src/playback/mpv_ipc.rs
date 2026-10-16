@@ -695,6 +695,13 @@ impl PlaybackBackend for MpvIpcBackend {
         MpvIpcBackend::set_subtitle_delay(self, seconds).await
     }
 
+    async fn set_speed(&self, speed: f64) -> Result<f64> {
+        let applied = lumen_core::player_prefs::clamp_speed(speed)?;
+        self.set_property("speed", serde_json::json!(applied))
+            .await?;
+        Ok(applied)
+    }
+
     async fn add_subtitle_file(&self, path: &str) -> Result<()> {
         MpvIpcBackend::add_subtitle_file(self, path).await
     }
@@ -1238,6 +1245,34 @@ mod tests {
             .len();
         assert_eq!(after, before + 1, "one track was added");
         assert!(backend.add_subtitle_file("/etc/passwd").await.is_err());
+
+        // Subtitle style reaches mpv, and speed is set live and starts at 1 on the next file.
+        let styled = PlayerPrefs {
+            sub_color: "#FFEE00".into(),
+            sub_bold: true,
+            sub_back_color: "#000000".into(),
+            ..Default::default()
+        };
+        backend.apply_prefs(&styled, true).await;
+        assert_eq!(
+            property(&backend, "sub-color")
+                .await
+                .as_str()
+                .map(str::to_ascii_uppercase),
+            Some("#FFFFEE00".to_string()),
+            "mpv reports colours with their alpha"
+        );
+        assert_eq!(
+            property(&backend, "sub-bold").await,
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            PlaybackBackend::set_speed(&backend, 1.52).await.unwrap(),
+            1.5
+        );
+        assert_eq!(property(&backend, "speed").await.as_f64(), Some(1.5));
+        backend.apply_prefs(&PlayerPrefs::default(), true).await;
+        assert_eq!(property(&backend, "speed").await.as_f64(), Some(1.0));
 
         let _ = backend.stop().await;
         let _ = std::fs::remove_dir_all(&dir);
