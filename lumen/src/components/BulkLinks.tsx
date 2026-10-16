@@ -36,7 +36,10 @@ export function BulkLinks({ onAdded, onError }: BulkLinksProps) {
   useEffect(() => () => { unlisten.current?.(); void bulkCancel().catch(() => {}); }, []);
 
   const links = useMemo(() => found?.links ?? [], [found]);
-  const done = Object.keys(results).length;
+  // Counted against the current `links`, not `Object.keys(results)`: once a link is added it
+  // drops out of `links` but its stale result can still linger in `results`, which would
+  // otherwise make "not tested yet" go negative.
+  const done = links.filter((link) => results[link]).length;
   const usable = useMemo(() => links.filter((link) => results[link] && results[link].kind !== "failed"), [links, results]);
   const failedCount = links.filter((link) => results[link]?.kind === "failed").length;
 
@@ -44,7 +47,13 @@ export function BulkLinks({ onAdded, onError }: BulkLinksProps) {
     setFound(next);
     setResults({});
     setChosen(new Set());
-    setMessage(next.links.length === 0 ? t("bulk.none") : null);
+    if (next.links.length > 0) {
+      setMessage(null);
+    } else if (next.already > 0) {
+      setMessage(tn("bulk.already", next.already));
+    } else {
+      setMessage(t("bulk.none"));
+    }
   };
 
   const readText = async (source: () => Promise<FoundLinks>) => {
@@ -87,7 +96,18 @@ export function BulkLinks({ onAdded, onError }: BulkLinksProps) {
     onError(null);
     try {
       const outcome = await bulkAdd([...chosen]);
-      if (outcome.failed.length > 0) onError(t("bulk.addFailed", { url: outcome.failed[0].url, reason: outcome.failed[0].reason }));
+      if (outcome.failed.length > 0) {
+        onError(outcome.failed.map((failedLink) => t("bulk.addFailed", { url: failedLink.url, reason: failedLink.reason })).join(" "));
+        // Otherwise a link that failed to add keeps showing its old test result (e.g. "Playlist:
+        // 12 channels") even though it was never added.
+        setResults((previous) => {
+          const next = { ...previous };
+          for (const failedLink of outcome.failed) {
+            next[failedLink.url] = { kind: "failed", reason: failedLink.reason };
+          }
+          return next;
+        });
+      }
       setMessage(tn("bulk.added", outcome.added.length));
       if (outcome.added.length > 0) onAdded();
       setFound({ ...(found as FoundLinks), links: links.filter((link) => !outcome.added.some((a) => a.url === link)) });

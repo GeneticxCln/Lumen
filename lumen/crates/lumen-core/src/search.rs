@@ -1046,13 +1046,7 @@ fn cache_key(req: &SearchRequest, preferred: Option<&str>) -> String {
             .as_bytes(),
     );
     hasher.update(b":");
-    hasher.update(req.library.len().to_le_bytes());
-    if let Some(first) = req.library.first() {
-        hasher.update(first.to_string().as_bytes());
-    }
-    if let Some(last) = req.library.last() {
-        hasher.update(last.to_string().as_bytes());
-    }
+    hasher.update(serde_json::to_vec(&req.library).unwrap_or_default());
     hasher.update(b":");
     hasher.update([u8::from(req.check_availability), u8::from(req.allow_lan)]);
     hasher.update(preferred.unwrap_or("").as_bytes());

@@ -56,7 +56,11 @@ pub async fn bulk_read_file_cmd(path: String, app: AppHandle) -> Result<FoundLin
         ));
     }
     let bytes = tokio::fs::read(&path).await?;
-    without_known(&app, bulk::extract_links(&String::from_utf8_lossy(&bytes))).await
+    without_known(
+        &app,
+        bulk::extract_links(&lumen_core::text_encoding::decode_text(&bytes)),
+    )
+    .await
 }
 
 /// The links in pasted text.

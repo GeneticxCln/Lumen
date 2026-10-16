@@ -39,6 +39,15 @@ impl ContentKey {
         Self(format!("tmdb:tv:{tmdb_id}:S{season:02}E{episode:02}"))
     }
 
+    /// Falls back to this when a title carries no parseable `SxxExx` marker, so episodes that
+    /// can't be numbered still get distinct keys instead of collapsing onto a single slot.
+    pub fn for_series_episode_by_title(tmdb_id: i64, title: &str) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(title.trim().to_lowercase().as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+        Self(format!("tmdb:tv:{tmdb_id}:ep:{}", &hash[..16]))
+    }
+
     pub fn for_tvg(tvg_id: &str) -> Option<Self> {
         let trimmed = tvg_id.trim();
         if trimmed.is_empty() {
@@ -76,8 +85,10 @@ impl ContentKey {
             match tmdb_type {
                 Some("movie") => return Self::for_movie(id),
                 Some("tv" | "series") => {
-                    let (season, ep) = parse_season_episode(title_or_name).unwrap_or((1, 1));
-                    return Self::for_series_episode(id, season, ep);
+                    return match parse_season_episode(title_or_name) {
+                        Some((season, ep)) => Self::for_series_episode(id, season, ep),
+                        None => Self::for_series_episode_by_title(id, title_or_name),
+                    };
                 }
                 _ => return Self::for_movie(id),
             }
@@ -169,6 +180,41 @@ mod tests {
             "https://cdn.example.com/stream.m3u8?token=secret#hdr",
         );
         assert!(stream_key.as_str().starts_with("stream:"));
+    }
+
+    #[test]
+    fn tv_episodes_without_a_season_marker_get_distinct_keys() {
+        let a = ContentKey::derive(
+            Some(1399),
+            Some("tv"),
+            "Game of Thrones - Winter Is Coming",
+            None,
+            "https://cdn.example.com/got1.m3u8",
+        );
+        let b = ContentKey::derive(
+            Some(1399),
+            Some("tv"),
+            "Game of Thrones - The Kingsroad",
+            None,
+            "https://cdn.example.com/got2.m3u8",
+        );
+        assert_ne!(
+            a, b,
+            "two different unnumbered episodes must not collapse to one key"
+        );
+        assert!(a.as_str().starts_with("tmdb:tv:1399:ep:"));
+
+        let a_again = ContentKey::derive(
+            Some(1399),
+            Some("tv"),
+            "Game of Thrones - Winter Is Coming",
+            None,
+            "https://cdn.example.com/got1-mirror.m3u8",
+        );
+        assert_eq!(
+            a, a_again,
+            "the same title must still resolve to a stable key"
+        );
     }
 
     #[test]

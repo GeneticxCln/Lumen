@@ -46,6 +46,9 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 static SYNC_LOCK: Mutex<()> = Mutex::const_new(());
 static SCHEDULED: AtomicBool = AtomicBool::new(false);
+/// Set when `schedule` is called while a cycle (debounce wait or an active sync) is already in
+/// flight, so that cycle loops once more instead of the new change going unsynced.
+static SYNC_AGAIN: AtomicBool = AtomicBool::new(false);
 
 /// How often playback progress, saved every few seconds while something plays, may start a
 /// sync. Every save is still written to the local queue at once; only the network round trip is
@@ -903,14 +906,23 @@ pub(crate) async fn sync_with(pool: &Pool<Sqlite>, remote: &Remote) -> Result<Sy
 /// already waiting absorbs later changes.
 pub fn schedule(pool: &'static Pool<Sqlite>) {
     if SCHEDULED.swap(true, Ordering::SeqCst) {
+        // A cycle is already debouncing or syncing; make sure it runs again after this change
+        // instead of silently dropping it.
+        SYNC_AGAIN.store(true, Ordering::SeqCst);
         return;
     }
     tokio::spawn(async move {
-        tokio::time::sleep(DEBOUNCE).await;
-        SCHEDULED.store(false, Ordering::SeqCst);
-        if let Err(error) = sync_now(pool).await {
-            eprintln!("lumen: sync failed: {}", String::from(error));
+        loop {
+            tokio::time::sleep(DEBOUNCE).await;
+            SYNC_AGAIN.store(false, Ordering::SeqCst);
+            if let Err(error) = sync_now(pool).await {
+                eprintln!("lumen: sync failed: {}", String::from(error));
+            }
+            if !SYNC_AGAIN.load(Ordering::SeqCst) {
+                break;
+            }
         }
+        SCHEDULED.store(false, Ordering::SeqCst);
     });
 }
 

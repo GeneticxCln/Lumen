@@ -137,7 +137,7 @@ pub async fn read_capped_body(mut response: reqwest::Response, limit: usize) -> 
     {
         append_capped(&mut buffer, &chunk, limit)?;
     }
-    Ok(String::from_utf8_lossy(&buffer).into_owned())
+    Ok(crate::text_encoding::decode_text(&buffer))
 }
 
 /// Fetches and parses a playlist. The address is checked before the request, at every redirect

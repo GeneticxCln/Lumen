@@ -45,6 +45,7 @@ Build status: the `.deb` and AppImage have been built and inspected, but none of
 
 - **"mpv stopped before it was ready" / "did not open its control socket" / "mpv stopped responding".** The first two happen when mpv cannot start at all; the third when it was running and then exited (a bad stream, a crash) partway through a session. All three now include the last lines mpv printed. Run `LUMEN_DEBUG_MPV=1 lumen` (or `LUMEN_DEBUG_MPV=1 ./lumen_*.AppImage`) to see everything mpv says. Check that `mpv` runs on its own (`mpv --version`). Programs Lumen starts do not inherit the AppImage's own library paths.
 - **Scrolling is choppy.** Lumen asks the page engine for smooth, hardware-accelerated scrolling. If it is still slow, try `LUMEN_WEBKIT_SAFE=1 lumen` (turns off WebKitGTK's DMA-BUF renderer, which some NVIDIA and Wayland setups handle badly). The AppImage runs through XWayland on a Wayland session; `GDK_BACKEND=wayland ./lumen_*.AppImage` uses native Wayland.
+- **Stop or Pause did not respond right away.** Starting mpv for a new stream used to hold the same lock Stop and Pause wait on, so pressing either while a slow or unreachable stream was still starting could block for up to the full startup timeout. Starting a stream no longer holds that lock (0.1.4).
 
 ## Adding many playlist links at once
 
