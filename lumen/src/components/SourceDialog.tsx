@@ -13,7 +13,7 @@ interface SourceDialogProps {
   isOpen: boolean;
   onClose: () => void;
   onSourceAdded: () => void;
-  onPlayFile?: (path: string, name?: string, headers?: Record<string, string>) => Promise<void>;
+  onPlayFile?: (path: string, name?: string, headers?: Record<string, string>, audioUrl?: string) => Promise<void>;
 }
 
 const PUBLIC_FTA_CATALOGS = [
@@ -130,7 +130,7 @@ export function SourceDialog({
     try {
       const res = await extractUrl(url.trim());
       onSourceAdded();
-      await onPlayFile?.(res.url, res.title, res.headers);
+      await onPlayFile?.(res.url, res.title, res.headers, res.audio_url);
       onClose();
     } catch (e: unknown) {
       setError(formatErr(e, "Failed to extract stream"));

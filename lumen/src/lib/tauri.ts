@@ -1,4 +1,4 @@
-// Tauri & HTTP Bridge API wrapper — zero fake demo data, talks to real SQLite/Rust/Sidecar
+// Tauri API wrapper — zero fake demo data, talks to real SQLite/Rust backend
 import { invoke } from "@tauri-apps/api/core";
 import { listen, Event } from "@tauri-apps/api/event";
 import type {
@@ -9,6 +9,7 @@ import type {
   PlayerTrackKind,
   Settings,
   ExtractResponse,
+  ExtractorStatus,
   HarvestResponse,
   ProbeResponse,
   ProbeResult,
@@ -32,6 +33,7 @@ export type {
   PlayerTrackKind,
   Settings,
   ExtractResponse,
+  ExtractorStatus,
   HarvestResponse,
   ProbeResponse,
   ProbeResult,
@@ -70,9 +72,10 @@ export async function playUrl(
   url: string,
   headers?: Record<string, string>,
   channelId?: number,
-  volume?: number
+  volume?: number,
+  audioUrl?: string
 ) {
-  return callBackend("play_url", { url, headers, channelId, volume });
+  return callBackend("play_url", { url, headers, channelId, volume, audioUrl });
 }
 
 export async function pause() {
@@ -144,9 +147,17 @@ export async function setSearchProviders(providers: SearchProviderConfig[]) {
   return { providers: saved };
 }
 
-// Sidecar commands
+// Extraction, harvest & probe commands
 export async function extractUrl(url: string) {
   return callBackend<ExtractResponse>("extract_url", { url });
+}
+
+export async function extractorStatus() {
+  return callBackend<ExtractorStatus>("extractor_status_cmd");
+}
+
+export async function updateExtractor() {
+  return callBackend<ExtractorStatus>("update_extractor_cmd");
 }
 
 export async function harvestPage(url: string) {

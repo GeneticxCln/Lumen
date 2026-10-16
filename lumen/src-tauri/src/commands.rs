@@ -1,18 +1,20 @@
 use crate::db::*;
 use crate::error::{PlayerError, Result};
+use crate::extract::{self, ExtractResponse, ExtractorStatus};
+use crate::harvest::{self, HarvestResponse};
+use crate::media_tools::{cache_name, prune_cache, run_with_timeout};
 use crate::playback::mpv_ipc::MpvIpcBackend;
 use crate::playback::{PlaybackBackend, PlayerStateEvent};
 use crate::playlist::import::{import_m3u_file, import_m3u_url, Channel, Playlist};
-use crate::media_tools::{cache_name, prune_cache, run_with_timeout};
+use crate::probe::{self, ProbeResponse, ProbeResult, ProbeTarget};
+use crate::search::{self, SearchRequest, SearchResponse};
 use crate::secrets;
-use std::collections::HashSet;
-use crate::sidecar::*;
 use crate::tmdb;
 use base64::Engine;
-use sqlx::Row;
 use chrono::Utc;
 use serde::Serialize;
-use std::collections::HashMap;
+use sqlx::Row;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
@@ -44,19 +46,6 @@ pub(crate) async fn ensure_db(app: &AppHandle) -> Result<&'static sqlx::Pool<sql
     get_pool().ok_or_else(|| PlayerError::Sql("Database pool not initialized".into()))
 }
 
-async fn ensure_sidecar_handle(app: &AppHandle) -> Result<Arc<Mutex<SidecarManager>>> {
-    if let Some(sc) = get_sidecar() {
-        return Ok(sc);
-    }
-    let binaries_dir = app
-        .path()
-        .app_data_dir()
-        .map(|d| d.join("binaries"))
-        .unwrap_or_else(|_| PathBuf::from("binaries"));
-    init_sidecar(binaries_dir).await?;
-    get_sidecar().ok_or_else(|| PlayerError::Sidecar("Sidecar not initialized".into()))
-}
-
 /// The running backend, or an error when nothing is playing. Holds the lock only to clone.
 async fn current_backend() -> Result<Arc<MpvIpcBackend>> {
     let cell = get_playback_backend().await?;
@@ -73,6 +62,7 @@ pub async fn play_url(
     headers: Option<serde_json::Value>,
     channel_id: Option<i64>,
     volume: Option<i64>,
+    audio_url: Option<String>,
     app: AppHandle,
 ) -> Result<()> {
     let pool = ensure_db(&app).await?;
@@ -114,7 +104,9 @@ pub async fn play_url(
     if let Some(volume) = volume {
         let _ = backend.set_volume(volume).await;
     }
-    backend.load(&url, hdrs.as_deref()).await?;
+    backend
+        .load(&url, hdrs.as_deref(), audio_url.as_deref())
+        .await?;
 
     // Check if there is a saved resume position for local files
     if let Ok(Some(resume_pos)) = get_resume_position(pool, profile_id, &url).await
@@ -269,17 +261,16 @@ pub async fn search_engine(
         })
         .collect();
     let providers = with_keychain_tokens(load_stored_providers(pool).await?)?;
-    let sidecar = ensure_sidecar_handle(&app).await?;
+    let allow_lan = allow_lan_sources(pool).await;
     let request = SearchRequest {
         query,
         library,
         providers,
         check_availability: check_availability.unwrap_or(true),
         preferred_language: preferred_language.filter(|value| !value.trim().is_empty()),
+        allow_lan,
     };
-    let mut manager = sidecar.lock().await;
-    let response = manager.search(&request).await?;
-    drop(manager);
+    let response = search::execute_search(&request).await?;
     if check_availability.unwrap_or(true) {
         for result in &response.results {
             if let (Some(id), Some(available)) = (
@@ -342,8 +333,7 @@ pub async fn set_search_providers(
     if providers.len() > 12 {
         return Err(PlayerError::InvalidArg("At most 12 external providers can be enabled".into()));
     }
-    let sidecar = ensure_sidecar_handle(&app).await?;
-    sidecar.lock().await.validate_search_providers(providers.clone()).await?;
+    search::validate_search_providers(&providers)?;
     let pool = ensure_db(&app).await?;
     let previous = load_stored_providers(pool).await?;
     let mut stored = Vec::with_capacity(providers.len());
@@ -372,14 +362,12 @@ pub async fn set_search_providers(
 
 #[tauri::command]
 pub async fn extract_url(url: String, app: AppHandle) -> Result<ExtractResponse> {
-    let sidecar = ensure_sidecar_handle(&app).await?;
-    let extracted = {
-        let mut sidecar_guard = sidecar.lock().await;
-        sidecar_guard.extract(&url).await?
-    };
+    let pool = ensure_db(&app).await?;
+    let allow_lan = allow_lan_sources(pool).await;
+    let app_dir = app.path().app_data_dir().ok();
+    let extracted = extract::extract_stream(&url, app_dir, allow_lan).await?;
 
     // Per PLAN.md §8: "Rust saves as a 1-item playlist, then play_url"
-    let pool = ensure_db(&app).await?;
     let now = Utc::now().timestamp();
     let playlist = Playlist {
         id: None,
@@ -419,16 +407,29 @@ pub async fn extract_url(url: String, app: AppHandle) -> Result<ExtractResponse>
 }
 
 #[tauri::command]
+pub async fn extractor_status_cmd(app: AppHandle) -> Result<ExtractorStatus> {
+    let app_dir = app.path().app_data_dir().ok();
+    extract::extractor_status(app_dir.as_deref())
+}
+
+#[tauri::command]
+pub async fn update_extractor_cmd(app: AppHandle) -> Result<ExtractorStatus> {
+    let pool = ensure_db(&app).await?;
+    let allow_lan = allow_lan_sources(pool).await;
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| PlayerError::Io(e.to_string()))?;
+    extract::update_managed_extractor(&app_dir, None, allow_lan).await
+}
+
+#[tauri::command]
 pub async fn harvest_page(url: String, app: AppHandle) -> Result<HarvestResponse> {
-    let sidecar = ensure_sidecar_handle(&app).await?;
-    let harvested = {
-        let mut sidecar_guard = sidecar.lock().await;
-        sidecar_guard.harvest(&url).await?
-    };
+    let pool = ensure_db(&app).await?;
+    let allow_lan = allow_lan_sources(pool).await;
+    let harvested = harvest::harvest_streams(&url, allow_lan).await?;
 
     if !harvested.urls.is_empty() {
-        let pool = ensure_db(&app).await?;
-        let allow_lan = allow_lan_sources(pool).await;
         let now = Utc::now().timestamp();
         let host_label = url
             .split('/')
@@ -487,50 +488,71 @@ pub async fn harvest_page(url: String, app: AppHandle) -> Result<HarvestResponse
 #[tauri::command]
 pub async fn probe_urls(ids: Vec<i64>, app: AppHandle) -> Result<ProbeResponse> {
     let pool = ensure_db(&app).await?;
-    let mut id_to_url: Vec<(i64, String)> = Vec::new();
+    let allow_lan = allow_lan_sources(pool).await;
+    let mut id_and_target: Vec<(i64, ProbeTarget)> = Vec::new();
 
     for id in ids {
         if let Ok(channel) = get_channel(pool, id).await {
-            id_to_url.push((id, channel.url));
+            let headers: HashMap<String, String> = channel
+                .extra_headers
+                .as_deref()
+                .and_then(|json| serde_json::from_str(json).ok())
+                .unwrap_or_default();
+            id_and_target.push((
+                id,
+                ProbeTarget {
+                    url: channel.url,
+                    headers,
+                },
+            ));
         }
     }
 
-    if id_to_url.is_empty() {
+    if id_and_target.is_empty() {
         return Ok(ProbeResponse {
             results: Vec::new(),
         });
     }
 
-    let urls: Vec<String> = id_to_url.iter().map(|(_, u)| u.clone()).collect();
+    let targets: Vec<ProbeTarget> = id_and_target.iter().map(|(_, t)| t.clone()).collect();
+    let outcomes = probe::probe_targets_bounded(
+        targets.clone(),
+        allow_lan,
+        probe::DEFAULT_OVERALL_DEADLINE,
+        |idx, res| {
+            let _ = app.emit(
+                "probe://progress",
+                serde_json::json!({
+                    "channelId": id_and_target[idx].0,
+                    "result": res,
+                }),
+            );
+        },
+    )
+    .await;
 
-    let sidecar = ensure_sidecar_handle(&app).await?;
-    let response = {
-        let mut sidecar_guard = sidecar.lock().await;
-        sidecar_guard.probe(urls).await?
-    };
-
-    // Map URL results back to channel IDs and persist last_ok / last_error in SQLite
-    let mut url_map: HashMap<String, &ProbeResult> = HashMap::new();
-    for res in &response.results {
-        url_map.insert(res.url.clone(), res);
+    let mut results = Vec::with_capacity(id_and_target.len());
+    for ((channel_id, target), outcome) in id_and_target.into_iter().zip(outcomes) {
+        let res = outcome.unwrap_or(ProbeResult {
+            url: target.url,
+            live: false,
+            status: None,
+            content_type: None,
+        });
+        let err_msg = if res.live {
+            None
+        } else {
+            Some(
+                res.status
+                    .map(|s| format!("HTTP {}", s))
+                    .unwrap_or_else(|| "Unreachable".to_string()),
+            )
+        };
+        let _ = update_channel_last_played(pool, channel_id, res.live, err_msg).await;
+        results.push(res);
     }
 
-    for (channel_id, u) in id_to_url {
-        if let Some(res) = url_map.get(&u) {
-            let err_msg = if res.live {
-                None
-            } else {
-                Some(
-                    res.status
-                        .map(|s| format!("HTTP {}", s))
-                        .unwrap_or_else(|| "Unreachable".to_string()),
-                )
-            };
-            let _ = update_channel_last_played(pool, channel_id, res.live, err_msg).await;
-        }
-    }
-
-    Ok(response)
+    Ok(ProbeResponse { results })
 }
 
 #[tauri::command]

@@ -454,7 +454,7 @@ impl MpvIpcBackend {
 
 #[async_trait]
 impl PlaybackBackend for MpvIpcBackend {
-    async fn load(&self, url: &str, headers: Option<&[(&str, &str)]>) -> Result<()> {
+    async fn load(&self, url: &str, headers: Option<&[(&str, &str)]>, audio_url: Option<&str>) -> Result<()> {
         if self.closing.load(Ordering::SeqCst) {
             return Err(PlayerError::Mpv(CANCELLED_MESSAGE.into()));
         }
@@ -467,6 +467,18 @@ impl PlaybackBackend for MpvIpcBackend {
         } else {
             let _ = self
                 .set_property("http-header-fields", serde_json::json!(Vec::<String>::new()))
+                .await;
+        }
+
+        // For split audio/video streams from yt-dlp, attach the external audio track via
+        // mpv's `audio-files` property (equivalent to `--audio-file`), cleared otherwise.
+        if let Some(aud) = audio_url.map(str::trim).filter(|s| !s.is_empty()) {
+            let _ = self
+                .set_property("audio-files", serde_json::json!(vec![aud]))
+                .await;
+        } else {
+            let _ = self
+                .set_property("audio-files", serde_json::json!(Vec::<String>::new()))
                 .await;
         }
 
@@ -562,7 +574,17 @@ impl PlaybackBackend for MpvIpcBackend {
         Ok(())
     }
 
-    async fn set_track(&self, kind: &str, track_id: &str) -> Result<()> {
+    async fn stop(&self) -> Result<()> {
+        self.cancel_load();
+        let _ = self
+            .send_command(vec![MpvValue::String("quit".to_string())])
+            .await;
+        Ok(())
+    }
+}
+
+impl MpvIpcBackend {
+    pub async fn set_track(&self, kind: &str, track_id: &str) -> Result<()> {
         let (property, value) = match kind {
             "audio" if track_id == "auto" => ("aid", MpvValue::String("auto".into())),
             "subtitle" if track_id == "off" => ("sid", MpvValue::String("no".into())),
@@ -581,18 +603,20 @@ impl PlaybackBackend for MpvIpcBackend {
         self.set_property(property, value).await
     }
 
-    async fn set_quality(&self, quality: &str) -> Result<()> {
+    pub async fn set_quality(&self, quality: &str) -> Result<()> {
         if !matches!(quality, "max" | "min") {
             return Err(PlayerError::InvalidArg("Unsupported mpv HLS bitrate preference".into()));
         }
         self.set_property("hls-bitrate", MpvValue::String(quality.into())).await
     }
 
-    async fn stop(&self) -> Result<()> {
-        self.cancel_load();
-        let _ = self
-            .send_command(vec![MpvValue::String("quit".to_string())])
-            .await;
+    pub async fn add_external_subtitle(&self, sub_path: &str) -> Result<()> {
+        self.send_command(vec![
+            MpvValue::String("sub-add".into()),
+            MpvValue::String(sub_path.into()),
+            MpvValue::String("auto".into()),
+        ])
+        .await?;
         Ok(())
     }
 }
@@ -668,10 +692,10 @@ mod tests {
             .expect("mpv should start and expose its IPC socket");
 
         let url = path.to_string_lossy().to_string();
-        backend.load(&url, None).await.expect("initial load should succeed");
+        backend.load(&url, None, None).await.expect("initial load should succeed");
         // Replacing a playing item emits `end-file` for the old entry before the new entry's
         // `start-file`; that old end event must not release the readiness wait early.
-        backend.load(&url, None).await.expect("replacement load should succeed");
+        backend.load(&url, None, None).await.expect("replacement load should succeed");
 
         // `play_url` seeks to the saved position as soon as `load` returns.
         backend
@@ -730,7 +754,7 @@ mod tests {
         let url = format!("http://127.0.0.1:{port}/never.m3u8");
         let loading = {
             let backend = backend.clone();
-            tokio::spawn(async move { backend.load(&url, None).await })
+            tokio::spawn(async move { backend.load(&url, None, None).await })
         };
 
         tokio::time::sleep(Duration::from_millis(800)).await;

@@ -1,1 +1,0 @@
-"""Lumen Python sidecar package."""

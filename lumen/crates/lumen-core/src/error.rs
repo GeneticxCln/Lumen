@@ -18,9 +18,6 @@ pub enum PlayerError {
     #[error("HTTP error: {0}")]
     Http(String),
 
-    #[error("Sidecar error: {0}")]
-    Sidecar(String),
-
     #[error("Parse error: {0}")]
     Parse(String),
 

@@ -40,7 +40,7 @@ export interface Channel {
 /** Whether a TMDB credential is available, and where the backend found it. */
 export interface TmdbStatus {
   configured: boolean;
-  key_source: "env" | "keychain" | "memory" | "none";
+  key_source: "env" | "keychain" | "none";
   enriched: number;
   total: number;
   image_base: string;
@@ -158,7 +158,16 @@ export interface Settings {
 export interface ExtractResponse {
   title: string;
   url: string;
+  audio_url?: string;
   headers: Record<string, string>;
+}
+
+export interface ExtractorStatus {
+  available: boolean;
+  source: "managed" | "system" | "none";
+  version?: string | null;
+  pinnedVersion: string;
+  binaryPath?: string | null;
 }
 
 export interface HarvestResponse {

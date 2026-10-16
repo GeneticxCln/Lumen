@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import type { CSSProperties } from "react";
-import { getSettings, setSetting, setTmdbApiKey, tmdbStatus, enrichTmdb, clearTmdbEnrichment, clearLocalThumbnailCache, localPosterCandidates, errorMessage } from "../lib/tauri";
-import type { Channel, Playlist, PosterCandidate, Profile, TmdbStatus } from "../lib/types";
+import { getSettings, setSetting, setTmdbApiKey, tmdbStatus, enrichTmdb, clearTmdbEnrichment, clearLocalThumbnailCache, localPosterCandidates, extractorStatus, updateExtractor, errorMessage } from "../lib/tauri";
+import type { Channel, ExtractorStatus, Playlist, PosterCandidate, Profile, TmdbStatus } from "../lib/types";
 import { defaultPreferences, themes, applyTheme } from "../lib/discovery";
 import type { Preferences } from "../lib/discovery";
 import { POSTER_FRAME_OPTIONS } from "../lib/local";
@@ -84,15 +84,42 @@ export function SettingsPage({
     : section === "shortcuts" ? draft.keyboardShortcuts !== preferences.keyboardShortcuts
     : section === "playback" ? hwdec !== savedEngine.hwdec || cache !== savedEngine.cache || extraArgs.trim() !== savedEngine.extraArgs || draft.defaultVolume !== preferences.defaultVolume : false;
 
-  // --- TMDB metadata -------------------------------------------------------
+  // --- TMDB metadata & Extractor -------------------------------------------
   const [tmdbKey, setTmdbKey] = useState("");
   const [tmdb, setTmdb] = useState<TmdbStatus | null>(null);
   const [tmdbBusy, setTmdbBusy] = useState(false);
   const [tmdbNotice, setTmdbNotice] = useState<string | null>(null);
+  const [extractor, setExtractor] = useState<ExtractorStatus | null>(null);
+  const [extractorBusy, setExtractorBusy] = useState(false);
+  const [extractorNotice, setExtractorNotice] = useState<string | null>(null);
   const [posterFrame, setPosterFrame] = useState("2");
   const [framePath, setFramePath] = useState("");
   const [frameCandidates, setFrameCandidates] = useState<PosterCandidate[] | null>(null);
   const [frameCandidatesBusy, setFrameCandidatesBusy] = useState(false);
+
+  useEffect(() => {
+    if (section !== "sources") return;
+    let active = true;
+    extractorStatus()
+      .then((status) => { if (active) setExtractor(status); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [section]);
+
+  const handleUpdateExtractor = async () => {
+    setExtractorBusy(true);
+    setError(null);
+    setExtractorNotice(null);
+    try {
+      const status = await updateExtractor();
+      setExtractor(status);
+      setExtractorNotice(`Updated managed yt-dlp (${status.version || status.pinnedVersion}) and verified SHA-256.`);
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setExtractorBusy(false);
+    }
+  };
 
   useEffect(() => {
     if (section !== "metadata") return;
@@ -339,6 +366,20 @@ export function SettingsPage({
         {section === "sources" && (
           <>
             <LanSourcesToggle />
+            <div className="setting-row">
+              <div>
+                <label>Stream extractor (yt-dlp)</label>
+                <p>
+                  {extractor?.available
+                    ? `Active (${extractor.source}${extractor.version ? ` · ${extractor.version}` : ""}) · pinned release ${extractor.pinnedVersion}`
+                    : `Not installed · pinned release ${extractor?.pinnedVersion || "2026.02.04"}`}
+                </p>
+                {extractorNotice && <p className="saved-badge" role="status">{extractorNotice}</p>}
+              </div>
+              <button className="secondary-button" disabled={extractorBusy} onClick={() => void handleUpdateExtractor()}>
+                {extractorBusy ? "Updating…" : "Update extractor"}
+              </button>
+            </div>
             <div className="settings-actions settings-actions-top">
               <h3 className="settings-section-title" style={{ margin: 0, flex: 1 }}>
                 Connected sources · {playlists.length}
@@ -502,9 +543,7 @@ export function SettingsPage({
                   ? "Currently supplied by the LUMEN_TMDB_API_KEY environment variable, which takes precedence over anything saved here."
                   : tmdb?.key_source === "keychain"
                     ? "A key is saved in this device's OS keychain."
-                    : tmdb?.key_source === "memory"
-                      ? "A key is held in memory for this browser preview only. It is lost when the sidecar restarts."
-                      : "Required before any title can be enriched."}{" "}
+                    : "Required before any title can be enriched."}{" "}
                 Create one free at developer.themoviedb.org → Settings → API. The key is never written to the library
                 database and is never sent anywhere but TMDB.
               </small>
@@ -605,7 +644,7 @@ export function SettingsPage({
             <div className="settings-note">
               <strong>Native playback, no compromise.</strong>
               <br />
-              On the desktop app video opens in a separate mpv window. Hardware settings apply when that engine restarts. Browser preview uses an embedded player, so hardware decoding options apply only to native playback.
+              Video plays through native mpv. Hardware decoding and buffering settings apply when the playback engine restarts.
             </div>
           </>
         )}

@@ -1,21 +1,15 @@
+pub use lumen_core::{
+    auth, db, env, error, extract, harvest, media_tools, netguard, pin_guard, playlist, probe,
+    search, secrets, tmdb,
+};
+
 mod account;
-mod auth;
 mod commands;
-mod db;
-mod error;
-mod media_tools;
-mod netguard;
 mod playback;
-mod pin_guard;
-mod playlist;
-mod secrets;
-mod sidecar;
 mod sync;
-mod tmdb;
 
 use crate::commands::*;
 use crate::db::*;
-use crate::sidecar::{get_sidecar, init_sidecar};
 use tauri::{Manager, RunEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -32,12 +26,6 @@ pub fn run() {
                         eprintln!("Failed to init database: {}", e);
                     } else if let Ok(pool) = ensure_db(&app_handle).await {
                         sync::start(pool);
-                    }
-
-                    // Initialize sidecar
-                    let binaries_dir = app_dir.join("binaries");
-                    if let Err(e) = init_sidecar(binaries_dir).await {
-                        eprintln!("Sidecar not available at startup: {}", e);
                     }
                 }
             });
@@ -66,6 +54,8 @@ pub fn run() {
             get_search_providers,
             set_search_providers,
             extract_url,
+            extractor_status_cmd,
+            update_extractor_cmd,
             harvest_page,
             probe_urls,
             toggle_favorite_cmd,
@@ -105,10 +95,6 @@ pub fn run() {
                         use crate::playback::PlaybackBackend;
                         let _ = backend.stop().await;
                     }
-                }
-                if let Some(sc) = get_sidecar() {
-                    let mut guard = sc.lock().await;
-                    guard.shutdown().await;
                 }
             });
         }

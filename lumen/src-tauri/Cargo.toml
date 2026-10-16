@@ -1,8 +1,8 @@
 [package]
 name = "lumen"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "A Linux-first media library and player powered by Tauri, Rust, and mpv"
+authors = ["Lumen Contributors"]
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -18,6 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+lumen-core = { path = "../crates/lumen-core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
@@ -37,15 +38,8 @@ argon2 = "0.6"
 base64 = "0.23"
 sha2 = "0.10"
 regex = "1"
+scraper = "0.27"
 # Provider API tokens live in the OS keychain, never in the SQLite settings table.
 # keyring 4's default `v1` feature covers macOS, Windows and Linux (Secret Service).
 keyring = "4"
 
-
-# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = 3
-panic = "abort"
-strip = true

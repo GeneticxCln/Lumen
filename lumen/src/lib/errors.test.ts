@@ -9,7 +9,6 @@ const rustErrors: Record<string, string> = {
   Json: "JSON error: expected value at line 1 column 1",
   Sql: "SQL error: no such table: channels",
   Http: "HTTP error: HTTP 500 when fetching playlist",
-  Sidecar: "Sidecar error: executable not found",
   Parse: "Parse error: Join error during M3U parse",
   NotFound: "Not found: Channel no longer exists",
   InvalidArg: "Invalid argument: That PIN is not correct",

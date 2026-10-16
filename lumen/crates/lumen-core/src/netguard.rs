@@ -149,7 +149,13 @@ pub fn redirect_policy(allow_lan: bool) -> reqwest::redirect::Policy {
 /// Resolves names and drops every address that is not allowed. If nothing is left, the connection
 /// fails instead of falling back to a private address.
 pub struct PublicOnlyResolver {
-    allow_lan: bool,
+    pub allow_lan: bool,
+}
+
+impl PublicOnlyResolver {
+    pub fn new(allow_lan: bool) -> Self {
+        Self { allow_lan }
+    }
 }
 
 impl Resolve for PublicOnlyResolver {

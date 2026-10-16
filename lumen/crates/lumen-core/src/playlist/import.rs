@@ -102,20 +102,20 @@ pub async fn import_m3u_file(path: &str, name: Option<String>) -> Result<(Playli
 pub const MAX_PLAYLIST_BYTES: usize = 32 * 1024 * 1024;
 
 /// Refuses a response whose declared `Content-Length` is already over the limit.
-fn check_declared_length(declared: Option<u64>, limit: usize) -> Result<()> {
+pub(crate) fn check_declared_length(declared: Option<u64>, limit: usize) -> Result<()> {
     match declared {
         Some(len) if len > limit as u64 => Err(PlayerError::Http(format!(
-            "Playlist is {len} bytes, over the {limit} byte limit"
+            "Response is {len} bytes, over the {limit} byte limit"
         ))),
         _ => Ok(()),
     }
 }
 
 /// Appends a chunk to the buffer, failing as soon as the total passes the limit.
-fn append_capped(buffer: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<()> {
+pub(crate) fn append_capped(buffer: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<()> {
     if buffer.len() + chunk.len() > limit {
         return Err(PlayerError::Http(format!(
-            "Playlist is over the {limit} byte limit"
+            "Response is over the {limit} byte limit"
         )));
     }
     buffer.extend_from_slice(chunk);
@@ -123,7 +123,7 @@ fn append_capped(buffer: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<()>
 }
 
 /// Reads the response body chunk by chunk and stops once it passes `limit`.
-async fn read_capped_body(mut response: reqwest::Response, limit: usize) -> Result<String> {
+pub async fn read_capped_body(mut response: reqwest::Response, limit: usize) -> Result<String> {
     check_declared_length(response.content_length(), limit)?;
     let mut buffer = Vec::new();
     while let Some(chunk) = response

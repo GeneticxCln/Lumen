@@ -150,9 +150,9 @@ function App() {
     setBusy(false);
   }
 
-  async function playFile(path: string, name?: string, headers?: Record<string, string>) {
+  async function playFile(path: string, name?: string, headers?: Record<string, string>, audioUrl?: string) {
     try {
-      await player.playMedia(path, name, headers, preferences.defaultVolume);
+      await player.playMedia(path, name, headers, preferences.defaultVolume, audioUrl);
       setPlayerOpen(true);
     } catch (error) {
       setNotice(errorMessage(error));
@@ -396,7 +396,7 @@ function App() {
 
     {player.currentUrl && <aside className="now-playing-dock" aria-label="Now playing"><button className="dock-title" onClick={() => setPlayerOpen(true)}><span className="dock-play-icon"><Icon name="play" /></span><span><small>NOW PLAYING</small><strong>{player.currentTitle || player.playerState.title}</strong></span></button><button className="secondary-button" onClick={() => setPlayerOpen(true)}>Player controls</button><button className="icon-button" aria-label="Stop playback" onClick={() => void run(player.stopPlayback)}><Icon name="stop" /></button></aside>}
     <SourceDialog isOpen={showSource} onClose={() => setShowSource(false)} onSourceAdded={() => setRefresh((value) => value + 1)} onPlayFile={playFile} />
-    <Modal open={details !== null} onClose={() => setDetails(null)} title="Title details" className="details-dialog">{details && <><ChannelArtwork key={details.id} channel={details} /><div className="dialog-content"><p className="eyebrow">{details.group_title || "YOUR LIBRARY"}</p><h2>{details.name}</h2><p>From {library.playlists.find((source) => source.id === details.playlist_id)?.name || "your sources"}. Playback uses native mpv on desktop and the embedded player in browser preview.</p><p className="muted-note">{details.last_error ? `Last check failed: ${details.last_error}` : details.last_ok ? `Last successful check: ${new Date(details.last_ok * 1000).toLocaleString()}. Availability can change.` : "Availability has not been checked yet."}</p><div className="hero-buttons"><button className="primary-button" disabled={busy} onClick={() => void play(details)}><Icon name="play" />Play</button><button className="secondary-button" aria-pressed={library.favoriteIds.has(details.id)} onClick={() => void library.handleToggleFavorite(details.id)}><Icon name={library.favoriteIds.has(details.id) ? "check" : "plus"} />My List</button><button className="secondary-button" disabled={library.probing} onClick={() => void library.handleProbeVisible([details.id])}>{library.probing ? "Checking…" : "Check stream"}</button></div></div></>}</Modal>
+    <Modal open={details !== null} onClose={() => setDetails(null)} title="Title details" className="details-dialog">{details && <><ChannelArtwork key={details.id} channel={details} /><div className="dialog-content"><p className="eyebrow">{details.group_title || "YOUR LIBRARY"}</p><h2>{details.name}</h2><p>From {library.playlists.find((source) => source.id === details.playlist_id)?.name || "your sources"}. Playback uses native mpv on desktop.</p><p className="muted-note">{details.last_error ? `Last check failed: ${details.last_error}` : details.last_ok ? `Last successful check: ${new Date(details.last_ok * 1000).toLocaleString()}. Availability can change.` : "Availability has not been checked yet."}</p><div className="hero-buttons"><button className="primary-button" disabled={busy} onClick={() => void play(details)}><Icon name="play" />Play</button><button className="secondary-button" aria-pressed={library.favoriteIds.has(details.id)} onClick={() => void library.handleToggleFavorite(details.id)}><Icon name={library.favoriteIds.has(details.id) ? "check" : "plus"} />My List</button><button className="secondary-button" disabled={library.probing} onClick={() => void library.handleProbeVisible([details.id])}>{library.probing ? "Checking…" : "Check stream"}</button></div></div></>}</Modal>
     {player.currentUrl && <PlayerOverlay
       title={player.currentTitle || player.playerState.title || "Now playing"}
       paused={player.playerState.paused}

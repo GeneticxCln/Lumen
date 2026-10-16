@@ -96,8 +96,8 @@ export function usePlayer() {
   }, [applyStartVolume]);
 
   const playMedia = useCallback(
-    async (url: string, title?: string, headers?: Record<string, string>, startVolume?: number) => {
-      await playUrl(url, headers, undefined, startVolume);
+    async (url: string, title?: string, headers?: Record<string, string>, startVolume?: number, audioUrl?: string) => {
+      await playUrl(url, headers, undefined, startVolume, audioUrl);
       applyStartVolume(startVolume);
       headersRef.current = headers;
       const label = title || url.split("/").pop() || url;

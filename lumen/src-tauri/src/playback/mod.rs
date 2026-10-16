@@ -61,12 +61,10 @@ impl Default for PlayerStateEvent {
 
 #[async_trait]
 pub trait PlaybackBackend: Send + Sync {
-    async fn load(&self, url: &str, headers: Option<&[(&str, &str)]>) -> Result<()>;
+    async fn load(&self, url: &str, headers: Option<&[(&str, &str)]>, audio_url: Option<&str>) -> Result<()>;
     async fn pause(&self) -> Result<()>;
     async fn seek(&self, seconds: f64) -> Result<()>;
     async fn set_volume(&self, vol: i64) -> Result<()>;
-    async fn set_track(&self, kind: &str, track_id: &str) -> Result<()>;
-    async fn set_quality(&self, quality: &str) -> Result<()>;
     async fn set_property(&self, name: &str, value: MpvValue) -> Result<()>;
     async fn stop(&self) -> Result<()>;
 }
