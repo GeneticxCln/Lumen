@@ -50,7 +50,7 @@ if (process.argv.includes("--update")) {
 }
 
 const baseline: Record<string, number> = JSON.parse(readFileSync(baselinePath, "utf8"));
-const advice = "Put new text in src/i18n/en.ts and show it with t().";
+const advice = "Put new text in the messages file of its area (src/i18n/messages/) and show it with t(). `npm run i18n:hits -- <file>` lists what is hard-coded.";
 const problems: string[] = [];
 
 for (const [file, { count, hits }] of counts) {
@@ -69,7 +69,7 @@ assert.equal(problems.length, 0, `\nHard-coded UI text:\n${problems.join("\n")}\
 // The catalog: every message is used by something. A leftover key is a string nobody sees.
 const referenced = new Set<string>();
 for (const path of files) {
-  if (posix(path) === "i18n/en.ts") continue;
+  if (posix(path) === "i18n/en.ts" || posix(path).startsWith("i18n/messages/")) continue;
   for (const literal of stringLiterals(readFileSync(path, "utf8"), path)) referenced.add(literal);
 }
 const unused = Object.keys(en).filter((key) => {

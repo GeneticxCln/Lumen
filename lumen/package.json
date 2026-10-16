@@ -11,6 +11,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "lint": "eslint src --max-warnings 0",
+    "i18n:hits": "node --experimental-strip-types src/i18n/hits.ts",
     "i18n:baseline": "node --experimental-strip-types src/i18n/gate.test.ts --update"
   },
   "dependencies": {
