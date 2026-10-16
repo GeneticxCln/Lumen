@@ -427,7 +427,7 @@ impl MpvIpcBackend {
         Ok(backend)
     }
 
-    pub fn is_alive(&self) -> bool {
+    fn is_alive(&self) -> bool {
         if self.closing.load(Ordering::SeqCst) {
             return false;
         }
@@ -440,7 +440,7 @@ impl MpvIpcBackend {
 
     /// Wakes a `load` that is still waiting for mpv, making it fail right away. Used by `stop`
     /// so that pressing Stop on a stream that never loads does not wait out the settle timeout.
-    pub fn cancel_load(&self) {
+    fn cancel_load(&self) {
         self.closing.store(true, Ordering::SeqCst);
         self.load_state.send_replace(4);
     }
@@ -570,6 +570,50 @@ impl PlaybackBackend for MpvIpcBackend {
         Ok(())
     }
 
+
+
+    async fn volume(&self) -> Option<f64> {
+        MpvIpcBackend::volume(self).await
+    }
+
+    async fn set_track(&self, kind: &str, track_id: &str) -> Result<()> {
+        MpvIpcBackend::set_track(self, kind, track_id).await
+    }
+
+    async fn set_quality(&self, quality: &str) -> Result<()> {
+        MpvIpcBackend::set_quality(self, quality).await
+    }
+
+    async fn apply_prefs(&self, prefs: &lumen_core::player_prefs::PlayerPrefs, reset_delay: bool) {
+        MpvIpcBackend::apply_prefs(self, prefs, reset_delay).await
+    }
+
+    async fn set_subtitle_delay(&self, seconds: f64) -> Result<f64> {
+        MpvIpcBackend::set_subtitle_delay(self, seconds).await
+    }
+
+    async fn add_subtitle_file(&self, path: &str) -> Result<()> {
+        MpvIpcBackend::add_subtitle_file(self, path).await
+    }
+
+    async fn set_fullscreen(&self, enabled: bool) -> Result<()> {
+        self.set_property("fullscreen", serde_json::json!(enabled)).await
+    }
+
+    fn is_alive(&self) -> bool {
+        MpvIpcBackend::is_alive(self)
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.cancel_load();
+        let _ = self
+            .send_command(vec![MpvValue::String("quit".to_string())])
+            .await;
+        Ok(())
+    }
+}
+
+impl MpvIpcBackend {
     async fn set_property(&self, name: &str, value: MpvValue) -> Result<()> {
         let quality = value.as_str().unwrap_or("max").to_string();
         self.send_command(vec![
@@ -590,17 +634,7 @@ impl PlaybackBackend for MpvIpcBackend {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<()> {
-        self.cancel_load();
-        let _ = self
-            .send_command(vec![MpvValue::String("quit".to_string())])
-            .await;
-        Ok(())
-    }
-}
-
-impl MpvIpcBackend {
-    pub async fn set_track(&self, kind: &str, track_id: &str) -> Result<()> {
+    async fn set_track(&self, kind: &str, track_id: &str) -> Result<()> {
         let (property, value) = match kind {
             "audio" if track_id == "auto" => ("aid", MpvValue::String("auto".into())),
             "subtitle" if track_id == "off" => ("sid", MpvValue::String("no".into())),
@@ -619,7 +653,7 @@ impl MpvIpcBackend {
         self.set_property(property, value).await
     }
 
-    pub async fn set_quality(&self, quality: &str) -> Result<()> {
+    async fn set_quality(&self, quality: &str) -> Result<()> {
         if !matches!(quality, "max" | "min") {
             return Err(PlayerError::InvalidArg("Unsupported mpv HLS bitrate preference".into()));
         }
@@ -629,7 +663,7 @@ impl MpvIpcBackend {
     /// Applies a profile's audio and subtitle preferences. Done before each load (with
     /// `reset_delay`, since a subtitle delay belongs to one file) and when the preferences change.
     /// Best effort per property: one that mpv refuses must not stop the rest, or the playback.
-    pub async fn apply_prefs(&self, prefs: &lumen_core::player_prefs::PlayerPrefs, reset_delay: bool) {
+    async fn apply_prefs(&self, prefs: &lumen_core::player_prefs::PlayerPrefs, reset_delay: bool) {
         for (name, value) in prefs.mpv_properties(reset_delay) {
             if let Err(error) = self.set_property(name, value).await {
                 eprintln!("lumen: could not set {name}: {error}");
@@ -638,7 +672,7 @@ impl MpvIpcBackend {
     }
 
     /// mpv's current volume (0 to 150, 100 being unamplified), or `None` if it cannot be read.
-    pub async fn volume(&self) -> Option<f64> {
+    async fn volume(&self) -> Option<f64> {
         self.send_command(vec![MpvValue::String("get_property".into()), MpvValue::String("volume".into())])
             .await
             .ok()
@@ -646,14 +680,14 @@ impl MpvIpcBackend {
     }
 
     /// Shifts the subtitles of the current file by `seconds` (positive shows them later).
-    pub async fn set_subtitle_delay(&self, seconds: f64) -> Result<f64> {
+    async fn set_subtitle_delay(&self, seconds: f64) -> Result<f64> {
         let delay = lumen_core::player_prefs::clamp_delay(seconds)?;
         self.set_property("sub-delay", serde_json::json!(delay)).await?;
         Ok(delay)
     }
 
     /// Adds a subtitle file the user chose to the current file and shows it.
-    pub async fn add_subtitle_file(&self, path: &str) -> Result<()> {
+    async fn add_subtitle_file(&self, path: &str) -> Result<()> {
         let file = lumen_core::player_prefs::validate_subtitle_file(path)?;
         self.send_command(vec![
             MpvValue::String("sub-add".into()),

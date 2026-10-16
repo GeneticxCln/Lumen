@@ -1,7 +1,6 @@
 use crate::error::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value as MpvValue;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,13 +58,31 @@ impl Default for PlayerStateEvent {
     }
 }
 
+/// What the app needs from a player. The commands, the desktop media controls and the tests only
+/// see this, so nothing outside the mpv module knows it is mpv: a different engine, or the same
+/// engine embedded in the window, only has to provide these operations.
 #[async_trait]
 pub trait PlaybackBackend: Send + Sync {
     async fn load(&self, url: &str, headers: Option<&[(&str, &str)]>, audio_url: Option<&str>) -> Result<()>;
+    /// Toggles between playing and paused.
     async fn pause(&self) -> Result<()>;
+    /// Jumps to an absolute position in seconds.
     async fn seek(&self, seconds: f64) -> Result<()>;
+    /// 0 to 150, 100 being the source level.
     async fn set_volume(&self, vol: i64) -> Result<()>;
-    async fn set_property(&self, name: &str, value: MpvValue) -> Result<()>;
+    async fn volume(&self) -> Option<f64>;
+    /// Chooses an audio or subtitle track (`kind` is "audio" or "subtitle"; "auto"/"off" clear it).
+    async fn set_track(&self, kind: &str, track_id: &str) -> Result<()>;
+    /// "max" or "min" bitrate preference for adaptive streams.
+    async fn set_quality(&self, quality: &str) -> Result<()>;
+    /// Applies a profile's audio/subtitle preferences. `reset_delay` also zeroes the per-file subtitle delay.
+    async fn apply_prefs(&self, prefs: &lumen_core::player_prefs::PlayerPrefs, reset_delay: bool);
+    /// Shifts the current file's subtitles; returns the delay actually applied.
+    async fn set_subtitle_delay(&self, seconds: f64) -> Result<f64>;
+    async fn add_subtitle_file(&self, path: &str) -> Result<()>;
+    async fn set_fullscreen(&self, enabled: bool) -> Result<()>;
+    /// False once the player has exited or is being closed.
+    fn is_alive(&self) -> bool;
     async fn stop(&self) -> Result<()>;
 }
 

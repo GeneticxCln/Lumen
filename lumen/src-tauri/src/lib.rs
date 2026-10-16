@@ -119,7 +119,6 @@ pub fn run() {
                 if let Ok(backend_cell) = get_playback_backend().await {
                     let mut guard = backend_cell.lock().await;
                     if let Some(backend) = guard.take() {
-                        use crate::playback::PlaybackBackend;
                         let _ = backend.stop().await;
                     }
                 }

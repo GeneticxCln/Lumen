@@ -311,12 +311,10 @@ struct AppControls {
 #[async_trait]
 impl Controls for AppControls {
     async fn toggle_pause(&self) -> Result<(), String> {
-        use crate::playback::PlaybackBackend;
         let backend = crate::commands::current_backend().await.map_err(String::from)?;
         backend.pause().await.map_err(String::from)
     }
     async fn seek_to(&self, seconds: f64) -> Result<(), String> {
-        use crate::playback::PlaybackBackend;
         let backend = crate::commands::current_backend().await.map_err(String::from)?;
         backend.seek(seconds).await.map_err(String::from)
     }
@@ -325,7 +323,6 @@ impl Controls for AppControls {
         backend.volume().await.map(|v| v / 100.0)
     }
     async fn set_volume(&self, volume: f64) -> Result<(), String> {
-        use crate::playback::PlaybackBackend;
         let backend = crate::commands::current_backend().await.map_err(String::from)?;
         backend.set_volume((volume * 100.0).round() as i64).await.map_err(String::from)
     }
