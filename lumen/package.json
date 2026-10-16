@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types src/lib/discovery.test.ts && node --experimental-strip-types src/lib/errors.test.ts && node --experimental-strip-types src/lib/local.test.ts && node --experimental-strip-types src/lib/player.test.ts && node --experimental-strip-types src/lib/language.test.ts && node --experimental-strip-types src/lib/playerKeys.test.ts && node --experimental-strip-types src/lib/episodes.test.ts && node --experimental-strip-types src/lib/sync.test.ts && node --experimental-strip-types src/lib/board.test.ts && node --experimental-strip-types src/lib/series.test.ts && node --experimental-strip-types src/lib/languages.test.ts && node --experimental-strip-types src/lib/launch.test.ts",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "lint": "eslint src --max-warnings 0"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.19",
@@ -20,12 +21,17 @@
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@tauri-apps/cli": "^2",
     "@types/node": "^24.19.2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^6.0.2",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "globals": "^17.13.0",
     "typescript": "~6.0.3",
+    "typescript-eslint": "^8.71.2",
     "vite": "^8.0.16"
   }
 }
