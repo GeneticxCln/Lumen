@@ -78,6 +78,7 @@ pub fn run() {
             get_player_prefs_cmd,
             set_player_prefs_cmd,
             set_subtitle_delay_cmd,
+            set_speed_cmd,
             add_subtitle_file_cmd,
             subtitles_state_cmd,
             subtitles_set_online_cmd,

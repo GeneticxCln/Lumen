@@ -293,6 +293,12 @@ pub async fn set_subtitle_delay_cmd(seconds: f64) -> Result<f64> {
     current_backend().await?.set_subtitle_delay(seconds).await
 }
 
+/// Sets the playback speed of the current file; returns the speed applied after limiting.
+#[tauri::command]
+pub async fn set_speed_cmd(speed: f64) -> Result<f64> {
+    current_backend().await?.set_speed(speed).await
+}
+
 /// Adds a subtitle file chosen by the user to the current file.
 #[tauri::command]
 pub async fn add_subtitle_file_cmd(path: String) -> Result<()> {

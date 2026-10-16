@@ -20,6 +20,9 @@ interface PlayerOverlayProps {
   /** Set only when the series has a following episode; the button is hidden otherwise. */
   nextEpisodeTitle?: string;
   onNextEpisode?: () => void;
+  /** The offer to start the next episode: seconds left and its title; null when there is none. */
+  nextUp?: { secondsLeft: number; title: string } | null;
+  onDismissNext?: () => void;
   /** True while the stream is loading or refilling. The spinner ignores the idle state, so it stays visible after the controls fade. */
   buffering: boolean;
   /** Keep the controls on screen. Used when the video sits above the page rather than behind the controls. */
@@ -37,6 +40,8 @@ export function PlayerOverlay({
   onToggleFullscreen,
   nextEpisodeTitle,
   onNextEpisode,
+  nextUp = null,
+  onDismissNext,
   buffering,
   controlsAlwaysVisible = false,
   controls,
@@ -115,6 +120,19 @@ export function PlayerOverlay({
           </button>
         )}
       </header>
+
+      {nextUp && (
+        <div className="player-nextup" role="status">
+          <div>
+            <strong>{nextUp.secondsLeft > 0 ? t("player.nextUpIn", { seconds: nextUp.secondsLeft }) : t("player.nextUpNow")}</strong>
+            <span className="muted-note">{nextUp.title}</span>
+          </div>
+          <div className="settings-actions">
+            {onNextEpisode && <button type="button" className="primary-button" onClick={onNextEpisode}>{t("player.playNextNow")}</button>}
+            {onDismissNext && <button type="button" className="secondary-button" onClick={onDismissNext}>{t("player.cancelNext")}</button>}
+          </div>
+        </div>
+      )}
 
       <div className="player-controls">{controls}</div>
     </section>

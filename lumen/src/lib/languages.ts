@@ -30,6 +30,12 @@ export const LANGUAGES: { code: string; label: string }[] = [
   { code: "ko", label: "Korean" },
 ];
 
+/** Choices for how far the skip buttons jump, and how early the next episode is offered (0 is off). */
+export const SEEK_STEPS = [5, 10, 15, 30, 60];
+export const AUTOPLAY_COUNTDOWNS = [0, 5, 10, 15, 20, 30];
+/** Playback speeds offered in the player. */
+export const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+
 /** Subtitle size and delay steps used by the player's controls. */
 export const SUB_SCALE_STEP = 0.1;
 export const SUB_DELAY_STEP = 0.5;

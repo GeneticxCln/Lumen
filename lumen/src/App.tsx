@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { Transport } from "./components/Transport";
 import { PlayerOverlay } from "./components/PlayerOverlay";
 import { PLAYER_SEEK_STEP_SECONDS, PLAYER_VOLUME_STEP, playerShortcutFor } from "./lib/playerKeys";
+import { nextUp } from "./lib/autoplay";
 import type { PlayerShortcut } from "./lib/playerKeys";
 import { SourceDialog } from "./components/SourceDialog";
 import { SettingsPage } from "./components/SettingsPage";
@@ -19,7 +20,7 @@ import { usePlayer } from "./hooks/usePlayer";
 import { useChannels } from "./hooks/useChannels";
 import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, getPlayerPrefs, listProfiles, setPlayerFullscreen, tmdbStatus } from "./lib/tauri";
 import type { BrowseTitle } from "./lib/types";
-import type { Channel, HistoryEntry, Profile } from "./lib/types";
+import type { Channel, HistoryEntry, PlayerPrefs, Profile } from "./lib/types";
 import { readPreferences, recommendChannels, catalogShelves, contentKind, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
 import { isLocalPath } from "./lib/local";
 import { nextEpisode } from "./lib/episodes";
@@ -313,6 +314,15 @@ function App() {
   }, [player.currentUrl, playerOpen, isFullscreen]);
 
 
+  // The profile's player preferences the page itself uses: how far to skip, and the next-episode countdown.
+  const [playerPrefs, setPlayerPrefsState] = useState<PlayerPrefs | null>(null);
+  useEffect(() => {
+    let active = true;
+    getPlayerPrefs().then((loaded) => { if (active) setPlayerPrefsState(loaded); }).catch(() => {});
+    return () => { active = false; };
+  }, [player.currentUrl, playerOpen, activeProfileId]);
+  const seekStep = playerPrefs?.seekStep ?? PLAYER_SEEK_STEP_SECONDS;
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (!preferences.keyboardShortcuts || !player.currentUrl || event.ctrlKey || event.metaKey || event.altKey) return;
@@ -329,8 +339,8 @@ function App() {
       event.preventDefault();
       const actions: Record<PlayerShortcut, () => Promise<unknown>> = {
         "toggle-pause": player.togglePause,
-        "seek-back": () => player.seekRelative(-PLAYER_SEEK_STEP_SECONDS),
-        "seek-forward": () => player.seekRelative(PLAYER_SEEK_STEP_SECONDS),
+        "seek-back": () => player.seekRelative(-seekStep),
+        "seek-forward": () => player.seekRelative(seekStep),
         "volume-down": () => player.changeVolume(player.volume - PLAYER_VOLUME_STEP),
         "volume-up": () => player.changeVolume(player.volume + PLAYER_VOLUME_STEP),
         "toggle-mute": player.toggleMute,
@@ -341,7 +351,7 @@ function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [preferences.keyboardShortcuts, player, playerOpen, findingSubtitles, toggleFullscreen, closePlayer]);
+  }, [preferences.keyboardShortcuts, player, playerOpen, findingSubtitles, seekStep, toggleFullscreen, closePlayer]);
 
   // Files on this computer belong to the Local Device page only; every other tab shows sources.
   const available = useMemo(() => library.channels.filter((channel) => !isLocalPath(channel.url) && (!preferences.hideUnavailable || !channel.last_error)), [library.channels, preferences.hideUnavailable]);
@@ -351,6 +361,27 @@ function App() {
     const current = library.allChannels.find((channel) => channel.id === player.currentChannelId);
     return current ? nextEpisode(current, library.allChannels) : null;
   }, [library.allChannels, player.currentChannelId]);
+  // Offer the next episode in the last seconds, and start it when this one ends.
+  const [dismissedNextFor, setDismissedNextFor] = useState<string | null>(null);
+  const upNext = nextUp({
+    time: player.playerState.time,
+    duration: player.playerState.duration,
+    paused: player.playerState.paused,
+    countdown: playerPrefs?.autoplayCountdown ?? 10,
+    hasNext: followingEpisode !== null,
+    dismissed: dismissedNextFor !== null && dismissedNextFor === player.currentUrl,
+  });
+  const startNextNow = upNext?.startNow === true;
+  const playRef = useRef(play);
+  playRef.current = play;
+  const autoplayedFor = useRef<string | null>(null);
+  useEffect(() => {
+    // Cleared once the next episode is playing, so replaying this one can chain again.
+    if (!startNextNow) { autoplayedFor.current = null; return; }
+    if (!followingEpisode || !player.currentUrl || autoplayedFor.current === player.currentUrl) return;
+    autoplayedFor.current = player.currentUrl;
+    void playRef.current(followingEpisode);
+  }, [startNextNow, followingEpisode, player.currentUrl]);
   const byKind = useMemo(() => ({
     movie: available.filter((channel) => contentKind(channel) === "movie"),
     series: available.filter((channel) => contentKind(channel) === "series"),
@@ -594,11 +625,13 @@ function App() {
       onBack={closePlayer}
       nextEpisodeTitle={followingEpisode?.name}
       onNextEpisode={followingEpisode ? () => void play(followingEpisode) : undefined}
+      nextUp={upNext && followingEpisode ? { secondsLeft: upNext.secondsLeft, title: followingEpisode.name } : null}
+      onDismissNext={() => setDismissedNextFor(player.currentUrl)}
       buffering={player.playerState.buffering}
       controlsAlwaysVisible={embeddedActive}
       onTogglePause={() => void run(player.togglePause)}
       onToggleFullscreen={() => void run(toggleFullscreen)}
-      controls={<Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); closePlayer(); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} onSelectTrack={(kind, id) => void run(() => player.selectTrack(kind, id))} onSelectQuality={(id) => void run(() => player.selectQuality(id))} subtitleDelay={player.subtitleDelay} onSubtitleDelay={(direction) => void run(() => player.changeSubtitleDelay(direction))} onSubtitleScale={(direction) => void run(() => player.changeSubtitleScale(direction))} onAddSubtitle={() => void run(chooseSubtitleFile)} onFindSubtitles={() => void run(openSubtitleFinder)} isFullscreen={isFullscreen} onToggleFullscreen={() => void run(toggleFullscreen)} />}
+      controls={<Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); closePlayer(); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} onSelectTrack={(kind, id) => void run(() => player.selectTrack(kind, id))} onSelectQuality={(id) => void run(() => player.selectQuality(id))} subtitleDelay={player.subtitleDelay} onSubtitleDelay={(direction) => void run(() => player.changeSubtitleDelay(direction))} onSubtitleScale={(direction) => void run(() => player.changeSubtitleScale(direction))} onAddSubtitle={() => void run(chooseSubtitleFile)} onFindSubtitles={() => void run(openSubtitleFinder)} seekStep={seekStep} speed={player.speed} onSpeed={(speed) => void run(() => player.changeSpeed(speed))} isFullscreen={isFullscreen} onToggleFullscreen={() => void run(toggleFullscreen)} />}
     >
       {embeddedActive
         ? null

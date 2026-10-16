@@ -150,6 +150,11 @@ export async function setSubtitleDelay(seconds: number) {
   return callBackend<number>("set_subtitle_delay_cmd", { seconds });
 }
 
+/** Sets the playback speed of the current file. Returns the speed that was applied. */
+export async function setSpeed(speed: number) {
+  return callBackend<number>("set_speed_cmd", { speed });
+}
+
 export async function addSubtitleFile(path: string) {
   return callBackend("add_subtitle_file_cmd", { path });
 }

@@ -27,6 +27,12 @@ Local subtitle handling needs nothing from the internet: tracks inside the file,
 
 A search sends the title's name, year, season and episode, the language, and for a local file a fingerprint of it (the OpenSubtitles hash, never the file) to those services. Each service can be switched off in Settings → Playback. Downloads are limited to each service's own servers and 10 MB, checked to really be subtitles (an error page is refused), converted to UTF-8 and kept in a 50 MB cache. These services are run by other people and are not official interfaces for apps like Lumen, so they can change or stop working; Gestdown covers TV only. OpenSubtitles' own old API is not used: it was shut down for third-party apps.
 
+## Player settings
+
+Per profile, in Settings → Playback: preferred audio and subtitle language, subtitle size, position, text and outline colour, an optional background box, bold and font (these style text subtitles; styled `.ass` subtitles keep their author's look), how far the skip buttons and arrow keys jump (5 to 60 seconds), and the next-episode offer. In the player: playback speed (0.5× to 2×, back to normal for the next file) and, for series, a card in the last seconds of an episode ("Next episode in 10 s", with Play now and Cancel) that starts the next episode when this one ends. The countdown can be set to 5–30 seconds or turned off; the default is 10 seconds.
+
+Lumen starts the regular `mpv`, so your own `~/.config/mpv/mpv.conf` and scripts apply too; Lumen's settings are applied on top, and "Extra mpv arguments" in Settings → Playback can add more.
+
 ## Linux integration
 
 - **Open with Lumen.** The `.deb` declares the common video, audio and playlist types, so Lumen appears in "Open with". Video and audio files play, `.m3u`/`.m3u8` files are added as sources, and a subtitle file is added to what is playing.
