@@ -42,4 +42,14 @@ scraper = "0.27"
 # Provider API tokens live in the OS keychain, never in the SQLite settings table.
 # keyring 4's default `v1` feature covers macOS, Windows and Linux (Secret Service).
 keyring = "4"
+tauri-plugin-single-instance = "2"
 
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Media keys and the desktop's media widget (MPRIS over D-Bus). Deliberately without its `tokio`
+# feature: that switches zbus for the whole build, and the keychain (keyring -> zbus blocking) is
+# used from async code, where a tokio-backed blocking connection panics.
+mpris-server = "0.10"
+# The same GTK the window is built on, to give mpv a native area to draw into (embedded player).
+gtk = "0.18"
+gdkx11 = "0.18"

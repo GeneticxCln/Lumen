@@ -1,9 +1,17 @@
 pub use lumen_core::{
-    auth, board, db, error, extract, harvest, media_tools, netguard, pin_guard, player_prefs, playlist, probe,
-    search, secrets, series, tmdb,
+    auth, board, db, error, extract, harvest, media_tools, netguard, pin_guard, player_prefs,
+    playlist, probe, search, secrets, series, tmdb,
 };
 
 mod commands;
+#[cfg(target_os = "linux")]
+mod embed;
+#[cfg(not(target_os = "linux"))]
+#[path = "embed_unsupported.rs"]
+mod embed;
+mod launch;
+#[cfg(target_os = "linux")]
+mod mpris;
 mod playback;
 mod sync;
 
@@ -14,9 +22,21 @@ use tauri::{Manager, RunEvent};
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        // First, so a second launch is handed to the running window before anything else starts.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            let args: Vec<String> = argv.into_iter().skip(1).collect();
+            launch::handle_arguments(app, &args, Some(std::path::Path::new(&cwd)));
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .manage(launch::PendingLaunch::default())
         .setup(|app| {
+            // What this launch was asked to open ("Open with Lumen", a lumen:// link).
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            launch::handle_arguments(app.handle(), &args, std::env::current_dir().ok().as_deref());
+            embed::detect_display();
+            #[cfg(target_os = "linux")]
+            mpris::start(app.handle().clone());
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Ok(app_dir) = app_handle.path().app_data_dir() {
@@ -31,6 +51,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            launch::take_launch_targets,
+            launch::classify_open_targets,
             board_new_channel_ids,
             set_episodes_watched_cmd,
             list_episode_marks_cmd,
@@ -51,6 +73,8 @@ pub fn run() {
             set_fullscreen,
             set_player_track,
             set_player_quality,
+            embedded_player_support,
+            set_embedded_video,
             get_player_prefs_cmd,
             set_player_prefs_cmd,
             set_subtitle_delay_cmd,
@@ -103,7 +127,6 @@ pub fn run() {
                 if let Ok(backend_cell) = get_playback_backend().await {
                     let mut guard = backend_cell.lock().await;
                     if let Some(backend) = guard.take() {
-                        use crate::playback::PlaybackBackend;
                         let _ = backend.stop().await;
                     }
                 }

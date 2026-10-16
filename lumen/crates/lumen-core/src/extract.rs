@@ -10,11 +10,11 @@ use crate::netguard;
 use crate::playlist::import::read_capped_body;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::LazyLock;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::LazyLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -144,7 +144,11 @@ pub fn extractor_status(app_data_dir: Option<&Path>) -> Result<ExtractorStatus> 
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn is_sha256_hex(value: &str) -> bool {
@@ -161,10 +165,7 @@ pub fn parse_checksum_for_asset(checksums_text: &str, asset_name: &str) -> Optio
         let mut parts = trimmed.split_whitespace();
         let hash = parts.next()?;
         let file = parts.next()?.trim_start_matches('*');
-        if file == asset_name
-            && hash.len() == 64
-            && hash.chars().all(|c| c.is_ascii_hexdigit())
-        {
+        if file == asset_name && hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
             return Some(hash.to_ascii_lowercase());
         }
     }
@@ -231,7 +232,11 @@ pub async fn update_managed_extractor(
         .build()
         .map_err(PlayerError::from)?;
 
-    let sums_resp = client.get(sums_target).send().await.map_err(PlayerError::from)?;
+    let sums_resp = client
+        .get(sums_target)
+        .send()
+        .await
+        .map_err(PlayerError::from)?;
     if !sums_resp.status().is_success() {
         return Err(PlayerError::Http(format!(
             "HTTP {} fetching yt-dlp checksums",
@@ -240,7 +245,11 @@ pub async fn update_managed_extractor(
     }
     let sums_text = read_capped_body(sums_resp, 1024 * 1024).await?;
 
-    let bin_resp = client.get(bin_target).send().await.map_err(PlayerError::from)?;
+    let bin_resp = client
+        .get(bin_target)
+        .send()
+        .await
+        .map_err(PlayerError::from)?;
     if !bin_resp.status().is_success() {
         return Err(PlayerError::Http(format!(
             "HTTP {} fetching yt-dlp binary",
@@ -266,7 +275,12 @@ pub async fn update_managed_extractor(
             asset_info.asset
         )));
     }
-    verify_binary_checksum(&bin_bytes, &asset_info.asset, Some(&sums_text), Some(&pinned))?;
+    verify_binary_checksum(
+        &bin_bytes,
+        &asset_info.asset,
+        Some(&sums_text),
+        Some(&pinned),
+    )?;
 
     let dest = managed_binary_path(app_data_dir);
     if let Some(parent) = dest.parent() {
@@ -308,7 +322,11 @@ impl ResolveCache {
         self.entries
             .retain(|_, (stored, _)| now.saturating_duration_since(*stored) < RESOLVE_CACHE_TTL);
         if self.entries.len() >= RESOLVE_CACHE_MAX
-            && let Some(oldest) = self.entries.iter().min_by_key(|(_, (stored, _))| *stored).map(|(key, _)| key.clone())
+            && let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (stored, _))| *stored)
+                .map(|(key, _)| key.clone())
         {
             self.entries.remove(&oldest);
         }
@@ -463,7 +481,11 @@ fn has_audio(fmt: &serde_json::Value) -> bool {
 /// - Split video + audio (`requested_formats` with two entries, returning both `url` and `audio_url`
 ///   so mpv can attach `--audio-file`).
 /// - Fallback to last format in `formats` with a playable URL.
-pub fn parse_ytdlp_json(raw_json: &[u8], fallback_title: &str, allow_lan: bool) -> Result<ExtractResponse> {
+pub fn parse_ytdlp_json(
+    raw_json: &[u8],
+    fallback_title: &str,
+    allow_lan: bool,
+) -> Result<ExtractResponse> {
     if raw_json.len() > MAX_EXTRACT_JSON_BYTES {
         return Err(PlayerError::Parse(format!(
             "Extractor output exceeds {MAX_EXTRACT_JSON_BYTES} bytes"
@@ -498,7 +520,12 @@ pub fn parse_ytdlp_json(raw_json: &[u8], fallback_title: &str, allow_lan: bool) 
         && !req_formats.is_empty()
     {
         for fmt in req_formats {
-            let Some(u) = fmt.get("url").and_then(|u| u.as_str()).map(str::trim).filter(|u| !u.is_empty()) else {
+            let Some(u) = fmt
+                .get("url")
+                .and_then(|u| u.as_str())
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+            else {
                 continue;
             };
             if headers.is_empty() {
@@ -518,7 +545,11 @@ pub fn parse_ytdlp_json(raw_json: &[u8], fallback_title: &str, allow_lan: bool) 
 
     // Direct `url` field when not split.
     if video_url.is_none()
-        && let Some(u) = info.get("url").and_then(|u| u.as_str()).map(str::trim).filter(|u| !u.is_empty())
+        && let Some(u) = info
+            .get("url")
+            .and_then(|u| u.as_str())
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
     {
         video_url = Some(u.to_string());
     }
@@ -526,12 +557,16 @@ pub fn parse_ytdlp_json(raw_json: &[u8], fallback_title: &str, allow_lan: bool) 
     // Fallback to `formats` list.
     if video_url.is_none()
         && let Some(formats) = info.get("formats").and_then(|f| f.as_array())
-        && let Some(last) = formats
-            .iter()
-            .rev()
-            .find(|f| f.get("url").and_then(|u| u.as_str()).is_some_and(|s| !s.trim().is_empty()))
+        && let Some(last) = formats.iter().rev().find(|f| {
+            f.get("url")
+                .and_then(|u| u.as_str())
+                .is_some_and(|s| !s.trim().is_empty())
+        })
     {
-        video_url = last.get("url").and_then(|u| u.as_str()).map(|s| s.trim().to_string());
+        video_url = last
+            .get("url")
+            .and_then(|u| u.as_str())
+            .map(|s| s.trim().to_string());
         if headers.is_empty() {
             headers = clean_headers(last.get("http_headers"));
         }
@@ -620,8 +655,14 @@ mod tests {
         assert_eq!(res.title, "Big Buck Bunny");
         assert_eq!(res.url, "https://cdn.example.com/bbb.mp4");
         assert_eq!(res.audio_url, None);
-        assert_eq!(res.headers.get("User-Agent").map(String::as_str), Some("CustomUA/1.0"));
-        assert_eq!(res.headers.get("Referer").map(String::as_str), Some("https://example.com/"));
+        assert_eq!(
+            res.headers.get("User-Agent").map(String::as_str),
+            Some("CustomUA/1.0")
+        );
+        assert_eq!(
+            res.headers.get("Referer").map(String::as_str),
+            Some("https://example.com/")
+        );
     }
 
     #[test]
@@ -649,7 +690,10 @@ mod tests {
             res.audio_url.as_deref(),
             Some("https://cdn.example.com/audio-opus.webm")
         );
-        assert_eq!(res.headers.get("User-Agent").map(String::as_str), Some("TestUA"));
+        assert_eq!(
+            res.headers.get("User-Agent").map(String::as_str),
+            Some("TestUA")
+        );
     }
 
     #[test]
@@ -674,7 +718,10 @@ mod tests {
             digest
         );
         // Tampered payload fails verification
-        assert!(verify_binary_checksum(b"tampered", "yt-dlp_linux", Some(&sums), Some(&digest)).is_err());
+        assert!(
+            verify_binary_checksum(b"tampered", "yt-dlp_linux", Some(&sums), Some(&digest))
+                .is_err()
+        );
         // Missing asset in SHA2-256SUMS fails verification
         assert!(verify_binary_checksum(payload, "missing_asset", Some(&sums), None).is_err());
     }
@@ -690,11 +737,19 @@ mod tests {
     #[test]
     fn the_pinned_manifest_matches_the_upstream_release_checksums() {
         let manifest = pinned_manifest().unwrap();
-        assert_eq!(manifest.version, "2026.02.04", "update UPSTREAM_SUMS_2026_02_04 when the pin moves");
+        assert_eq!(
+            manifest.version, "2026.02.04",
+            "update UPSTREAM_SUMS_2026_02_04 when the pin moves"
+        );
         assert!(!manifest.assets.is_empty());
         for (target, asset) in &manifest.assets {
             let published = parse_checksum_for_asset(UPSTREAM_SUMS_2026_02_04, &asset.asset)
-                .unwrap_or_else(|| panic!("no upstream checksum recorded for {target} ({})", asset.asset));
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no upstream checksum recorded for {target} ({})",
+                        asset.asset
+                    )
+                });
             assert_eq!(asset.sha256, published, "pinned hash for {target}");
             assert!(is_sha256_hex(&asset.sha256));
         }
@@ -712,9 +767,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "downloads about 36 MB from GitHub"]
     async fn live_update_installs_and_runs_the_pinned_extractor() {
-        let dir = std::env::temp_dir().join(format!("lumen-ytdlp-{}", uuid::Uuid::new_v4().simple()));
+        let dir =
+            std::env::temp_dir().join(format!("lumen-ytdlp-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
-        let status = update_managed_extractor(&dir, None, false).await.expect("pinned download verifies");
+        let status = update_managed_extractor(&dir, None, false)
+            .await
+            .expect("pinned download verifies");
         assert!(status.available);
         assert_eq!(status.source, "managed");
         assert_eq!(status.version.as_deref(), Some("2026.02.04"));
@@ -725,11 +783,27 @@ mod tests {
     fn resolved_links_are_reused_briefly_and_then_dropped() {
         let mut cache = ResolveCache::default();
         let start = std::time::Instant::now();
-        let response = ExtractResponse { title: "T".into(), url: "https://cdn.example/v.mp4?sig=abc".into(), audio_url: None, headers: HashMap::new() };
+        let response = ExtractResponse {
+            title: "T".into(),
+            url: "https://cdn.example/v.mp4?sig=abc".into(),
+            audio_url: None,
+            headers: HashMap::new(),
+        };
         assert!(cache.get("https://page.example/watch", start).is_none());
         cache.put("https://page.example/watch", response.clone(), start);
-        assert_eq!(cache.get("https://page.example/watch", start + Duration::from_secs(60)), Some(response));
-        assert!(cache.get("https://page.example/watch", start + RESOLVE_CACHE_TTL).is_none(), "expired links are not served");
+        assert_eq!(
+            cache.get(
+                "https://page.example/watch",
+                start + Duration::from_secs(60)
+            ),
+            Some(response)
+        );
+        assert!(
+            cache
+                .get("https://page.example/watch", start + RESOLVE_CACHE_TTL)
+                .is_none(),
+            "expired links are not served"
+        );
         assert!(cache.get("https://other.example/", start).is_none());
     }
 
@@ -737,11 +811,25 @@ mod tests {
     fn the_resolve_cache_is_bounded() {
         let mut cache = ResolveCache::default();
         let start = std::time::Instant::now();
-        let response = ExtractResponse { title: "T".into(), url: "https://cdn.example/v".into(), audio_url: None, headers: HashMap::new() };
+        let response = ExtractResponse {
+            title: "T".into(),
+            url: "https://cdn.example/v".into(),
+            audio_url: None,
+            headers: HashMap::new(),
+        };
         for index in 0..(RESOLVE_CACHE_MAX + 10) {
-            cache.put(&format!("https://page.example/{index}"), response.clone(), start + Duration::from_millis(index as u64));
+            cache.put(
+                &format!("https://page.example/{index}"),
+                response.clone(),
+                start + Duration::from_millis(index as u64),
+            );
         }
         assert_eq!(cache.entries.len(), RESOLVE_CACHE_MAX);
-        assert!(cache.get("https://page.example/0", start + Duration::from_secs(1)).is_none(), "the oldest was evicted");
+        assert!(
+            cache
+                .get("https://page.example/0", start + Duration::from_secs(1))
+                .is_none(),
+            "the oldest was evicted"
+        );
     }
 }

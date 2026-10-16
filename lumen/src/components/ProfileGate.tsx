@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Profile } from "../lib/types";
 import { activateProfile, errorMessage } from "../lib/tauri";
+import { t } from "../i18n/index.ts";
 
 interface ProfileGateProps {
   profiles: Profile[];
@@ -31,7 +32,7 @@ export function ProfileGate({ profiles, initialProfileId, onUnlocked }: ProfileG
     } catch (failure) {
       // A rejected unlock stays locked: clear the field, report it, and keep the user here.
       setPin("");
-      setError(errorMessage(failure) || `Could not unlock ${profile.name}.`);
+      setError(errorMessage(failure) || t("profileGate.failed", { name: profile.name }));
     } finally {
       setBusy(false);
     }
@@ -52,16 +53,16 @@ export function ProfileGate({ profiles, initialProfileId, onUnlocked }: ProfileG
       aria-labelledby="profile-gate-title"
     >
       <div className="profile-gate-card">
-        <p className="eyebrow">WHO&rsquo;S WATCHING</p>
+        <p className="eyebrow">{t("profileGate.eyebrow")}</p>
         <h1 className="profile-gate-title" id="profile-gate-title">
-          {locked && selected ? `Unlock ${selected.name}` : "Choose a profile"}
+          {locked && selected ? t("profileGate.unlock", { name: selected.name }) : t("profileGate.choose")}
         </h1>
         <p className="profile-gate-sub">
-          Watch history and My List are kept separately for each profile on this device.
+          {t("profileGate.subtitle")}
         </p>
 
         {profiles.length === 0 ? (
-          <p className="profile-gate-sub">No profiles are available on this device.</p>
+          <p className="profile-gate-sub">{t("profileGate.none")}</p>
         ) : (
           <div className="profile-tiles">
             {profiles.map((profile) => (
@@ -77,7 +78,7 @@ export function ProfileGate({ profiles, initialProfileId, onUnlocked }: ProfileG
                   {profile.name.slice(0, 1).toUpperCase()}
                 </span>
                 <span className="profile-tile-name">
-                  {profile.has_pin ? `${profile.name} \u00b7 PIN` : profile.name}
+                  {profile.has_pin ? t("profileGate.tilePin", { name: profile.name }) : profile.name}
                 </span>
               </button>
             ))}
@@ -92,7 +93,7 @@ export function ProfileGate({ profiles, initialProfileId, onUnlocked }: ProfileG
               if (pin.length > 0) void unlock(selected, pin);
             }}
           >
-            <label htmlFor="profile-pin-input">Enter {selected.name}&rsquo;s PIN</label>
+            <label htmlFor="profile-pin-input">{t("profileGate.enterPin", { name: selected.name })}</label>
             <div className="profile-pin-row">
               <input
                 id="profile-pin-input"
@@ -107,10 +108,10 @@ export function ProfileGate({ profiles, initialProfileId, onUnlocked }: ProfileG
                 onChange={(event) => setPin(event.target.value)}
               />
               <button className="primary-button" type="submit" disabled={busy || pin.length === 0}>
-                {busy ? "Unlocking…" : "Unlock"}
+                {busy ? t("profileGate.unlocking") : t("profileGate.unlockButton")}
               </button>
             </div>
-            <small id="profile-pin-hint" className="muted-note">At least 4 characters.</small>
+            <small id="profile-pin-hint" className="muted-note">{t("profileGate.pinHint")}</small>
           </form>
         )}
 
@@ -121,8 +122,7 @@ export function ProfileGate({ profiles, initialProfileId, onUnlocked }: ProfileG
         )}
 
         <p className="profile-gate-note">
-          The PIN locks this profile&rsquo;s screen on this device. The media library, the database
-          and your files are not encrypted by it.
+          {t("profileGate.note")}
         </p>
       </div>
     </div>

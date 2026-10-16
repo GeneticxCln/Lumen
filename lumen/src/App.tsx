@@ -17,13 +17,15 @@ import { LocalDevicePage } from "./components/LocalDevicePage";
 import { SearchEnginePage } from "./components/SearchEnginePage";
 import { usePlayer } from "./hooks/usePlayer";
 import { useChannels } from "./hooks/useChannels";
-import { activeProfile, boardNewChannelIds, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, listProfiles, setPlayerFullscreen, tmdbStatus } from "./lib/tauri";
+import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, listProfiles, setPlayerFullscreen, tmdbStatus } from "./lib/tauri";
 import type { BrowseTitle } from "./lib/types";
 import type { Channel, HistoryEntry, Profile } from "./lib/types";
 import { readPreferences, recommendChannels, catalogShelves, contentKind, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
 import { isLocalPath } from "./lib/local";
 import { nextEpisode } from "./lib/episodes";
 import { buildBoard } from "./lib/board";
+import { launchNotice, planLaunch } from "./lib/launch";
+import type { OpenTarget } from "./lib/launch";
 import { describeUpcoming } from "./lib/series";
 import type { EpisodeMark, UpcomingSeries } from "./lib/series";
 import { EpisodeList } from "./components/EpisodeList";
@@ -172,6 +174,86 @@ function App() {
     }
   }
 
+  // Things opened from outside: "Open with Lumen", a second launch, a lumen:// link, dropped files.
+  async function openTargets(targets: OpenTarget[]) {
+    const plan = planLaunch(targets);
+    let imported = 0;
+    for (const path of plan.playlists) {
+      try { await importPlaylistFile(path); imported += 1; } catch (error) { setNotice(errorMessage(error)); }
+    }
+    if (imported > 0) { setRefresh((value) => value + 1); library.loadChannels(); }
+    let playing = false;
+    if (plan.play?.kind === "media") {
+      try { await playFile(plan.play.path); playing = true; } catch { /* playFile already told the user */ }
+    } else if (plan.play?.kind === "stream") {
+      // Anyone can send a link (a web page can open lumen:// URLs), so ask before playing it.
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      if (await ask(`Play this address in Lumen?\n\n${plan.play.url}`, { title: "Open link", kind: "warning" })) {
+        try { await playFile(plan.play.url); playing = true; } catch { /* playFile already told the user */ }
+      }
+    }
+    let withoutVideo = false;
+    for (const path of plan.subtitles) {
+      if (playing || playerOpen) {
+        try { await player.addSubtitle(path); } catch (error) { setNotice(errorMessage(error)); }
+      } else withoutVideo = true;
+    }
+    const message = launchNotice(plan, imported, withoutVideo);
+    if (message) setNotice(message);
+  }
+  const openTargetsRef = useRef(openTargets);
+  openTargetsRef.current = openTargets;
+
+  // Listen for items opened while running, then collect what arrived before the page was ready.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/api/event").then(async ({ listen }) => {
+      const off = await listen<OpenTarget[]>("launch://open", (event) => { void openTargetsRef.current(event.payload); });
+      if (disposed) { off(); return; }
+      unlisten = off;
+      const waiting = await takeLaunchTargets();
+      if (!disposed && waiting.length > 0) void openTargetsRef.current(waiting);
+    }).catch(() => {});
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+
+  // Stop pressed in the desktop's media controls: do what the Stop button does, so progress is saved.
+  const stopFromDesktopRef = useRef<() => void>(() => {});
+  stopFromDesktopRef.current = () => { void run(async () => { await player.stopPlayback(); closePlayer(); }); };
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/api/event").then(async ({ listen }) => {
+      const off = await listen("mpris://stop", () => stopFromDesktopRef.current());
+      if (disposed) off(); else unlisten = off;
+    }).catch(() => {});
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+
+  // Dropping files on the window opens them the same way.
+  const [dragging, setDragging] = useState(false);
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/api/webview").then(async ({ getCurrentWebview }) => {
+      const off = await getCurrentWebview().onDragDropEvent((event) => {
+        const type = event.payload.type;
+        if (type === "enter" || type === "over") setDragging(true);
+        else if (type === "leave") setDragging(false);
+        else if (type === "drop") {
+          setDragging(false);
+          classifyOpenTargets(event.payload.paths).then((targets) => {
+            if (targets.length > 0) void openTargetsRef.current(targets);
+            else setNotice("Nothing to open: drop video, audio, playlist (.m3u) or subtitle files.");
+          }).catch((error) => setNotice(errorMessage(error)));
+        }
+      });
+      if (disposed) off(); else unlisten = off;
+    }).catch(() => {});
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+
   // Fullscreen drives the mpv window.
   const [isFullscreen, setIsFullscreen] = useState(false);
   const toggleFullscreen = useCallback(async () => {
@@ -183,6 +265,40 @@ function App() {
     setPlayerOpen(false);
     if (isFullscreen) void run(toggleFullscreen);
   }, [isFullscreen, toggleFullscreen]);
+
+  // Playing inside the window (experimental): give the video room above the page while the player
+  // is open, keep it sized as the window changes, and hand the room back when it closes.
+  const [embeddedActive, setEmbeddedActive] = useState(false);
+  const videoHeightRef = useRef(0);
+  useEffect(() => {
+    if (!player.currentUrl || !playerOpen) {
+      if (videoHeightRef.current > 0) {
+        videoHeightRef.current = 0;
+        void setEmbeddedVideo(false, 0).catch(() => {});
+      }
+      setEmbeddedActive(false);
+      return;
+    }
+    let active = true;
+    const apply = async () => {
+      // The page only sees the room left under the video, so the window height is both together.
+      const total = window.innerHeight + videoHeightRef.current;
+      const height = Math.round(total * (isFullscreen ? 0.85 : 0.62));
+      try {
+        const showing = await setEmbeddedVideo(true, height);
+        if (!active) return;
+        videoHeightRef.current = showing ? height : 0;
+        setEmbeddedActive(showing);
+      } catch {
+        if (active) setEmbeddedActive(false);
+      }
+    };
+    void apply();
+    const onResize = () => void apply();
+    window.addEventListener("resize", onResize);
+    return () => { active = false; window.removeEventListener("resize", onResize); };
+  }, [player.currentUrl, playerOpen, isFullscreen]);
+
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -361,6 +477,7 @@ function App() {
         <button className="icon-button header-save" aria-label="Open My List" onClick={() => openSettings("mylist")}><Icon name="bookmark" size={19} /><span className="header-count">{myList.length}</span></button><span className="header-divider" /><button className="header-profile" aria-label={currentProfile ? `Open settings. Profile: ${currentProfile.name}` : "Open settings"} onClick={() => openSettings(settingsSection)}>{currentProfile ? currentProfile.name.slice(0, 1).toUpperCase() : "L"}</button></div>
     </header>
     <main id="main-content">
+      {dragging && <div className="drop-overlay" aria-hidden="true"><div>Drop to open</div></div>}
       {notice && <div className="app-notice" role="alert"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notice" onClick={() => setNotice(null)}><Icon name="close" /></button></div>}
       {library.error && <div className="app-notice" role="alert"><div><strong>Couldn’t connect to your library</strong><p>{library.error}. Start the Lumen backend or desktop app, then retry.</p></div><button onClick={library.loadChannels}>Retry</button></div>}
 
@@ -463,11 +580,14 @@ function App() {
       nextEpisodeTitle={followingEpisode?.name}
       onNextEpisode={followingEpisode ? () => void play(followingEpisode) : undefined}
       buffering={player.playerState.buffering}
+      controlsAlwaysVisible={embeddedActive}
       onTogglePause={() => void run(player.togglePause)}
       onToggleFullscreen={() => void run(toggleFullscreen)}
       controls={<Transport state={player.playerState} volume={player.volume} muted={player.muted} onPlayPause={() => void run(player.togglePause)} onStop={() => void run(async () => { await player.stopPlayback(); closePlayer(); })} onSeek={(time) => void run(() => player.seekTo(time))} onSeekRelative={(delta) => void run(() => player.seekRelative(delta))} onVolumeChange={(volume) => void run(() => player.changeVolume(volume))} onToggleMute={() => void run(player.toggleMute)} onSelectTrack={(kind, id) => void run(() => player.selectTrack(kind, id))} onSelectQuality={(id) => void run(() => player.selectQuality(id))} subtitleDelay={player.subtitleDelay} onSubtitleDelay={(direction) => void run(() => player.changeSubtitleDelay(direction))} onSubtitleScale={(direction) => void run(() => player.changeSubtitleScale(direction))} onAddSubtitle={() => void run(chooseSubtitleFile)} isFullscreen={isFullscreen} onToggleFullscreen={() => void run(toggleFullscreen)} />}
     >
-      <div className="player-native-card"><Icon name="play" size={40} /><h2>{player.currentTitle}</h2><p>Your video plays in the native mpv window.</p></div>
+      {embeddedActive
+        ? null
+        : <div className="player-native-card"><Icon name="play" size={40} /><h2>{player.currentTitle}</h2><p>Your video plays in the native mpv window.</p></div>}
     </PlayerOverlay>}
     </div>
     {locked && <ProfileGate profiles={profiles} initialProfileId={activeProfileId} onUnlocked={handleProfilesChanged} />}

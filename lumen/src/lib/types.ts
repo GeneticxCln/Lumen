@@ -156,6 +156,8 @@ export interface Settings {
   search_preferred_language: string;
   search_hide_other_languages: string;
   allow_lan_sources: string;
+  /** "true" plays video inside the window instead of a separate mpv window (X11 only). */
+  embed_player?: string;
 }
 
 export interface ExtractResponse {

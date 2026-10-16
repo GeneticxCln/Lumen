@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: lumen
+
+jobs:
+  # The UI-agnostic core builds and tests without GTK or WebKit, so this job is fast and has no system libraries.
+  core:
+    name: Rust core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lumen
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy (core)
+        run: cargo clippy -p lumen-core --all-targets -- -D warnings
+      - name: Tests (core)
+        run: cargo test -p lumen-core
+
+  # The desktop shell needs the Tauri system libraries. mpv, ffmpeg and a D-Bus session tool are there
+  # because some tests drive a real player and a real session bus (they skip when a tool is missing).
+  desktop:
+    name: Desktop shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev libssl-dev pkg-config \
+            mpv ffmpeg dbus systemd
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lumen
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: lumen/package-lock.json
+      # tauri::generate_context! embeds the built frontend, so it has to exist before the crate compiles.
+      - name: Build the frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Clippy (desktop)
+        run: cargo clippy -p lumen --all-targets -- -D warnings
+      - name: Tests (desktop)
+        run: cargo test -p lumen --lib
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: lumen/package-lock.json
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint (React hooks rules)
+        run: npm run lint
+      - name: Tests
+        run: npm test
+      - name: Build
+        run: npm run build
+
+  # The sync server is exercised over plain HTTP against a local Worker: no accounts, nothing mocked.
+  sync-server:
+    name: Sync server
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: lumen/sync-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: lumen/sync-server/package-lock.json
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Flow test against a local Worker
+        run: |
+          npm run dev > worker.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -s -o /dev/null -m 2 http://127.0.0.1:8787/v1/items && break
+            sleep 1
+          done
+          npm run test:sync || { cat worker.log; exit 1; }

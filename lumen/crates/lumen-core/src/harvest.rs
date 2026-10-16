@@ -30,17 +30,15 @@ static STREAM_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid stream URL regex")
 });
 
-static RELATIVE_M3U_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\.(?:m3u8|m3u)(?:\?|$)").expect("valid relative m3u regex")
-});
+static RELATIVE_M3U_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\.(?:m3u8|m3u)(?:\?|$)").expect("valid relative m3u regex"));
 
 static TAG_SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
     Selector::parse("a, video, source, iframe, link").expect("valid tag selector")
 });
 
-static SCRIPT_SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
-    Selector::parse("script").expect("valid script selector")
-});
+static SCRIPT_SELECTOR: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("script").expect("valid script selector"));
 
 fn resolve_candidate(base: &Url, raw: &str) -> Option<String> {
     let trimmed = raw.trim();
@@ -64,7 +62,8 @@ fn collect_from_json_ld(data: &serde_json::Value, base: &Url, found: &mut Vec<St
         serde_json::Value::Object(map) => {
             for (k, v) in map {
                 if let Some(s) = v.as_str() {
-                    if (matches!(k.as_str(), "contentUrl" | "embedUrl" | "url") || RELATIVE_M3U_RE.is_match(s))
+                    if (matches!(k.as_str(), "contentUrl" | "embedUrl" | "url")
+                        || RELATIVE_M3U_RE.is_match(s))
                         && let Some(resolved) = resolve_candidate(base, s)
                     {
                         found.push(resolved);
@@ -145,7 +144,9 @@ pub async fn harvest_streams(url: &str, allow_lan: bool) -> Result<HarvestRespon
 
     let client = netguard::guarded_client(allow_lan)
         .timeout(HARVEST_TIMEOUT)
-        .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Lumen/0.1")
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Lumen/0.1",
+        )
         .build()
         .map_err(PlayerError::from)?;
 

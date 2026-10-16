@@ -210,7 +210,8 @@ fn parse_hls_manifest(content: &str, base_url: Option<&str>) -> HlsManifest {
 
         if line.starts_with("#EXT-X-STREAM-INF") {
             expects_variant = true;
-        } else if line.starts_with("#EXT-X-MEDIA:") || line.starts_with("#EXT-X-I-FRAME-STREAM-INF:")
+        } else if line.starts_with("#EXT-X-MEDIA:")
+            || line.starts_with("#EXT-X-I-FRAME-STREAM-INF:")
         {
             // Alternative renditions (audio, subtitles, i-frames) belong to the same stream.
             if let Some(uri) = quoted_attribute(line, "URI") {
@@ -235,7 +236,11 @@ fn parse_hls_manifest(content: &str, base_url: Option<&str>) -> HlsManifest {
     manifest
 }
 
-pub fn parse_m3u(content: &str, playlist_id: i64, base_url: Option<&str>) -> Result<ParsedPlaylist> {
+pub fn parse_m3u(
+    content: &str,
+    playlist_id: i64,
+    base_url: Option<&str>,
+) -> Result<ParsedPlaylist> {
     if is_hls_manifest(content) {
         return Ok(ParsedPlaylist::Hls(parse_hls_manifest(content, base_url)));
     }
@@ -283,34 +288,53 @@ pub fn parse_m3u(content: &str, playlist_id: i64, base_url: Option<&str>) -> Res
         } else {
             // Stream URL line, resolved against the playlist it came from when relative.
             let url = resolve_url(line, base_url).unwrap_or_else(|| line.to_string());
-            let (name, group_title, tvg_id, tvg_logo, language, is_live) = if let Some(ext) = current_extinf.take() {
-                let resolved_name = if ext.name.is_empty() {
-                    ext.attrs
-                        .get("tvg-name")
+            let (name, group_title, tvg_id, tvg_logo, language, is_live) =
+                if let Some(ext) = current_extinf.take() {
+                    let resolved_name = if ext.name.is_empty() {
+                        ext.attrs
+                            .get("tvg-name")
+                            .cloned()
+                            .unwrap_or_else(|| url.clone())
+                    } else {
+                        ext.name
+                    };
+                    let group = ext
+                        .attrs
+                        .get("group-title")
                         .cloned()
-                        .unwrap_or_else(|| url.clone())
+                        .or_else(|| current_extgrp.clone());
+                    let tid = ext.attrs.get("tvg-id").cloned();
+                    let tlogo = ext.attrs.get("tvg-logo").cloned();
+                    let tlang = ext
+                        .attrs
+                        .get("tvg-language")
+                        .cloned()
+                        .filter(|value| !value.trim().is_empty());
+                    (
+                        resolved_name,
+                        group,
+                        tid,
+                        tlogo,
+                        tlang,
+                        live_flag(ext.duration),
+                    )
                 } else {
-                    ext.name
+                    let fallback_name = url
+                        .split('/')
+                        .next_back()
+                        .and_then(|s| s.split('?').next())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(&url)
+                        .to_string();
+                    (
+                        fallback_name,
+                        current_extgrp.clone(),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
                 };
-                let group = ext
-                    .attrs
-                    .get("group-title")
-                    .cloned()
-                    .or_else(|| current_extgrp.clone());
-                let tid = ext.attrs.get("tvg-id").cloned();
-                let tlogo = ext.attrs.get("tvg-logo").cloned();
-                let tlang = ext.attrs.get("tvg-language").cloned().filter(|value| !value.trim().is_empty());
-                (resolved_name, group, tid, tlogo, tlang, live_flag(ext.duration))
-            } else {
-                let fallback_name = url
-                    .split('/')
-                    .next_back()
-                    .and_then(|s| s.split('?').next())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(&url)
-                    .to_string();
-                (fallback_name, current_extgrp.clone(), None, None, None, None)
-            };
 
             let extra_headers = if pending_headers.is_empty() {
                 None
@@ -375,8 +399,14 @@ https://stream.example.com/live/simple.m3u8
         );
         let hdrs: HashMap<String, String> =
             serde_json::from_str(channels[0].extra_headers.as_deref().unwrap()).unwrap();
-        assert_eq!(hdrs.get("User-Agent").map(String::as_str), Some("CustomAgent/1.0"));
-        assert_eq!(hdrs.get("Referer").map(String::as_str), Some("https://bbc.co.uk/"));
+        assert_eq!(
+            hdrs.get("User-Agent").map(String::as_str),
+            Some("CustomAgent/1.0")
+        );
+        assert_eq!(
+            hdrs.get("Referer").map(String::as_str),
+            Some("https://bbc.co.uk/")
+        );
 
         assert_eq!(channels[1].name, "Simple Channel");
         assert_eq!(channels[1].group_title.as_deref(), Some("Entertainment"));
@@ -428,7 +458,13 @@ high/index.m3u8
 #EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=100000,URI="iframe/index.m3u8"
 "#;
 
-        match parse_m3u(manifest, 1, Some("https://cdn.example.com/vod/title/master.m3u8")).unwrap() {
+        match parse_m3u(
+            manifest,
+            1,
+            Some("https://cdn.example.com/vod/title/master.m3u8"),
+        )
+        .unwrap()
+        {
             ParsedPlaylist::Hls(parsed) => {
                 assert!(parsed.is_master());
                 assert_eq!(
@@ -443,7 +479,10 @@ high/index.m3u8
                 assert!(parsed.segments.is_empty());
             }
             ParsedPlaylist::Channels(channels) => {
-                panic!("HLS master manifest imported as {} channels", channels.len())
+                panic!(
+                    "HLS master manifest imported as {} channels",
+                    channels.len()
+                )
             }
         }
     }
@@ -538,8 +577,14 @@ https://stream.example.com/two.m3u8
         let one = headers_of(&channels[0]);
         assert_eq!(one.len(), 2, "VLC-only options are not headers: {one:?}");
         assert_eq!(one.get("User-Agent").map(String::as_str), Some("Agent/2"));
-        assert_eq!(one.get("Origin").map(String::as_str), Some("https://origin.example"));
-        assert!(channels[1].extra_headers.is_none(), "a non-HTTP option leaves no headers at all");
+        assert_eq!(
+            one.get("Origin").map(String::as_str),
+            Some("https://origin.example")
+        );
+        assert!(
+            channels[1].extra_headers.is_none(),
+            "a non-HTTP option leaves no headers at all"
+        );
     }
 
     #[test]
@@ -551,7 +596,11 @@ https://stream.example.com/two.m3u8
 https://stream.example.com/one.m3u8
 ";
         let channels = channels_of(sample, None);
-        assert!(channels[0].extra_headers.is_none(), "{:?}", channels[0].extra_headers);
+        assert!(
+            channels[0].extra_headers.is_none(),
+            "{:?}",
+            channels[0].extra_headers
+        );
     }
 
     #[test]
@@ -568,7 +617,10 @@ https://stream.example.com/bare.m3u8
         let channels = channels_of(sample, None);
         assert_eq!(channels[0].is_live, Some(true));
         assert_eq!(channels[1].is_live, Some(false));
-        assert_eq!(channels[2].is_live, None, "0 is used for both, so it says nothing");
+        assert_eq!(
+            channels[2].is_live, None,
+            "0 is used for both, so it says nothing"
+        );
         assert_eq!(channels[3].is_live, None, "no #EXTINF at all");
     }
 }

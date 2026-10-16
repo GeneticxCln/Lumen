@@ -1,0 +1,13 @@
+{
+  "App.tsx": 65,
+  "components/ChannelList.tsx": 15,
+  "components/DiscoveryPage.tsx": 13,
+  "components/FacetBrowser.tsx": 15,
+  "components/LocalBrowser.tsx": 11,
+  "components/LocalDevicePage.tsx": 58,
+  "components/MediaShelf.tsx": 23,
+  "components/ProfileSettings.tsx": 40,
+  "components/SearchEnginePage.tsx": 35,
+  "components/SettingsPage.tsx": 92,
+  "components/SourceDialog.tsx": 23
+}

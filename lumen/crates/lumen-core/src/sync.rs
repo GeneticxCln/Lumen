@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{Pool, Row, Sqlite, SqliteConnection};
 use tokio::sync::Mutex;
@@ -164,7 +164,11 @@ pub async fn queue_profile(conn: &mut SqliteConnection, profile_id: i64) -> Resu
 }
 
 /// Queues a profile deletion so other devices remove it too.
-pub async fn queue_profile_deleted(conn: &mut SqliteConnection, sync_key: &str, now: i64) -> Result<()> {
+pub async fn queue_profile_deleted(
+    conn: &mut SqliteConnection,
+    sync_key: &str,
+    now: i64,
+) -> Result<()> {
     let item = SyncItem {
         kind: KIND_PROFILE.into(),
         key: sync_key.into(),
@@ -307,7 +311,11 @@ async fn apply_episode(conn: &mut SqliteConnection, item: &SyncItem) -> Result<(
     ) else {
         return Ok(());
     };
-    if series.trim().is_empty() || series.chars().count() > 200 || !(0..=500).contains(&season) || !(0..=10_000).contains(&episode) {
+    if series.trim().is_empty()
+        || series.chars().count() > 200
+        || !(0..=500).contains(&season)
+        || !(0..=10_000).contains(&episode)
+    {
         return Ok(());
     }
     let Some(profile_id) = profile_id_for_key(conn, profile_key).await? else {
@@ -357,7 +365,11 @@ async fn apply_profile(conn: &mut SqliteConnection, item: &SyncItem) -> Result<(
         return Ok(());
     }
 
-    let raw_name = item.payload.get("name").and_then(Value::as_str).unwrap_or_default();
+    let raw_name = item
+        .payload
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let Ok(name) = clean_profile_name(raw_name) else {
         return Ok(());
     };
@@ -388,14 +400,16 @@ async fn apply_profile(conn: &mut SqliteConnection, item: &SyncItem) -> Result<(
         }
         Some(row) => {
             if item.updated_at > row.get::<i64, _>("updated_at") {
-                sqlx::query("UPDATE profiles SET name = ?, color = ?, updated_at = ? WHERE sync_key = ?")
-                    .bind(&name)
-                    .bind(color)
-                    .bind(item.updated_at)
-                    .bind(&item.key)
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(sql_err)?;
+                sqlx::query(
+                    "UPDATE profiles SET name = ?, color = ?, updated_at = ? WHERE sync_key = ?",
+                )
+                .bind(&name)
+                .bind(color)
+                .bind(item.updated_at)
+                .bind(&item.key)
+                .execute(&mut *conn)
+                .await
+                .map_err(sql_err)?;
             }
         }
     }
@@ -515,10 +529,12 @@ async fn queue_all(pool: &Pool<Sqlite>) -> Result<()> {
         queue_profile(&mut tx, id).await?;
     }
 
-    let favorites = sqlx::query("SELECT profile_id, channel_url, content_key, active, updated_at FROM favorites")
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(sql_err)?;
+    let favorites = sqlx::query(
+        "SELECT profile_id, channel_url, content_key, active, updated_at FROM favorites",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(sql_err)?;
     for row in favorites {
         let profile_id: i64 = row.get("profile_id");
         let url: String = row.get("channel_url");
@@ -552,10 +568,12 @@ async fn queue_all(pool: &Pool<Sqlite>) -> Result<()> {
         .await?;
     }
 
-    let marks = sqlx::query("SELECT profile_id, series_key, season, episode, watched, updated_at FROM episode_state")
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(sql_err)?;
+    let marks = sqlx::query(
+        "SELECT profile_id, series_key, season, episode, watched, updated_at FROM episode_state",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(sql_err)?;
     for row in marks {
         queue_episode(
             &mut tx,
@@ -588,7 +606,11 @@ impl Remote {
             .timeout(HTTP_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        Ok(Self { client, origin: origin.trim_end_matches('/').to_string(), keys })
+        Ok(Self {
+            client,
+            origin: origin.trim_end_matches('/').to_string(),
+            keys,
+        })
     }
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
@@ -604,9 +626,12 @@ impl Remote {
     pub(crate) async fn register(&self, pow_bits: u32) -> Result<()> {
         let sync_id = self.keys.sync_id();
         let for_pow = sync_id.clone();
-        let nonce = tokio::task::spawn_blocking(move || crate::sync_crypto::solve_pow(&for_pow, pow_bits))
-            .await
-            .map_err(|error| PlayerError::Io(format!("Could not prepare the sync group: {error}")))?;
+        let nonce =
+            tokio::task::spawn_blocking(move || crate::sync_crypto::solve_pow(&for_pow, pow_bits))
+                .await
+                .map_err(|error| {
+                    PlayerError::Io(format!("Could not prepare the sync group: {error}"))
+                })?;
         let response = self
             .client
             .post(format!("{}/v1/groups", self.origin))
@@ -618,7 +643,11 @@ impl Remote {
 
     /// Whether this key has a group on the server, without creating one.
     pub(crate) async fn exists(&self) -> Result<bool> {
-        let response = self.request(reqwest::Method::GET, "/v1/items").query(&[("since", 0)]).send().await?;
+        let response = self
+            .request(reqwest::Method::GET, "/v1/items")
+            .query(&[("since", 0)])
+            .send()
+            .await?;
         if response.status().is_success() {
             return Ok(true);
         }
@@ -631,7 +660,10 @@ impl Remote {
 
     /// Deletes the group and everything in it from the server.
     pub(crate) async fn delete_group(&self) -> Result<()> {
-        let response = self.request(reqwest::Method::DELETE, "/v1/groups").send().await?;
+        let response = self
+            .request(reqwest::Method::DELETE, "/v1/groups")
+            .send()
+            .await?;
         match check(response).await {
             Ok(_) => Ok(()),
             // Already gone is the state the caller wanted.
@@ -644,11 +676,11 @@ impl Remote {
 /// The status and the server's `error` code of a failed response.
 async fn failure(response: reqwest::Response) -> (reqwest::StatusCode, Option<String>) {
     let status = response.status();
-    let code = response
-        .json::<Value>()
-        .await
-        .ok()
-        .and_then(|body| body.get("error").and_then(Value::as_str).map(str::to_string));
+    let code = response.json::<Value>().await.ok().and_then(|body| {
+        body.get("error")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
     (status, code)
 }
 
@@ -683,7 +715,10 @@ async fn check(response: reqwest::Response) -> Result<reqwest::Response> {
 }
 
 async fn push_batch(remote: &Remote, items: &[SyncItem]) -> Result<()> {
-    let sealed = items.iter().map(|item| remote.keys.seal(item)).collect::<Result<Vec<_>>>()?;
+    let sealed = items
+        .iter()
+        .map(|item| remote.keys.seal(item))
+        .collect::<Result<Vec<_>>>()?;
     let response = remote
         .request(reqwest::Method::POST, "/v1/items")
         .json(&json!({ "items": sealed }))
@@ -722,13 +757,15 @@ async fn push_pending(pool: &Pool<Sqlite>, remote: &Remote) -> Result<()> {
         // Remove only what was sent. A newer edit to the same record has a later updated_at and
         // stays queued.
         for item in &items {
-            sqlx::query("DELETE FROM sync_queue WHERE kind = ? AND item_key = ? AND updated_at = ?")
-                .bind(&item.kind)
-                .bind(&item.key)
-                .bind(item.updated_at)
-                .execute(pool)
-                .await
-                .map_err(sql_err)?;
+            sqlx::query(
+                "DELETE FROM sync_queue WHERE kind = ? AND item_key = ? AND updated_at = ?",
+            )
+            .bind(&item.kind)
+            .bind(&item.key)
+            .bind(item.updated_at)
+            .execute(pool)
+            .await
+            .map_err(sql_err)?;
         }
 
         if (rows.len() as i64) < PUSH_BATCH {
@@ -753,7 +790,10 @@ fn next_cursor(items: &[SealedItem]) -> Result<PullCursor> {
     let last = items
         .last()
         .ok_or_else(|| PlayerError::Io("Sync page reported more rows but returned none".into()))?;
-    Ok(PullCursor { since: last.updated_at, after: Some(last.id.clone()) })
+    Ok(PullCursor {
+        since: last.updated_at,
+        after: Some(last.id.clone()),
+    })
 }
 
 async fn pull_page(remote: &Remote, cursor: &PullCursor) -> Result<PullPage> {
@@ -777,7 +817,10 @@ async fn pull_remote(pool: &Pool<Sqlite>, remote: &Remote) -> Result<i64> {
     let mut newest = saved;
     let mut skipped = 0;
     // Never below zero: the server rejects a negative `since`, which a first sync would otherwise send.
-    let mut cursor = PullCursor { since: saved.saturating_sub(PULL_OVERLAP_MS).max(0), after: None };
+    let mut cursor = PullCursor {
+        since: saved.saturating_sub(PULL_OVERLAP_MS).max(0),
+        after: None,
+    };
 
     loop {
         let page = pull_page(remote, &cursor).await?;
@@ -816,12 +859,22 @@ pub async fn status(pool: &Pool<Sqlite>) -> Result<SyncStatus> {
         .await?
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
-    Ok(SyncStatus { pending, last_synced_at, skipped })
+    Ok(SyncStatus {
+        pending,
+        last_synced_at,
+        skipped,
+    })
 }
 
 /// Pushes queued changes, then pulls and applies remote ones. Does nothing while sync is off.
 pub async fn sync_now(pool: &Pool<Sqlite>) -> Result<SyncStatus> {
-    let Some(remote) = crate::sync_keys::remote(pool, &crate::sync_keys::KeyringStore).await? else {
+    use crate::sync_keys::{KeyringStore, RootStore};
+    // Without a usable keychain there cannot be a sync key, so there is nothing to sync and
+    // nothing worth reporting every few minutes. (Turning sync on reports the problem.)
+    if !matches!(KeyringStore.load(), Ok(Some(_))) {
+        return status(pool).await;
+    }
+    let Some(remote) = crate::sync_keys::remote(pool, &KeyringStore).await? else {
         return status(pool).await;
     };
     sync_with(pool, &remote).await
@@ -830,7 +883,11 @@ pub async fn sync_now(pool: &Pool<Sqlite>) -> Result<SyncStatus> {
 pub(crate) async fn sync_with(pool: &Pool<Sqlite>, remote: &Remote) -> Result<SyncStatus> {
     let _guard = SYNC_LOCK.lock().await;
 
-    if get_setting(pool, SEEDED_SETTING).await?.filter(|value| !value.is_empty()).is_none() {
+    if get_setting(pool, SEEDED_SETTING)
+        .await?
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
         queue_all(pool).await?;
         set_setting(pool, SEEDED_SETTING, "1").await?;
     }
@@ -910,7 +967,12 @@ mod cursor_tests {
     use super::*;
 
     fn item(id: &str, updated_at: i64) -> SealedItem {
-        SealedItem { id: id.into(), updated_at, deleted: false, blob: String::new() }
+        SealedItem {
+            id: id.into(),
+            updated_at,
+            deleted: false,
+            blob: String::new(),
+        }
     }
 
     #[test]
@@ -924,11 +986,26 @@ mod cursor_tests {
 
     #[test]
     fn progress_saves_start_a_sync_at_most_once_per_interval() {
-        assert!(progress_sync_due(0, PROGRESS_SYNC_INTERVAL_MS), "first save after startup");
-        assert!(!progress_sync_due(1_000_000, 1_000_000 + 5_000), "a save 5 s later waits");
-        assert!(!progress_sync_due(1_000_000, 1_000_000 + PROGRESS_SYNC_INTERVAL_MS - 1));
-        assert!(progress_sync_due(1_000_000, 1_000_000 + PROGRESS_SYNC_INTERVAL_MS));
-        assert!(progress_sync_due(2_000_000, 1_000_000), "a clock that moved backwards cannot wedge it");
+        assert!(
+            progress_sync_due(0, PROGRESS_SYNC_INTERVAL_MS),
+            "first save after startup"
+        );
+        assert!(
+            !progress_sync_due(1_000_000, 1_000_000 + 5_000),
+            "a save 5 s later waits"
+        );
+        assert!(!progress_sync_due(
+            1_000_000,
+            1_000_000 + PROGRESS_SYNC_INTERVAL_MS - 1
+        ));
+        assert!(progress_sync_due(
+            1_000_000,
+            1_000_000 + PROGRESS_SYNC_INTERVAL_MS
+        ));
+        assert!(
+            progress_sync_due(2_000_000, 1_000_000),
+            "a clock that moved backwards cannot wedge it"
+        );
     }
 
     #[test]

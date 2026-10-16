@@ -26,6 +26,7 @@ import type {
 } from "./types";
 import type { PosterCandidate } from "./types";
 import type { EpisodeMark, UpcomingSeries } from "./series";
+import type { OpenTarget } from "./launch";
 
 export type {
   Channel,
@@ -113,6 +114,22 @@ export async function setPlayerTrack(kind: PlayerTrackKind, id: string) {
 
 export async function setPlayerQuality(id: string) {
   return callBackend("set_player_quality", { id });
+}
+
+export interface EmbeddedSupport {
+  supported: boolean;
+  /** Why not, in words for the settings page. */
+  reason: string | null;
+}
+
+/** Whether video can play inside the window (X11 only for now). */
+export async function embeddedPlayerSupport() {
+  return callBackend<EmbeddedSupport>("embedded_player_support");
+}
+
+/** Gives the embedded video `height` pixels above the page, or hides it. Returns whether it is showing in the window. */
+export async function setEmbeddedVideo(visible: boolean, height: number) {
+  return callBackend<boolean>("set_embedded_video", { visible, height });
 }
 
 export async function getPlayerPrefs() {
@@ -237,6 +254,16 @@ export async function setProfilePin(profileId: number, pin?: string, currentPin?
  */
 export async function activateProfile(profileId: number, pin?: string) {
   return callBackend<Profile>("activate_profile_cmd", { profileId, pin: pin ? pin : null });
+}
+
+/** Things the app was asked to open before the page was ready. Call once, when listening for `launch://open`. */
+export async function takeLaunchTargets() {
+  return callBackend<OpenTarget[]>("take_launch_targets");
+}
+
+/** Sorts dropped paths into media, playlists and subtitles (same rules as a launch). */
+export async function classifyOpenTargets(paths: string[]) {
+  return callBackend<OpenTarget[]>("classify_open_targets", { paths });
 }
 
 /** Watched marks the active profile set by hand. */

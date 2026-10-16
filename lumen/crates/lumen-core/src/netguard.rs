@@ -100,7 +100,9 @@ fn host_error(url: &Url, reason: &str) -> PlayerError {
 /// IP literals. Hostnames are checked again at connect time by `PublicOnlyResolver`.
 pub fn check_url(url: &Url, allow_lan: bool) -> Result<()> {
     if !matches!(url.scheme(), "http" | "https") {
-        return Err(PlayerError::InvalidArg("Only http:// and https:// addresses are supported".into()));
+        return Err(PlayerError::InvalidArg(
+            "Only http:// and https:// addresses are supported".into(),
+        ));
     }
     match url.host() {
         None => Err(PlayerError::InvalidArg("The address has no host".into())),
@@ -122,12 +124,16 @@ pub fn check_url(url: &Url, allow_lan: bool) -> Result<()> {
 
 fn is_local_name(name: &str) -> bool {
     let name = name.trim_end_matches('.').to_ascii_lowercase();
-    name == "localhost" || name.ends_with(".localhost") || name.ends_with(".local") || name.ends_with(".internal")
+    name == "localhost"
+        || name.ends_with(".localhost")
+        || name.ends_with(".local")
+        || name.ends_with(".internal")
 }
 
 /// Parses and checks a user-supplied URL.
 pub fn validate_url(raw: &str, allow_lan: bool) -> Result<Url> {
-    let url = Url::parse(raw.trim()).map_err(|_| PlayerError::InvalidArg("That is not a valid web address".into()))?;
+    let url = Url::parse(raw.trim())
+        .map_err(|_| PlayerError::InvalidArg("That is not a valid web address".into()))?;
     check_url(&url, allow_lan)?;
     Ok(url)
 }
@@ -163,7 +169,8 @@ impl Resolve for PublicOnlyResolver {
         let allow_lan = self.allow_lan;
         Box::pin(async move {
             let host = name.as_str().to_string();
-            let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            let resolved: Vec<SocketAddr> =
+                tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
             let allowed: Vec<SocketAddr> = resolved
                 .into_iter()
                 .filter(|addr| is_allowed_ip(addr.ip(), allow_lan))
@@ -199,28 +206,74 @@ mod tests {
             assert!(is_allowed_ip(ip(public), false), "{public} is public");
         }
         for private in [
-            "127.0.0.1", "10.1.2.3", "172.16.0.9", "192.168.1.20", "169.254.1.1", "100.64.0.1",
-            "0.0.0.0", "224.0.0.1", "255.255.255.255", "198.18.0.5", "::1", "fe80::1", "fc00::1", "fd12::1",
-            "::", "ff02::1", "2001:db8::1",
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.9",
+            "192.168.1.20",
+            "169.254.1.1",
+            "100.64.0.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "198.18.0.5",
+            "::1",
+            "fe80::1",
+            "fc00::1",
+            "fd12::1",
+            "::",
+            "ff02::1",
+            "2001:db8::1",
         ] {
-            assert!(!is_allowed_ip(ip(private), false), "{private} must be refused");
+            assert!(
+                !is_allowed_ip(ip(private), false),
+                "{private} must be refused"
+            );
         }
     }
 
     #[test]
     fn addresses_embedded_in_ipv6_cannot_smuggle_a_private_ipv4() {
-        assert!(!is_allowed_ip(ip("::ffff:127.0.0.1"), false), "IPv4-mapped loopback");
-        assert!(!is_allowed_ip(ip("::ffff:10.0.0.1"), false), "IPv4-mapped private");
-        assert!(!is_allowed_ip(ip("64:ff9b::7f00:1"), false), "NAT64 loopback");
-        assert!(is_allowed_ip(ip("::ffff:8.8.8.8"), false), "IPv4-mapped public is fine");
+        assert!(
+            !is_allowed_ip(ip("::ffff:127.0.0.1"), false),
+            "IPv4-mapped loopback"
+        );
+        assert!(
+            !is_allowed_ip(ip("::ffff:10.0.0.1"), false),
+            "IPv4-mapped private"
+        );
+        assert!(
+            !is_allowed_ip(ip("64:ff9b::7f00:1"), false),
+            "NAT64 loopback"
+        );
+        assert!(
+            is_allowed_ip(ip("::ffff:8.8.8.8"), false),
+            "IPv4-mapped public is fine"
+        );
     }
 
     #[test]
     fn lan_mode_opens_private_ranges_but_never_the_dangerous_ones() {
-        for lan in ["127.0.0.1", "192.168.1.20", "10.0.0.2", "::1", "fd12::1", "::ffff:192.168.0.5"] {
-            assert!(is_allowed_ip(ip(lan), true), "{lan} allowed on a local network");
+        for lan in [
+            "127.0.0.1",
+            "192.168.1.20",
+            "10.0.0.2",
+            "::1",
+            "fd12::1",
+            "::ffff:192.168.0.5",
+        ] {
+            assert!(
+                is_allowed_ip(ip(lan), true),
+                "{lan} allowed on a local network"
+            );
         }
-        for never in ["0.0.0.0", "224.0.0.1", "255.255.255.255", "169.254.169.254", "::", "ff02::1"] {
+        for never in [
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "169.254.169.254",
+            "::",
+            "ff02::1",
+        ] {
             assert!(!is_allowed_ip(ip(never), true), "{never} stays blocked");
         }
     }
@@ -228,7 +281,10 @@ mod tests {
     #[test]
     fn urls_are_checked_for_scheme_and_literal_hosts() {
         assert!(validate_url("https://example.com/list.m3u", false).is_ok());
-        assert!(validate_url("  https://example.com/list.m3u  ", false).is_ok(), "surrounding spaces are fine");
+        assert!(
+            validate_url("  https://example.com/list.m3u  ", false).is_ok(),
+            "surrounding spaces are fine"
+        );
         for bad in [
             "file:///etc/passwd",
             "ftp://example.com/x",
@@ -242,9 +298,18 @@ mod tests {
         ] {
             assert!(validate_url(bad, false).is_err(), "{bad} must be refused");
         }
-        assert!(validate_url("http://192.168.1.5/list.m3u", true).is_ok(), "LAN mode");
-        assert!(validate_url("http://localhost:8096/list.m3u", true).is_ok(), "LAN mode");
-        assert!(validate_url("http://169.254.169.254/x", true).is_err(), "metadata stays blocked");
+        assert!(
+            validate_url("http://192.168.1.5/list.m3u", true).is_ok(),
+            "LAN mode"
+        );
+        assert!(
+            validate_url("http://localhost:8096/list.m3u", true).is_ok(),
+            "LAN mode"
+        );
+        assert!(
+            validate_url("http://169.254.169.254/x", true).is_err(),
+            "metadata stays blocked"
+        );
     }
 
     #[test]
@@ -261,10 +326,16 @@ mod tests {
         // is what stops a public-looking name that answers with a private address.
         let resolver = PublicOnlyResolver { allow_lan: false };
         let looked_up = resolver.resolve("localhost".parse().unwrap()).await;
-        assert!(looked_up.is_err(), "localhost resolves only to loopback, so nothing is left");
+        assert!(
+            looked_up.is_err(),
+            "localhost resolves only to loopback, so nothing is left"
+        );
 
         let lan = PublicOnlyResolver { allow_lan: true };
-        let mut addrs = lan.resolve("localhost".parse().unwrap()).await.expect("allowed in LAN mode");
+        let mut addrs = lan
+            .resolve("localhost".parse().unwrap())
+            .await
+            .expect("allowed in LAN mode");
         assert!(addrs.next().is_some());
     }
 }

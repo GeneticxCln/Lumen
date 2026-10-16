@@ -15,6 +15,20 @@ A Linux-first media library and player built with Tauri v2, React 19, TypeScript
 - Playback, appearance, source management, and keyboard preferences.
 - Native mpv playback on desktop.
 
+## Linux integration
+
+- **Open with Lumen.** The `.deb` declares the common video, audio and playlist types, so Lumen appears in "Open with". Video and audio files play, `.m3u`/`.m3u8` files are added as sources, and a subtitle file is added to what is playing.
+- **One window, one instance.** Opening something while Lumen is running hands it to the running window (and brings it forward) instead of starting a second copy.
+- **Links.** `lumen://play?url=https://…` plays a public web address. Because any web page can trigger such a link, Lumen always asks before playing it, and addresses on your local network are never opened this way.
+- **Drag and drop.** Drop video, audio, playlist or subtitle files on the window.
+- **Media keys.** Lumen registers with MPRIS, so media keys, the GNOME/KDE media widget and `playerctl` can see what is playing and play, pause, seek, change the volume and stop it.
+- **Package.** The `.deb` depends on `mpv` and recommends `ffmpeg` (used for thumbnails).
+- The OS keychain (used for the sync key and API keys) is the Secret Service on Linux; a bare window-manager session needs GNOME Keyring or KWallet running.
+
+### Playing inside the window (experimental)
+
+By default video plays in a separate mpv window. **Settings → Playback → Play video inside the Lumen window** puts the video in the main window instead, above the controls. It is off by default and needs an X11 window: it works when Lumen runs on X11 or XWayland (`GDK_BACKEND=x11 lumen`), and is unavailable (with an explanation in Settings) in a native Wayland window, which cannot host another program's video. Controls are shown beside the video, not drawn over it. Fullscreen in this mode makes the whole window fullscreen and has only been exercised under a virtual display.
+
 ## Sync
 
 Sync is optional and there are no accounts. The library, files, and playback all work without it.
@@ -56,6 +70,18 @@ A server can also refuse to answer, drop records, or serve an older valid copy o
 The server is a small Cloudflare Worker with a D1 database in `sync-server/`. Deploy it with `npx wrangler d1 create lumen-sync`, put the database id in `sync-server/wrangler.jsonc`, and run `npx wrangler deploy`. Enter its address in **Settings → Profiles & sync → Sync server**, or build Lumen with `LUMEN_SYNC_URL=https://your-server` to make it the default.
 
 No Netflix catalog, paid-channel access, DRM bypass, or external recommendation service is included. Artwork fallbacks are original local SVGs. Movie/series/live sections use playlist naming/group heuristics.
+
+## Packages
+
+`npx tauri build --bundles deb,appimage` (from `lumen/`, with the Tauri system libraries installed) produces a `.deb` and an AppImage in `target/release/bundle/`. Lumen starts `mpv` from the `PATH` rather than bundling it, so the `.deb` depends on `mpv` and an AppImage needs `mpv` installed on the host. `ffmpeg` is recommended for thumbnails, and `yt-dlp` is downloaded and verified by Lumen itself (Settings → Metadata → Update extractor).
+
+Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds both packages and attaches them, with a `SHA256SUMS` file, to a **draft** GitHub release. Set the repository variable `LUMEN_SYNC_URL` to bake in a default sync server. Both package types have been built and inspected here (desktop entry, file types, `lumen://` handler, dependencies); neither has been installed on a clean machine, and the release workflow itself has not been run. There is no Flatpak, AUR or signed auto-update yet.
+
+## Translating Lumen
+
+Interface text lives in one catalog, `src/i18n/en.ts`, and screens show it with `t("key")` (`tn("key", count)` for plurals, `{name}` for values, `<code>…</code>` markup through `<Rich>`). A wrong key or a missing value is a type error. To add a language, create a `Catalog` for it (the type lists every key) and register it with `addLocale("de", catalog)`; `setLocale("de")` selects it, `de-AT` falls back to `de`, and anything unknown falls back to English. Nothing chooses a language automatically yet, and only English exists.
+
+Only some screens are migrated: the player and its controls, profile unlock, episode lists, sync, audio and subtitle preferences, and the two switches in Settings. `npm test` runs a gate (`src/i18n/gate.test.ts`) that fails if a component gains hard-coded text, and the remaining screens are listed with their counts in `src/i18n/baseline.json`. After migrating a screen, `npm run i18n:baseline` records the lower count; the gate fails if the baseline is out of date, so it can only go down. The gate sees JSX text and text attributes (`aria-label`, `title`, `placeholder`, `alt`, `label`). Messages that code builds elsewhere (notices, error text, language names in `lib/languages.ts`) are not checked.
 
 ## Development
 

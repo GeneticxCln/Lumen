@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Icon } from "./Icon";
 import "./PlayerOverlay.css";
+import { t } from "../i18n/index.ts";
 
 const CONTROLS_IDLE_MS = 2500;
 // Long enough to tell a double-click from two single clicks, short enough to feel immediate.
@@ -21,6 +22,8 @@ interface PlayerOverlayProps {
   onNextEpisode?: () => void;
   /** True while the stream is loading or refilling. The spinner ignores the idle state, so it stays visible after the controls fade. */
   buffering: boolean;
+  /** Keep the controls on screen. Used when the video sits above the page rather than behind the controls. */
+  controlsAlwaysVisible?: boolean;
   controls: ReactNode;
   children: ReactNode;
 }
@@ -35,6 +38,7 @@ export function PlayerOverlay({
   nextEpisodeTitle,
   onNextEpisode,
   buffering,
+  controlsAlwaysVisible = false,
   controls,
   children,
 }: PlayerOverlayProps) {
@@ -63,12 +67,12 @@ export function PlayerOverlay({
   }, [wake]);
 
   // Controls stay visible while paused, as they do in streaming apps.
-  const showControls = controlsAwake || paused;
+  const showControls = controlsAwake || paused || controlsAlwaysVisible;
 
   return (
     <section
       className={`player-overlay${hidden ? " is-hidden" : ""}${showControls ? "" : " controls-idle"}`}
-      aria-label="Video player"
+      aria-label={t("player.region")}
     >
       <div
         className="player-stage"
@@ -87,16 +91,16 @@ export function PlayerOverlay({
       </div>
 
       {buffering && (
-        <div className="player-buffering" role="status" aria-label="Buffering">
+        <div className="player-buffering" role="status" aria-label={t("player.bufferingLabel")}>
           <span className="player-spinner" aria-hidden="true" />
-          <p className="player-buffering-label">Buffering…</p>
+          <p className="player-buffering-label">{t("player.buffering")}</p>
         </div>
       )}
 
       <header className="player-topbar">
-        <button type="button" className="player-back" onClick={onBack} aria-label="Back to browsing">
+        <button type="button" className="player-back" onClick={onBack} aria-label={t("player.backToBrowsing")}>
           <Icon name="arrow" size={22} />
-          <span>Back</span>
+          <span>{t("player.back")}</span>
         </button>
         <h2 className="player-title">{title}</h2>
         {onNextEpisode && (
@@ -104,9 +108,9 @@ export function PlayerOverlay({
             type="button"
             className="player-next"
             onClick={onNextEpisode}
-            title={nextEpisodeTitle ? `Next: ${nextEpisodeTitle}` : undefined}
+            title={nextEpisodeTitle ? t("player.nextEpisodeTitle", { title: nextEpisodeTitle }) : undefined}
           >
-            <span>Next episode</span>
+            <span>{t("player.nextEpisode")}</span>
             <Icon name="chevron" size={18} />
           </button>
         )}
