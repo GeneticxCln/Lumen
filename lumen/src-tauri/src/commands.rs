@@ -31,6 +31,9 @@ use tokio::sync::Mutex;
 type SharedBackend = Arc<dyn PlaybackBackend>;
 type BackendCell = Arc<Mutex<Option<SharedBackend>>>;
 static PLAYBACK_BACKEND: OnceLock<BackendCell> = OnceLock::new();
+/// Counts started plays, so a subtitle that is still being fetched for one file is dropped if
+/// another file has been started since.
+static PLAY_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub async fn get_playback_backend() -> Result<BackendCell> {
     let backend = PLAYBACK_BACKEND.get_or_init(|| Arc::new(Mutex::new(None)));
@@ -133,6 +136,7 @@ async fn play_url_inner(
     // and resume identity stays the entry's own URL, which does not change between plays.
     let mut headers = headers;
     let mut audio_url = audio_url;
+    let mut site_subtitles: Vec<extract::ExtractedSubtitle> = Vec::new();
     let mut load_url = url.clone();
     if let Some(page) = match channel_id {
         Some(id) => extract_origin_for_channel(pool, id).await?,
@@ -143,6 +147,7 @@ async fn play_url_inner(
             extract::resolve_stream(&page, app.path().app_data_dir().ok(), allow_lan).await?;
         load_url = resolved.url;
         audio_url = resolved.audio_url;
+        site_subtitles = resolved.subtitles;
         headers = Some(serde_json::to_value(resolved.headers)?);
     }
 
@@ -174,6 +179,22 @@ async fn play_url_inner(
     {
         let _ = backend.seek(resume_pos).await;
     }
+
+    // A subtitle the user picked for this title before, or one the site offers in their language.
+    // It is fetched in the background: playback never waits for it.
+    let generation = PLAY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    spawn_subtitle_autoload(
+        app.clone(),
+        backend.clone(),
+        lumen_core::subtitles::service::PlayingItem {
+            channel_id,
+            source: url.clone(),
+            name: None,
+        },
+        prefs.subtitles.clone(),
+        site_subtitles,
+        generation,
+    );
 
     // Record history entry for the active profile
     let _ = add_history(pool, profile_id, channel_id, &url, 0.0, 0.0).await;
@@ -276,6 +297,158 @@ pub async fn set_subtitle_delay_cmd(seconds: f64) -> Result<f64> {
 #[tauri::command]
 pub async fn add_subtitle_file_cmd(path: String) -> Result<()> {
     current_backend().await?.add_subtitle_file(&path).await
+}
+
+/// Adds the stored subtitle for the item that started as `generation`, retrying briefly because
+/// mpv only accepts a subtitle once the file has opened. Drops it if another file was started.
+async fn add_when_ready(backend: &SharedBackend, path: &Path, generation: u64) {
+    for _ in 0..20 {
+        if PLAY_GENERATION.load(std::sync::atomic::Ordering::SeqCst) != generation {
+            return;
+        }
+        if backend
+            .add_subtitle_file(&path.to_string_lossy())
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+fn spawn_subtitle_autoload(
+    app: AppHandle,
+    backend: SharedBackend,
+    item: lumen_core::subtitles::service::PlayingItem,
+    preference: String,
+    site_tracks: Vec<extract::ExtractedSubtitle>,
+    generation: u64,
+) {
+    if preference == "off" {
+        return;
+    }
+    tokio::spawn(async move {
+        use lumen_core::subtitles::{extractor, service};
+        let Ok(pool) = ensure_db(&app).await else {
+            return;
+        };
+        let wanted: Vec<String> = if preference == "auto" {
+            Vec::new()
+        } else {
+            vec![preference]
+        };
+        let Ok(key) = service::content_key_for(pool, &item).await else {
+            return;
+        };
+        let mut path = service::chosen(pool, &key, &wanted).await.ok().flatten();
+        if path.is_none()
+            && !wanted.is_empty()
+            && let Some(track) = extractor::pick(&site_tracks, &wanted)
+            && let Ok(app_dir) = app.path().app_data_dir()
+        {
+            let allow_lan = allow_lan_sources(pool).await;
+            path = extractor::fetch_and_store(pool, &app_dir, &key, track, allow_lan)
+                .await
+                .ok();
+        }
+        if let Some(path) = path {
+            add_when_ready(&backend, &path, generation).await;
+        }
+    });
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleServiceState {
+    id: &'static str,
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleState {
+    /// The user has agreed to look subtitles up on the internet.
+    online: bool,
+    services: Vec<SubtitleServiceState>,
+}
+
+/// Whether online subtitle search is on, and which services are switched on.
+#[tauri::command]
+pub async fn subtitles_state_cmd(app: AppHandle) -> Result<SubtitleState> {
+    use lumen_core::subtitles::{gestdown, mirror, service};
+    let pool = ensure_db(&app).await?;
+    let mut services = Vec::new();
+    for id in [mirror::ID, gestdown::ID] {
+        let enabled = get_setting(pool, &service::provider_setting(id))
+            .await?
+            .as_deref()
+            != Some("false");
+        services.push(SubtitleServiceState { id, enabled });
+    }
+    Ok(SubtitleState {
+        online: service::online_enabled(pool).await?,
+        services,
+    })
+}
+
+/// Turns online subtitle search on or off. The page asks first and says what is sent.
+#[tauri::command]
+pub async fn subtitles_set_online_cmd(on: bool, app: AppHandle) -> Result<()> {
+    let pool = ensure_db(&app).await?;
+    lumen_core::subtitles::service::set_online(pool, on).await
+}
+
+/// Switches one subtitle service on or off.
+#[tauri::command]
+pub async fn subtitles_set_service_cmd(id: String, enabled: bool, app: AppHandle) -> Result<()> {
+    use lumen_core::subtitles::{gestdown, mirror, service};
+    if id != mirror::ID && id != gestdown::ID {
+        return Err(PlayerError::InvalidArg(
+            "That is not a subtitle service".into(),
+        ));
+    }
+    let pool = ensure_db(&app).await?;
+    set_setting(
+        pool,
+        &service::provider_setting(&id),
+        if enabled { "true" } else { "false" },
+    )
+    .await
+}
+
+/// Looks for subtitles for what is playing, in the given languages (best first). Only runs when
+/// the user has turned online search on.
+#[tauri::command]
+pub async fn subtitles_search_cmd(
+    item: lumen_core::subtitles::service::PlayingItem,
+    languages: Vec<String>,
+    app: AppHandle,
+) -> Result<lumen_core::subtitles::SearchOutcome> {
+    let pool = ensure_db(&app).await?;
+    let allow_lan = allow_lan_sources(pool).await;
+    lumen_core::subtitles::service::search(pool, &item, &languages, allow_lan).await
+}
+
+/// Downloads the subtitle the user picked, stores it, remembers it for the title and shows it.
+#[tauri::command]
+pub async fn subtitles_apply_cmd(
+    item: lumen_core::subtitles::service::PlayingItem,
+    candidate: lumen_core::subtitles::SubtitleCandidate,
+    app: AppHandle,
+) -> Result<()> {
+    let pool = ensure_db(&app).await?;
+    let allow_lan = allow_lan_sources(pool).await;
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| PlayerError::Io(e.to_string()))?;
+    let path =
+        lumen_core::subtitles::service::apply(pool, &app_dir, &item, &candidate, allow_lan).await?;
+    current_backend()
+        .await?
+        .add_subtitle_file(&path.to_string_lossy())
+        .await
 }
 
 #[tauri::command]
@@ -2144,6 +2317,9 @@ mod setting_allowlist_tests {
             "sync_last_synced_at",
             "search_providers",
             "tmdb_api_key",
+            // Online subtitle search is switched only through its own command, after the notice.
+            "subtitle_online",
+            "subtitle_provider_gestdown",
             "",
         ] {
             assert!(

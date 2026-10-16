@@ -35,6 +35,62 @@ pub struct ExtractResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_url: Option<String>,
     pub headers: HashMap<String, String>,
+    /// Subtitles the site itself offers, in formats the player reads. Manual tracks come first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subtitles: Vec<ExtractedSubtitle>,
+}
+
+/// One subtitle track from the extractor's `subtitles` or `automatic_captions` list.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExtractedSubtitle {
+    /// The site's language key (`en`, `en-US`, `pt-BR`).
+    pub language: String,
+    /// `srt`, `vtt`, `ass` or `ssa`.
+    pub ext: String,
+    pub url: String,
+    /// Machine-made captions rather than a person's subtitles.
+    pub automatic: bool,
+}
+
+/// Formats the player reads; the site's other caption formats (`json3`, `srv1`, `ttml`) are skipped.
+const READABLE_SUBTITLE_FORMATS: [&str; 4] = ["srt", "vtt", "ass", "ssa"];
+const MAX_SUBTITLE_TRACKS: usize = 40;
+
+/// The subtitle tracks in an extractor info object: for each language the first entry in a
+/// readable format, from a public address. A track that cannot be used is left out.
+fn extract_subtitles(info: &serde_json::Value, allow_lan: bool) -> Vec<ExtractedSubtitle> {
+    let mut found = Vec::new();
+    for (field, automatic) in [("subtitles", false), ("automatic_captions", true)] {
+        let Some(languages) = info.get(field).and_then(|value| value.as_object()) else {
+            continue;
+        };
+        for (language, formats) in languages {
+            let Some(formats) = formats.as_array() else {
+                continue;
+            };
+            let usable = formats.iter().find_map(|format| {
+                let ext = format.get("ext")?.as_str()?.to_ascii_lowercase();
+                let url = format.get("url")?.as_str()?;
+                if !READABLE_SUBTITLE_FORMATS.contains(&ext.as_str()) {
+                    return None;
+                }
+                netguard::validate_url(url, allow_lan).ok()?;
+                Some((ext, url.to_string()))
+            });
+            if let Some((ext, url)) = usable {
+                found.push(ExtractedSubtitle {
+                    language: language.clone(),
+                    ext,
+                    url,
+                    automatic,
+                });
+            }
+            if found.len() >= MAX_SUBTITLE_TRACKS {
+                return found;
+            }
+        }
+    }
+    found
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -581,11 +637,14 @@ pub fn parse_ytdlp_json(
         netguard::validate_url(aud, allow_lan)?;
     }
 
+    let subtitles = extract_subtitles(info, allow_lan);
+
     Ok(ExtractResponse {
         title,
         url: primary_url,
         audio_url,
         headers,
+        subtitles,
     })
 }
 
@@ -780,6 +839,34 @@ mod tests {
     }
 
     #[test]
+    fn site_subtitles_keep_readable_formats_from_public_addresses() {
+        let info = serde_json::json!({
+            "subtitles": {
+                "en": [
+                    {"ext": "json3", "url": "https://cdn.example/en.json3"},
+                    {"ext": "vtt", "url": "https://cdn.example/en.vtt"},
+                    {"ext": "srt", "url": "https://cdn.example/en.srt"}
+                ],
+                "de": [{"ext": "ttml", "url": "https://cdn.example/de.ttml"}],
+                "fr": [{"ext": "srt", "url": "http://127.0.0.1/fr.srt"}]
+            },
+            "automatic_captions": {
+                "pt-BR": [{"ext": "vtt", "url": "https://cdn.example/pt.vtt"}]
+            }
+        });
+        let found = extract_subtitles(&info, false);
+        let summary: Vec<(&str, &str, bool)> = found
+            .iter()
+            .map(|track| (track.language.as_str(), track.ext.as_str(), track.automatic))
+            .collect();
+        assert_eq!(summary, [("en", "vtt", false), ("pt-BR", "vtt", true)]);
+        // On a local network the user allowed, the loopback one is acceptable too.
+        assert_eq!(extract_subtitles(&info, true).len(), 3);
+        assert!(extract_subtitles(&serde_json::json!({"title": "x"}), false).is_empty());
+        assert!(extract_subtitles(&serde_json::json!({"subtitles": [1, 2]}), false).is_empty());
+    }
+
+    #[test]
     fn resolved_links_are_reused_briefly_and_then_dropped() {
         let mut cache = ResolveCache::default();
         let start = std::time::Instant::now();
@@ -788,6 +875,7 @@ mod tests {
             url: "https://cdn.example/v.mp4?sig=abc".into(),
             audio_url: None,
             headers: HashMap::new(),
+            subtitles: Vec::new(),
         };
         assert!(cache.get("https://page.example/watch", start).is_none());
         cache.put("https://page.example/watch", response.clone(), start);
@@ -816,6 +904,7 @@ mod tests {
             url: "https://cdn.example/v".into(),
             audio_url: None,
             headers: HashMap::new(),
+            subtitles: Vec::new(),
         };
         for index in 0..(RESOLVE_CACHE_MAX + 10) {
             cache.put(
