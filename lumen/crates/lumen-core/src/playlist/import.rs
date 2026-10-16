@@ -143,11 +143,9 @@ pub async fn read_capped_body(mut response: reqwest::Response, limit: usize) -> 
 /// Fetches and parses a playlist. The address is checked before the request, at every redirect
 /// and when the name resolves (see `netguard`); `allow_lan` is the user's opt-in for sources on
 /// their own network.
-pub async fn import_m3u_url(
-    url: &str,
-    name: Option<String>,
-    allow_lan: bool,
-) -> Result<(Playlist, Vec<Channel>)> {
+/// Downloads the text of a playlist address through the network guard (public addresses only
+/// unless `allow_lan`, every redirect checked) with the size limit applied.
+pub async fn fetch_playlist_text(url: &str, allow_lan: bool) -> Result<String> {
     let target = crate::netguard::validate_url(url, allow_lan)?;
 
     let client = crate::netguard::guarded_client(allow_lan)
@@ -169,7 +167,15 @@ pub async fn import_m3u_url(
         )));
     }
 
-    let content = read_capped_body(response, MAX_PLAYLIST_BYTES).await?;
+    read_capped_body(response, MAX_PLAYLIST_BYTES).await
+}
+
+pub async fn import_m3u_url(
+    url: &str,
+    name: Option<String>,
+    allow_lan: bool,
+) -> Result<(Playlist, Vec<Channel>)> {
+    let content = fetch_playlist_text(url, allow_lan).await?;
 
     let url_owned = url.to_string();
     let name_owned = name.clone();

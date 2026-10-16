@@ -6,6 +6,7 @@ import {
   harvestPage,
   errorText,
 } from "../lib/tauri";
+import { BulkLinks } from "./BulkLinks";
 import { LocalBrowser } from "./LocalBrowser";
 import { Modal } from "./Modal";
 import { t } from "../i18n/index.ts";
@@ -37,7 +38,7 @@ export function SourceDialog({
   onSourceAdded,
   onPlayFile,
 }: SourceDialogProps) {
-  const [tab, setTab] = useState<"file" | "url" | "extract" | "catalog" | "local">("url");
+  const [tab, setTab] = useState<"file" | "url" | "bulk" | "extract" | "catalog" | "local">("url");
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -149,6 +150,12 @@ export function SourceDialog({
             {t("source.tab.url")}
           </button>
           <button
+            className={tab === "bulk" ? "active" : ""}
+            onClick={() => setTab("bulk")}
+          >
+            {t("bulk.tab")}
+          </button>
+          <button
             className={tab === "extract" ? "active" : ""}
             onClick={() => setTab("extract")}
           >
@@ -193,6 +200,8 @@ export function SourceDialog({
             </button>
           </div>
         )}
+
+        {tab === "bulk" && <BulkLinks onAdded={onSourceAdded} onError={setError} />}
 
         {tab === "extract" && (
           <div className="dialog-content">

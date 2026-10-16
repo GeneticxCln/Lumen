@@ -30,6 +30,9 @@ import type {
   CastDevice,
   CastState,
   UpdateAvailable,
+  FoundLinks,
+  LinkCheck,
+  BulkAdded,
   UpdateMode,
   UpdateState,
 } from "./types";
@@ -537,6 +540,34 @@ export async function browseTmdb() {
 
 export async function clearTmdbEnrichment() {
   return callBackend<{ cleared: number }>("tmdb_clear_enrichment");
+}
+
+/** The links in a text file, without the ones that are already sources. */
+export async function bulkReadFile(path: string) {
+  return callBackend<FoundLinks>("bulk_read_file_cmd", { path });
+}
+
+/** The links in pasted text. */
+export async function bulkExtractText(text: string) {
+  return callBackend<FoundLinks>("bulk_extract_text_cmd", { text });
+}
+
+/** Tests the links; each result arrives through `onBulkResult`. Resolves with how many were tested. */
+export async function bulkCheck(urls: string[]) {
+  return callBackend<number>("bulk_check_cmd", { urls });
+}
+
+export async function bulkCancel() {
+  return callBackend("bulk_cancel_cmd");
+}
+
+/** Adds each link as its own source. */
+export async function bulkAdd(urls: string[]) {
+  return callBackend<BulkAdded>("bulk_add_cmd", { urls });
+}
+
+export function onBulkResult(callback: (check: LinkCheck) => void) {
+  return listen<LinkCheck>("bulk://result", (event: Event<LinkCheck>) => callback(event.payload));
 }
 
 // Player state events

@@ -1,6 +1,6 @@
 [package]
 name = "lumen"
-version = "0.1.1"
+version = "0.1.2"
 description = "A Linux-first media library and player powered by Tauri, Rust, and mpv"
 authors = ["Lumen Contributors"]
 edition = "2024"

@@ -46,6 +46,10 @@ Build status: the `.deb` and AppImage have been built and inspected, but none of
 - **"mpv stopped before it was ready" / "did not open its control socket".** The message now includes the last lines mpv printed. Run `LUMEN_DEBUG_MPV=1 lumen` (or `LUMEN_DEBUG_MPV=1 ./lumen_*.AppImage`) to see everything mpv says. Check that `mpv` runs on its own (`mpv --version`). Programs Lumen starts do not inherit the AppImage's own library paths.
 - **Scrolling is choppy.** Lumen asks the page engine for smooth, hardware-accelerated scrolling. If it is still slow, try `LUMEN_WEBKIT_SAFE=1 lumen` (turns off WebKitGTK's DMA-BUF renderer, which some NVIDIA and Wayland setups handle badly). The AppImage runs through XWayland on a Wayland session; `GDK_BACKEND=wayland ./lumen_*.AppImage` uses native Wayland.
 
+## Adding many playlist links at once
+
+**Add source → Many links** takes a plain text file (`.txt`, `.md`, `.csv`, `.m3u`, `.html`, … up to 5 MB) or pasted text and finds every `http(s)` link in it; whatever is around the links (prose, Markdown, quotes, table cells) is ignored. Duplicates and links you already have as sources are left out (at most 500 links). **Test the links** then fetches each one, four at a time, and shows the result as it arrives: a playlist with its channel count and how many of five sample channels answer, a single stream (an HLS manifest), or a failure with the reason (not found, not a playlist, blocked address, too slow). Usable links are ticked; **Add selected** adds each as its own source. Nothing is added before you press it. Word and PDF files are not read: paste their text instead. Private and local addresses are refused unless "local network sources" is on in Settings.
+
 ## Updates
 
 Settings → **About & updates** shows the version and has one button, **Update to the latest version**. Click it and Lumen looks up the newest published release of this repository on GitHub, and if its tag is higher than the version you are running, downloads that release, checks it and installs it. A banner then offers a restart. There is no account, no signing key and no update server: GitHub's releases are the update channel.

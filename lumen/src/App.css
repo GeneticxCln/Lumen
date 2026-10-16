@@ -660,3 +660,12 @@ kbd { background: var(--bg-secondary); border-color: var(--border); color: var(-
 .app-header { -webkit-backdrop-filter: none; backdrop-filter: none; }
 .media-card, .poster-card, .local-card { transition: transform .2s, opacity .2s; }
 .media-shelf { content-visibility: auto; contain-intrinsic-size: auto 300px; }
+
+/* Many links: the list of links found in a text, with the result of testing each. */
+.bulk-links textarea { width: 100%; resize: vertical; font: inherit; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--fg-primary); }
+.bulk-list { list-style: none; margin: 8px 0; padding: 0; max-height: 280px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+.bulk-list li { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.bulk-list li:last-child { border-bottom: 0; }
+.bulk-row-text { display: flex; flex-direction: column; min-width: 0; }
+.bulk-link { overflow-wrap: anywhere; font-size: 13px; }
+.bulk-failed .bulk-link { opacity: .7; }
