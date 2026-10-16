@@ -1,0 +1,124 @@
+# Builds Lumen and the mpv it plays with into a Flatpak. This is built from source with network
+# access during the build (cargo and npm fetch their packages), so it makes a bundle to install
+# from a file or a self-hosted repository; Flathub would need the dependencies listed as offline
+# sources (flatpak-cargo-generator and flatpak-node-generator).
+#
+#   flatpak-builder --user --install-deps-from=flathub --force-clean --install build com.quinton.lumen.yml
+app-id: com.quinton.lumen
+runtime: org.gnome.Platform
+runtime-version: '48'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.node22
+command: lumen
+
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  # Lumen lists and plays folders the user points it at; read-only.
+  - --filesystem=home:ro
+  # The desktop's media widget (MPRIS), the one-copy-only guard, notifications and the keychain.
+  - --own-name=org.mpris.MediaPlayer2.lumen
+  - --own-name=com.quinton.lumen.SingleInstance
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.freedesktop.secrets
+  - --env=LC_NUMERIC=C
+
+cleanup:
+  - '*.la'
+  - '*.a'
+  - /include
+  - /lib/pkgconfig
+  - /share/man
+
+modules:
+  - name: ffmpeg
+    config-opts:
+      - --disable-debug
+      - --disable-doc
+      - --disable-static
+      - --enable-shared
+      - --enable-gpl
+      - --enable-version3
+    cleanup:
+      - /share/ffmpeg/examples
+    sources:
+      - type: git
+        url: https://github.com/FFmpeg/FFmpeg.git
+        tag: n9.0.1
+        commit: bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa
+
+  - name: libass
+    config-opts:
+      - --disable-static
+    sources:
+      - type: git
+        url: https://github.com/libass/libass.git
+        tag: 0.17.5
+        commit: 4a05d8127f525943ebf45fdc6497c9e665947f0d
+
+  - name: libplacebo
+    buildsystem: meson
+    config-opts:
+      - -Dvulkan=disabled
+      - -Dshaderc=disabled
+      - -Dglslang=disabled
+      - -Dlcms=disabled
+      - -Dopengl=enabled
+      - -Dd3d11=disabled
+      - -Ddemos=false
+      - -Dtests=false
+    sources:
+      - type: git
+        url: https://github.com/haasn/libplacebo.git
+        tag: v7.360.1
+        commit: cee9b076f2c63104ccfd497fa79c39a867293ec4
+
+  - name: mpv
+    buildsystem: meson
+    config-opts:
+      - -Dlibmpv=true
+      - -Dcplayer=true
+      - -Dlua=disabled
+      - -Djavascript=disabled
+      - -Dvulkan=disabled
+      - -Dlcms2=disabled
+      - -Duchardet=disabled
+      - -Drubberband=disabled
+      - -Dzimg=disabled
+      - -Dlibbluray=disabled
+      - -Ddvdnav=disabled
+      - -Dcdda=disabled
+      - -Dlibarchive=disabled
+      - -Dwerror=false
+      - -Dbuild-date=false
+    sources:
+      - type: git
+        url: https://github.com/mpv-player/mpv.git
+        tag: v0.41.0
+        commit: 41f6a645068483470267271e1d09966ca3b9f413
+
+  - name: lumen
+    buildsystem: simple
+    build-options:
+      build-args:
+        - --share=network
+      append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node22/bin
+      env:
+        CARGO_HOME: /run/build/lumen/cargo
+    build-commands:
+      - npm ci
+      - npx tauri build --no-bundle
+      - install -Dm755 target/release/lumen /app/bin/lumen
+      - install -Dm644 packaging/com.quinton.lumen.desktop /app/share/applications/com.quinton.lumen.desktop
+      - install -Dm644 packaging/com.quinton.lumen.metainfo.xml /app/share/metainfo/com.quinton.lumen.metainfo.xml
+      - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/com.quinton.lumen.png
+      - install -Dm644 src-tauri/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/com.quinton.lumen.png
+    sources:
+      - type: dir
+        path: ../..

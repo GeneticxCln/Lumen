@@ -1,0 +1,75 @@
+name: Packaging
+
+# Builds the Flatpak and the Arch package from this checkout, so a change to either manifest is
+# tested before a release. Run it by hand (Actions -> Packaging -> Run workflow), it also runs when
+# the packaging files change, and on a version tag.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "lumen/packaging/**"
+      - ".github/workflows/packaging.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  flatpak:
+    name: Flatpak
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-48
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: lumen.flatpak
+          manifest-path: lumen/packaging/flatpak/com.quinton.lumen.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+          arch: x86_64
+
+  # Flathub's linter on the manifest and the app data. Findings are reported, and do not fail the
+  # job: Flathub rules (screenshots, a license, offline sources) are not all met yet.
+  flatpak-lint:
+    name: Flatpak lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the linter
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.flatpak.Builder
+      - name: Lint the manifest
+        continue-on-error: true
+        run: flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest lumen/packaging/flatpak/com.quinton.lumen.yml
+      - name: Lint the app data
+        continue-on-error: true
+        run: flatpak run --command=flatpak-builder-lint org.flatpak.Builder appstream lumen/packaging/com.quinton.lumen.metainfo.xml
+
+  # The PKGBUILD, built from this checkout instead of a downloaded release tarball.
+  arch:
+    name: Arch package
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Tools
+        run: pacman -Syu --noconfirm git cargo nodejs npm pkgconf openssl librsvg webkit2gtk-4.1 gtk3 mpv
+      - uses: actions/checkout@v4
+      - name: Build as an ordinary user
+        run: |
+          pkgver=$(sed -n 's/^pkgver=//p' lumen/packaging/aur/PKGBUILD)
+          useradd -m builder
+          mkdir -p /home/builder/pkg
+          tar --transform "s#^\./#Lumen-${pkgver}/#" -czf /home/builder/pkg/lumen-${pkgver}.tar.gz --exclude=./.git --exclude=./lumen/node_modules --exclude=./lumen/target .
+          # Use the local tarball in place of the release download.
+          sed "s#^source=.*#source=(\"lumen-\$pkgver.tar.gz\")#" lumen/packaging/aur/PKGBUILD > /home/builder/pkg/PKGBUILD
+          chown -R builder:builder /home/builder
+          cd /home/builder/pkg
+          su builder -c 'makepkg --noconfirm --skipchecksums'
+          pacman -Qip lumen-*.pkg.tar.* | head -20
+          pacman -Qlp lumen-*.pkg.tar.*

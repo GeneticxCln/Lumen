@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Lumen
+GenericName=Media Player
+Comment=Media library and player
+Exec=lumen %U
+Icon=com.quinton.lumen
+Terminal=false
+Categories=AudioVideo;Video;Player;
+StartupWMClass=lumen
+MimeType=video/mp4;video/x-matroska;video/webm;video/x-msvideo;video/quicktime;video/mp2t;video/mpeg;video/ogg;audio/mpeg;audio/flac;audio/x-wav;audio/ogg;audio/mp4;application/vnd.apple.mpegurl;audio/x-mpegurl;x-scheme-handler/lumen;
