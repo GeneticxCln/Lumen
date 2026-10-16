@@ -27,9 +27,11 @@ use tokio::sync::Mutex;
 //
 // The cell is locked only long enough to read or replace the handle. Handlers clone the `Arc`
 // and release the lock before talking to mpv, so a slow `load` can never block Stop or Pause.
-static PLAYBACK_BACKEND: OnceLock<Arc<Mutex<Option<Arc<dyn PlaybackBackend>>>>> = OnceLock::new();
+type SharedBackend = Arc<dyn PlaybackBackend>;
+type BackendCell = Arc<Mutex<Option<SharedBackend>>>;
+static PLAYBACK_BACKEND: OnceLock<BackendCell> = OnceLock::new();
 
-pub async fn get_playback_backend() -> Result<Arc<Mutex<Option<Arc<dyn PlaybackBackend>>>>> {
+pub async fn get_playback_backend() -> Result<BackendCell> {
     let backend = PLAYBACK_BACKEND.get_or_init(|| Arc::new(Mutex::new(None)));
     Ok(backend.clone())
 }
@@ -48,7 +50,7 @@ pub(crate) async fn ensure_db(app: &AppHandle) -> Result<&'static sqlx::Pool<sql
 }
 
 /// The running backend, or an error when nothing is playing. Holds the lock only to clone.
-pub(crate) async fn current_backend() -> Result<Arc<dyn PlaybackBackend>> {
+pub(crate) async fn current_backend() -> Result<SharedBackend> {
     let cell = get_playback_backend().await?;
     let guard = cell.lock().await;
     guard
