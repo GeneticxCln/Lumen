@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
   playUrl,
+  nextFallbackSource,
   pause as pauseCmd,
   seek as seekCmd,
   setVolume as setVolumeCmd,
@@ -29,6 +30,8 @@ export function usePlayer() {
   const progressRef = useRef({ currentUrl, currentChannelId, playerState });
   progressRef.current = { currentUrl, currentChannelId, playerState };
   const headersRef = useRef<Record<string, string> | undefined>(undefined);
+  // The stream URL whose failure already triggered a fallback, so one failure moves on once.
+  const fallbackFromRef = useRef<string | null>(null);
   const reportError = useCallback((failure: unknown) => {
     setPlayerState((previous) => ({ ...previous, error: errorMessage(failure) }));
   }, []);
@@ -46,6 +49,30 @@ export function usePlayer() {
       unlistenPromise.then((fn) => fn()).catch(reportError);
     };
   }, [reportError]);
+
+  // When the current stream fails, move to the next ranked source of the same title, if any.
+  useEffect(() => {
+    const failedUrl = progressRef.current.currentUrl;
+    if (!playerState.error || !failedUrl || fallbackFromRef.current === failedUrl) return;
+    fallbackFromRef.current = failedUrl;
+    nextFallbackSource(failedUrl)
+      .then(async (next) => {
+        if (!next) return;
+        await playUrl(next.url, next.headers ?? undefined, next.channel_id ?? undefined);
+        headersRef.current = next.headers ?? undefined;
+        setCurrentUrl(next.url);
+        setCurrentChannelId(next.channel_id ?? undefined);
+        setPlayerState((prev) => ({
+          ...prev,
+          paused: false,
+          time: 0,
+          duration: 0,
+          buffering: true,
+          error: undefined,
+        }));
+      })
+      .catch(reportError);
+  }, [playerState.error, reportError]);
 
   // Periodically persist playback progress for resumable media
   useEffect(() => {
@@ -77,6 +104,7 @@ export function usePlayer() {
         parsedHeaders = undefined;
       }
     }
+    fallbackFromRef.current = null;
     await playUrl(channel.url, parsedHeaders, channel.id, startVolume);
     applyStartVolume(startVolume);
     headersRef.current = parsedHeaders;
@@ -97,6 +125,7 @@ export function usePlayer() {
 
   const playMedia = useCallback(
     async (url: string, title?: string, headers?: Record<string, string>, startVolume?: number, audioUrl?: string) => {
+      fallbackFromRef.current = null;
       await playUrl(url, headers, undefined, startVolume, audioUrl);
       applyStartVolume(startVolume);
       headersRef.current = headers;

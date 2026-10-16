@@ -2,7 +2,7 @@
 
 **Status:** working plan · Oct 2026
 **Target:** Linux-first (Wayland and X11)
-**Stack:** Tauri v2 · React · Rust · libmpv · Python sidecar
+**Stack:** Tauri v2 · React · Rust · libmpv · yt-dlp
 
 ---
 
@@ -24,34 +24,16 @@ Working name: **Lumen**. Rename before release if you want.
 ## 2. Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                         Tauri v2 app                             │
-│                                                                  │
-│  ┌─────────────┐   invoke / events    ┌───────────────────────┐  │
-│  │  Frontend   │ ◄──────────────────► │   Rust core           │  │
-│  │  React + TS │                      │                       │  │
-│  │             │                      │  - playlist / M3U     │  │
-│  │  player UI  │                      │  - SQLite             │  │
-│  │  library    │                      │  - sidecar lifecycle  │  │
-│  │  sources    │                      │  - mpv control        │  │
-│  │  settings   │                      │  - file dialogs       │  │
-│  └─────────────┘                      └──────────┬────────────┘  │
-│                                                  │               │
-│                         ┌────────────────────────┼────────────┐  │
-│                         ▼                        ▼            │  │
-│                  ┌─────────────┐          ┌─────────────┐     │  │
-│                  │  mpv        │          │  Python     │     │  │
-│                  │  JSON IPC   │          │  sidecar    │     │  │
-│                  │  → libmpv   │          │  127.0.0.1  │     │  │
-│                  └─────────────┘          │             │     │  │
-│                                           │  yt-dlp     │     │  │
-│                                           │  harvest    │     │  │
-│                                           │  probe      │     │  │
-│                                           └─────────────┘     │  │
-└──────────────────────────────────────────────────────────────────┘
+Tauri v2 app
+
+  Frontend (React + TS)  ⇄ invoke / events ⇄  Rust core (src-tauri + lumen-core)
+                                                ├── playlist / M3U, SQLite, sync, account
+                                                ├── extraction (in-process): yt-dlp subprocess,
+                                                │     HTML harvest, live probe (reqwest)
+                                                └── mpv control ──► mpv (JSON IPC) ──► libmpv (Phase 3)
 ```
 
-**Rule:** if it touches the network in a page-specific way, it is Python. Everything else is Rust. The UI is React. The video engine is mpv.
+**Rule:** page-specific network work (extract, harvest, probe) lives in Rust `lumen-core` and goes through `netguard`. The UI is React. The video engine is mpv.
 
 | Job | Owner |
 |---|---|
@@ -59,7 +41,7 @@ Working name: **Lumen**. Rename before release if you want.
 | M3U / IPTV tag parse | Rust |
 | Playlist DB, favorites, history | Rust + SQLite |
 | Playback | mpv (JSON IPC first, in-process libmpv later) |
-| yt-dlp extract, HTML M3U harvest, live-probe | Python sidecar |
+| yt-dlp extract, HTML M3U harvest, live-probe | Rust (`lumen-core`), yt-dlp as a subprocess |
 | UI | React 19 + TypeScript + Vite |
 
 Do not play media through `<video>` / WebKit. WebKitGTK will not reliably do MKV, HEVC, MPEG-TS, or broken HLS.
@@ -112,47 +94,31 @@ HLS live: `--cache=yes`, tune demuxer backlog. Pass `#EXTVLCOPT` user-agent / re
 
 ---
 
-## 4. Python sidecar
+## 4. Extraction services (Rust)
 
-### 4.1 API
+### 4.1 Commands
 
-- `POST /extract` — yt-dlp on a URL the user pasted
-- `POST /harvest` — fetch **one** user-supplied page, pull `.m3u` / `.m3u8` / obvious stream URLs from HTML / JSON-LD
-- `POST /probe` — HEAD/GET a list of URLs, report which look live
-- `GET  /health`
+- `extract_url` — runs yt-dlp on a URL the user pasted
+- `harvest_page` — fetches **one** user-supplied page, pulls `.m3u` / `.m3u8` / obvious stream URLs from HTML / JSON-LD
+- `probe_urls` — GET/HEAD a list of URLs, reports which look live
 
-Does **not** parse M3U libraries, store playlists, crawl the web, or talk to the frontend. Rust is the only client.
+These live in `lumen-core` (`extract.rs`, `harvest.rs`, `probe.rs`) and are exposed to the frontend as Tauri commands. They do **not** parse M3U libraries, store playlists, or crawl the web. The frontend reaches them only through `invoke()`.
 
-### 4.2 Process contract
+### 4.2 Execution model
 
-```
-Rust spawns sidecar
-  → sidecar prints one JSON line on stdout:
-     {"ready": true, "port": 43127, "token": "…"}
-  → all HTTP calls send Authorization: Bearer <token>
-  → on exit: write "SHUTDOWN\n" to stdin, wait 2s, kill the process group
-```
+- No separate process, no listening port, no bearer token. The only child process is yt-dlp.
+- `extract_url` runs `yt-dlp -J --no-playlist` with format spec `YTDLP_FORMAT_SPEC`, a 30 s timeout (`EXTRACT_TIMEOUT`), and an 8 MiB stdout cap (`MAX_EXTRACT_JSON_BYTES`).
+- yt-dlp resolution: the managed copy at `<app data>/bin/yt-dlp` first, then `yt-dlp` on `PATH`.
+- `harvest_page` (20 s timeout, 5 MiB cap) and `probe_urls` (5 s per request, 12 s overall deadline) use `reqwest` through the `netguard` client.
 
-- Bind `127.0.0.1` only
-- Random free port
-- PyInstaller **`--onedir`**, named with the Rust target triple:
-
-  `src-tauri/binaries/extractor-x86_64-unknown-linux-gnu/`
-
-  `--onefile` is unusable here: Tauri sees the bootloader PID, `kill()` leaves the real Python child running.
+The Python sidecar was removed in commit `bb4ccf4`. Its ready-line, token, stdin shutdown, and PyInstaller packaging went with it.
 
 ### 4.3 Stack
 
-```
-fastapi
-uvicorn
-httpx
-beautifulsoup4
-yt-dlp
-lxml
-```
+- `reqwest` and `tokio` (in `lumen-core`)
+- `yt-dlp`: external binary, not bundled
 
-Pin yt-dlp. Rebuild the sidecar when extractors rot.
+Update yt-dlp when extractors rot (Settings → Update extractor).
 
 ### 4.4 Harvest rules
 
@@ -177,20 +143,29 @@ Not in the product:
 ### 5.1 Modules
 
 ```
-src-tauri/src/
-  main.rs          Tauri builder, plugins, sidecar spawn/shutdown
+src-tauri/src/            Tauri shell
+  main.rs          entry point
+  lib.rs           Tauri builder, plugins, command registration
+  commands.rs      #[tauri::command] wrappers
   playback/
     mod.rs         PlaybackBackend trait
     mpv_ipc.rs     JSON IPC client (MVP)
-    libmpv.rs      in-process (Phase 3)
+  account.rs, sync.rs   sign-in and sync glue
+
+crates/lumen-core/src/    core logic
   playlist/
     m3u.rs         EXTINF / tvg-* / group-title / EXTVLCOPT
     import.rs      file + URL import
-  db.rs            SQLite
-  sidecar.rs       spawn, ready-line, HTTP client, shutdown
-  commands.rs      all #[tauri::command]
+  db.rs            SQLite (sqlx)
+  extract.rs       yt-dlp extraction (Phase 2)
+  harvest.rs       HTML stream harvesting (Phase 2)
+  probe.rs         live probing (Phase 2)
+  netguard.rs      URL validation and SSRF guard
+  sync.rs, account.rs, auth.rs, secrets.rs
   error.rs
 ```
+
+`libmpv.rs` (Phase 3) does not exist yet.
 
 ### 5.2 SQLite
 
@@ -242,7 +217,7 @@ Handle:
 - `#EXTVLCOPT:http-user-agent=…` / `http-referrer=…`
 - quoted attributes, commas in names, `#EXTINF` without attributes
 
-This is the **channel list**. HLS master/media playlists (`#EXT-X-STREAM-INF`) are playback URLs — mpv already understands those. Write the IPTV dialect in Rust (~200 lines). Do not round-trip it through Python.
+This is the **channel list**. HLS master/media playlists (`#EXT-X-STREAM-INF`) are playback URLs — mpv already understands those. Write the IPTV dialect in Rust (~200 lines). Do not round-trip it through an external process.
 
 ### 5.4 Commands
 
@@ -281,7 +256,7 @@ Screens:
 2. **Library** — playlists, groups, search, virtualized channel list, logo, live-dot from last probe.
 3. **Add source** — file picker, URL field, “extract this page”, optional catalog picker (country / category).
 4. **Local files** — folder browser, last-played, resume position.
-5. **Settings** — hwdec on/off, cache, extra mpv args, HTTP proxy, sidecar log.
+5. **Settings** — hwdec on/off, cache, extra mpv args, HTTP proxy, extractor (yt-dlp) version and update.
 
 Notes:
 
@@ -310,17 +285,10 @@ lumen/
 │   └── App.tsx
 ├── src-tauri/
 │   ├── src/                    # §5.1
-│   ├── binaries/               # gitignored sidecar build
 │   ├── capabilities/default.json
 │   └── tauri.conf.json
-├── sidecar/
-│   ├── app/
-│   │   ├── main.py
-│   │   ├── extract.py
-│   │   ├── harvest.py
-│   │   └── probe.py
-│   ├── pyproject.toml
-│   └── scripts/build.sh        # PyInstaller --onedir + target triple
+├── crates/
+│   └── lumen-core/             # extraction, playlist, DB, netguard
 ├── docs/
 │   └── PLAN.md
 └── package.json
@@ -348,7 +316,7 @@ UI ──play_url──────────────► Rust ──JSON I
 **Extract a page**
 
 ```
-UI ──extract_url──► Rust ──HTTP+token──► sidecar /extract (yt-dlp)
+UI ──extract_url──► Rust ──yt-dlp -J subprocess──► (title, url, headers)
                                               │
                                               ▼
                                         {title, url, headers}
@@ -378,7 +346,7 @@ sudo pacman -S mpv
 npm create tauri-app@latest lumen -- --template react-ts
 ```
 
-Add plugins: `dialog`, `opener`. Python 3.12 venv under `sidecar/`.
+Add plugins: `dialog`, `opener`.
 
 ### Phase 1 — MVP (~2 weeks)
 
@@ -392,12 +360,15 @@ Must be usable alone.
 
 **Done when:** a local MKV and a public `.m3u8` both play from the UI on Hyprland and on GNOME.
 
-### Phase 2 — sidecar (~1–2 weeks)
+### Phase 2 — extraction services (~1–2 weeks)
 
-- FastAPI sidecar, ready-line, token, stdin shutdown
-- PyInstaller `--onedir` hooked into `beforeBuildCommand`
-- `/extract`, `/harvest`, `/probe` (cap 8 concurrent, 5s timeout, no off-host redirects)
-- UI: Add source dialog + live-dot on channels
+**Status: complete, implemented in Rust.** The Python sidecar was replaced by in-process Rust services (commit `bb4ccf4`), so the sidecar-process items below are superseded and do not apply.
+
+- ~~FastAPI sidecar, ready-line, token, stdin shutdown~~ — superseded: no separate process, so no ready-line, bearer token, or stdin shutdown
+- ~~PyInstaller `--onedir` hooked into `beforeBuildCommand`~~ — superseded: `beforeBuildCommand` is `npm run build` and nothing is bundled
+- `extract_url`, `harvest_page`, `probe_urls` in `lumen-core` (`extract.rs`, `harvest.rs`, `probe.rs`): probe caps at 8 concurrent, 5s per request, same-host redirects only (`MAX_CONCURRENT_PROBES`, `PROBE_TIMEOUT`); extract and harvest validate URLs through `netguard`
+- UI: Add source dialog + live-dot on channels (`live-indicator` / `dead-indicator`)
+- Verified: `cargo test -p lumen-core` passes, and `npm run typecheck` passes
 
 ### Phase 3 — one window (~2 weeks)
 
@@ -426,7 +397,7 @@ Not in v1: EPG / XMLTV, Xtream Codes (only later, and only for accounts the user
 | **.deb / .rpm** | Depend on distro `mpv` or `libmpv2` |
 | **AppImage** | Bundle `libmpv.so.*` + FFmpeg/va libs via `patchelf --set-rpath`. Test VA-API on Intel and AMD |
 | **AUR** | `depends=(mpv webkit2gtk-4.1)` |
-| Python sidecar | Ship the `--onedir` tree next to the binary. No system Python |
+| yt-dlp | Not bundled. Use the managed copy from Settings, or system `yt-dlp` |
 
 Do not enable `bundleMediaFramework`. That is GStreamer for WebKit `<video>`, which this app does not use.
 
@@ -440,14 +411,14 @@ Capabilities:
 ]
 ```
 
-The `fs` and `shell` plugins are not used, so they are not granted. Do not add a shell or filesystem plugin permission without a reason. Spawning the sidecar and mpv happens in Rust, not through the webview.
+The `fs` and `shell` plugins are not used, so they are not granted. Do not add a shell or filesystem plugin permission without a reason. Spawning yt-dlp and mpv happens in Rust, not through the webview.
 
 ---
 
 ## 11. Security
 
-- Sidecar binds `127.0.0.1`, random port, bearer token from the ready-line
-- Frontend never calls the sidecar; only Rust does
+- No local server: extraction runs in-process, so nothing listens on a port
+- The frontend reaches extraction only through Tauri commands
 - `harvest` / `extract` only accept `http` / `https` (and `file` for local M3U)
 - Probe: same-host redirects only, timeout 5s, max 8 in flight
 - No telemetry. Crash reports later, opt-in (GDPR)
@@ -460,10 +431,10 @@ The `fs` and `shell` plugins are not used, so they are not granted. Do not add a
 | Risk | What to do |
 |---|---|
 | Linux mpv embedding is a time sink | MVP uses a separate mpv window. Embedding is Phase 3 |
-| yt-dlp extractors break | Sidecar is independently rebuildable. Pin + update cadence |
+| yt-dlp extractors break | Update the managed yt-dlp binary from Settings. Pin + update cadence |
 | Public M3U links die constantly | Probe in the background, show `last_ok`, never block UI |
 | VA-API fails on NVIDIA / some Wayland | Default `hwdec=auto-safe`, one-click software fallback |
-| PyInstaller `--onefile` zombies | `--onedir` + stdin `SHUTDOWN` + kill process group |
+| yt-dlp hangs or floods output | 30 s timeout and 8 MiB output cap on every run |
 | Giant playlists freeze UI | Virtualize, parse in `spawn_blocking`, batch SQLite inserts |
 
 ---
@@ -476,10 +447,9 @@ The `fs` and `shell` plugins are not used, so they are not granted. Do not add a
 | UI | React 19 + TypeScript + Vite + Tailwind |
 | Playback MVP | system `mpv` + JSON IPC (thin tokio Unix-socket client) |
 | Playback Phase 3 | custom libmpv plugin (MaxVideoPlayer Linux renderer or GtkGLArea overlay) |
-| DB | `sqlx` (sqlite) or `rusqlite` |
+| DB | `sqlx` (SQLite) |
 | HTTP in Rust | `reqwest` |
-| Sidecar | FastAPI + uvicorn + yt-dlp + httpx + bs4 |
-| Sidecar pack | PyInstaller `--onedir` |
+| Extraction | yt-dlp (external binary) + `reqwest` |
 | Dialogs | `tauri-plugin-dialog` |
 
 ---
@@ -489,9 +459,9 @@ The `fs` and `shell` plugins are not used, so they are not granted. Do not add a
 - [ ] Plays local video/audio on Arch (Hyprland) and Ubuntu
 - [ ] Imports a 2k-entry M3U without locking the UI
 - [ ] Plays an HLS `.m3u8` via mpv
-- [ ] Extracts a YouTube URL through the sidecar and plays it
+- [ ] Extracts a YouTube URL through yt-dlp and plays it
 - [ ] Harvests M3U links from a user-pasted HTML page
-- [ ] Survives sidecar crash (Rust restarts it, UI shows a toast)
+- [ ] A failed extraction shows a toast and the app keeps playing
 - [ ] `.deb` and AppImage install on a clean VM
 - [ ] No inbound port on `0.0.0.0`, no pirate playlist in the repo
 
@@ -504,8 +474,6 @@ sudo pacman -S mpv          # or: sudo apt install mpv libmpv-dev
 
 npm create tauri-app@latest lumen -- --template react-ts
 cd lumen
-
-python3.12 -m venv sidecar/.venv
 ```
 
 Start with a Tauri button that tells mpv to `loadfile` a local video. If that loop is solid, everything else is I/O.

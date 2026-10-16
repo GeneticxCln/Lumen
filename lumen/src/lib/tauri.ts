@@ -78,6 +78,17 @@ export async function playUrl(
   return callBackend("play_url", { url, headers, channelId, volume, audioUrl });
 }
 
+export interface FallbackSource {
+  url: string;
+  headers?: Record<string, string> | null;
+  channel_id?: number | null;
+}
+
+// The next ranked source for the title that failed to play, or null when there is none.
+export async function nextFallbackSource(failedUrl: string): Promise<FallbackSource | null> {
+  return callBackend("next_fallback_source", { failedUrl });
+}
+
 export async function pause() {
   return callBackend("pause");
 }

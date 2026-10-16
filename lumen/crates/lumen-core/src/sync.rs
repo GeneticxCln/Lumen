@@ -167,10 +167,40 @@ pub async fn queue_profile_deleted(conn: &mut SqliteConnection, sync_key: &str, 
     enqueue(conn, &item).await
 }
 
-/// Queues a favorite or its tombstone. The key is the stream URL, not the local channel id.
+/// Redacts user credentials and sensitive tokens from a stream URL before sync/storage.
+pub fn sanitize_url(raw_url: &str) -> String {
+    if let Ok(mut parsed) = url::Url::parse(raw_url) {
+        let _ = parsed.set_username("");
+        let _ = parsed.set_password(None);
+        // Strip access tokens or sensitive query keys while keeping clean paths
+        let query_pairs: Vec<(String, String)> = parsed
+            .query_pairs()
+            .filter(|(k, _)| {
+                let lower = k.to_ascii_lowercase();
+                !lower.contains("token")
+                    && !lower.contains("auth")
+                    && !lower.contains("secret")
+                    && !lower.contains("key")
+                    && !lower.contains("pass")
+            })
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        if query_pairs.is_empty() {
+            parsed.set_query(None);
+        } else {
+            parsed.query_pairs_mut().clear().extend_pairs(query_pairs);
+        }
+        parsed.to_string()
+    } else {
+        raw_url.to_string()
+    }
+}
+
+/// Queues a favorite or its tombstone. The key is content_key with stream fallback.
 pub async fn queue_favorite(
     conn: &mut SqliteConnection,
     profile_id: i64,
+    content_key: &str,
     url: &str,
     active: bool,
     now: i64,
@@ -178,22 +208,26 @@ pub async fn queue_favorite(
     let Some(profile_key) = profile_sync_key(conn, profile_id).await? else {
         return Ok(());
     };
+    let clean_url = sanitize_url(url);
     let item = SyncItem {
         kind: KIND_FAVORITE.into(),
-        key: format!("{profile_key}:{}", hashed(url)),
-        payload: json!({ "profile": profile_key, "url": url }),
+        key: format!("{profile_key}:{}", hashed(content_key)),
+        payload: json!({
+            "profile": profile_key,
+            "content_key": content_key,
+            "url": clean_url,
+        }),
         updated_at: now,
         deleted: !active,
     };
     enqueue(conn, &item).await
 }
 
-/// Queues the resume point for a stream. `played_at` is in seconds, matching history rows.
-/// A zero position is not a resume point: opening a stream records one before anything plays,
-/// and syncing it would overwrite the resume point saved on another device.
+/// Queues the resume point for a title/stream.
 pub async fn queue_progress(
     conn: &mut SqliteConnection,
     profile_id: i64,
+    content_key: &str,
     url: &str,
     position: f64,
     duration: f64,
@@ -205,12 +239,14 @@ pub async fn queue_progress(
     let Some(profile_key) = profile_sync_key(conn, profile_id).await? else {
         return Ok(());
     };
+    let clean_url = sanitize_url(url);
     let item = SyncItem {
         kind: KIND_PROGRESS.into(),
-        key: format!("{profile_key}:{}", hashed(url)),
+        key: format!("{profile_key}:{}", hashed(content_key)),
         payload: json!({
             "profile": profile_key,
-            "url": url,
+            "content_key": content_key,
+            "url": clean_url,
             "position": position,
             "duration": duration,
             "played_at": played_at,
@@ -297,18 +333,21 @@ async fn apply_favorite(conn: &mut SqliteConnection, item: &SyncItem) -> Result<
     let Some(url) = item.payload.get("url").and_then(Value::as_str) else {
         return Ok(());
     };
+    let content_key = item.payload.get("content_key").and_then(Value::as_str);
     let Some(profile_id) = profile_id_for_key(conn, profile_key).await? else {
         return Ok(());
     };
     sqlx::query(
-        "INSERT INTO favorites (profile_id, channel_url, active, updated_at) VALUES (?, ?, ?, ?)
+        "INSERT INTO favorites (profile_id, channel_url, content_key, active, updated_at) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT (profile_id, channel_url) DO UPDATE SET
+           content_key = COALESCE(excluded.content_key, favorites.content_key),
            active = excluded.active,
            updated_at = excluded.updated_at
          WHERE excluded.updated_at > favorites.updated_at",
     )
     .bind(profile_id)
     .bind(url)
+    .bind(content_key)
     .bind(i64::from(!item.deleted))
     .bind(item.updated_at)
     .execute(conn)
@@ -324,6 +363,7 @@ async fn apply_progress(conn: &mut SqliteConnection, item: &SyncItem) -> Result<
     let Some(url) = item.payload.get("url").and_then(Value::as_str) else {
         return Ok(());
     };
+    let content_key = item.payload.get("content_key").and_then(Value::as_str);
     let position = item.payload.get("position").and_then(Value::as_f64);
     let duration = item.payload.get("duration").and_then(Value::as_f64);
     let played_at = item.payload.get("played_at").and_then(Value::as_i64);
@@ -343,11 +383,12 @@ async fn apply_progress(conn: &mut SqliteConnection, item: &SyncItem) -> Result<
     // A local row with no position is a placeholder from opening the stream, so it yields to a
     // remote resume point. Otherwise the newer play time wins.
     let local = sqlx::query(
-        "SELECT played_at, position FROM history WHERE profile_id = ? AND path = ?
+        "SELECT played_at, position FROM history WHERE profile_id = ? AND (path = ? OR (content_key IS NOT NULL AND content_key = ?))
          ORDER BY played_at DESC LIMIT 1",
     )
     .bind(profile_id)
     .bind(url)
+    .bind(content_key)
     .fetch_optional(&mut *conn)
     .await
     .map_err(sql_err)?;
@@ -361,19 +402,21 @@ async fn apply_progress(conn: &mut SqliteConnection, item: &SyncItem) -> Result<
 
     // One history row per stream, as add_history keeps it. A channel link is taken from any
     // local channel with the same URL, if one exists.
-    sqlx::query("DELETE FROM history WHERE profile_id = ? AND path = ?")
+    sqlx::query("DELETE FROM history WHERE profile_id = ? AND (path = ? OR (content_key IS NOT NULL AND content_key = ?))")
         .bind(profile_id)
         .bind(url)
+        .bind(content_key)
         .execute(&mut *conn)
         .await
         .map_err(sql_err)?;
     sqlx::query(
-        "INSERT INTO history (profile_id, channel_id, path, position, duration, played_at)
-         VALUES (?, (SELECT id FROM channels WHERE url = ? LIMIT 1), ?, ?, ?, ?)",
+        "INSERT INTO history (profile_id, channel_id, path, content_key, position, duration, played_at)
+         VALUES (?, (SELECT id FROM channels WHERE url = ? LIMIT 1), ?, ?, ?, ?, ?)",
     )
     .bind(profile_id)
     .bind(url)
     .bind(url)
+    .bind(content_key)
     .bind(position)
     .bind(duration)
     .bind(played_at)
@@ -396,20 +439,22 @@ async fn queue_all(pool: &Pool<Sqlite>) -> Result<()> {
         queue_profile(&mut tx, id).await?;
     }
 
-    let favorites = sqlx::query("SELECT profile_id, channel_url, active, updated_at FROM favorites")
+    let favorites = sqlx::query("SELECT profile_id, channel_url, content_key, active, updated_at FROM favorites")
         .fetch_all(&mut *tx)
         .await
         .map_err(sql_err)?;
     for row in favorites {
         let profile_id: i64 = row.get("profile_id");
         let url: String = row.get("channel_url");
+        let content_key: Option<String> = row.get("content_key");
+        let key = content_key.unwrap_or_else(|| url.clone());
         let active = row.get::<i64, _>("active") != 0;
         let updated_at: i64 = row.get("updated_at");
-        queue_favorite(&mut tx, profile_id, &url, active, updated_at).await?;
+        queue_favorite(&mut tx, profile_id, &key, &url, active, updated_at).await?;
     }
 
     let history = sqlx::query(
-        "SELECT profile_id, path, position, duration, played_at FROM history WHERE path LIKE 'http%'",
+        "SELECT profile_id, path, content_key, position, duration, played_at FROM history WHERE path LIKE 'http%'",
     )
     .fetch_all(&mut *tx)
     .await
@@ -417,9 +462,12 @@ async fn queue_all(pool: &Pool<Sqlite>) -> Result<()> {
     for row in history {
         let profile_id: i64 = row.get("profile_id");
         let path: String = row.get("path");
+        let content_key: Option<String> = row.get("content_key");
+        let key = content_key.unwrap_or_else(|| path.clone());
         queue_progress(
             &mut tx,
             profile_id,
+            &key,
             &path,
             row.get("position"),
             row.get("duration"),

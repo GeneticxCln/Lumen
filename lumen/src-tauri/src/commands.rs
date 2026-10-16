@@ -206,6 +206,28 @@ pub async fn delete_playlist_cmd(playlist_id: i64, app: AppHandle) -> Result<()>
     Ok(())
 }
 
+#[derive(Serialize)]
+pub struct FallbackSource {
+    pub url: String,
+    pub headers: Option<serde_json::Value>,
+    pub channel_id: Option<i64>,
+}
+
+/// The next ranked source for the title that `failed_url` belongs to, if any.
+#[tauri::command]
+pub async fn next_fallback_source(
+    failed_url: String,
+    app: AppHandle,
+) -> Result<Option<FallbackSource>> {
+    let pool = ensure_db(&app).await?;
+    let next = next_ranked_source_after(pool, &failed_url).await?;
+    Ok(next.map(|(url, headers, channel_id)| FallbackSource {
+        url,
+        headers: headers.and_then(|raw| serde_json::from_str(&raw).ok()),
+        channel_id,
+    }))
+}
+
 #[tauri::command]
 pub async fn list_playlists_cmd(app: AppHandle) -> Result<Vec<Playlist>> {
     let pool = ensure_db(&app).await?;
@@ -313,7 +335,7 @@ async fn load_stored_providers(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<Vec<se
     Ok(providers)
 }
 
-/// Adds each provider's keychain token back in, for requests sent to the sidecar.
+/// Adds each provider's keychain token back in, for the search providers in a search request.
 fn with_keychain_tokens(mut providers: Vec<serde_json::Value>) -> Result<Vec<serde_json::Value>> {
     for provider in &mut providers {
         let id = secrets::provider_id(provider)?;

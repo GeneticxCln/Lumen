@@ -1,4 +1,5 @@
 use crate::auth;
+use crate::content_key::{parse_season_episode, ContentKey};
 use crate::error::{PlayerError, Result};
 use crate::pin_guard;
 use crate::playlist::import::{import_m3u_file, Channel, Playlist};
@@ -83,6 +84,9 @@ pub async fn init_db(app_dir: &Path) -> Result<Pool<Sqlite>> {
         if let Err(e) = backfill_channel_languages(&backfill_pool).await {
             eprintln!("lumen: channel language backfill failed: {}", e);
         }
+        if let Err(e) = backfill_titles_and_sources(&backfill_pool).await {
+            eprintln!("lumen: titles and title_sources backfill failed: {}", e);
+        }
     });
 
     Ok(pool)
@@ -164,6 +168,155 @@ pub async fn backfill_channel_languages(pool: &Pool<Sqlite>) -> Result<()> {
     if complete {
         set_setting(pool, CHANNEL_LANGUAGE_BACKFILL_SETTING, "done").await?;
     }
+    Ok(())
+}
+
+/// Settings key recording that titles and title_sources were backfilled.
+const TITLES_BACKFILL_SETTING: &str = "titles_backfill_v1";
+
+/// Backfills `titles` and `title_sources` from existing `channels`, and populates `content_key`
+/// on pre-existing `favorites` and `history` rows.
+pub async fn backfill_titles_and_sources(pool: &Pool<Sqlite>) -> Result<()> {
+    if get_setting(pool, TITLES_BACKFILL_SETTING).await?.as_deref() == Some("done") {
+        return Ok(());
+    }
+
+    let channels = sqlx::query(
+        "SELECT id, name, url, group_title, tvg_id, tvg_logo, extra_headers, is_live, \
+         tmdb_id, tmdb_type, poster_path, backdrop_path, overview, release_year, genre_names \
+         FROM channels",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    let now = Utc::now().timestamp_millis();
+    let mut tx = pool.begin().await.map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    for row in &channels {
+        let channel_id: i64 = row.get("id");
+        let name: String = row.get("name");
+        let url: String = row.get("url");
+        let tvg_id = row.get::<Option<String>, _>("tvg_id");
+        let tmdb_id = row.get::<Option<i64>, _>("tmdb_id");
+        let tmdb_type = row.get::<Option<String>, _>("tmdb_type");
+        let poster_path = row.get::<Option<String>, _>("poster_path");
+        let backdrop_path = row.get::<Option<String>, _>("backdrop_path");
+        let overview = row.get::<Option<String>, _>("overview");
+        let release_year = row.get::<Option<i64>, _>("release_year");
+        let genre_names = row.get::<Option<String>, _>("genre_names");
+        let extra_headers = row.get::<Option<String>, _>("extra_headers");
+        let is_live = row.get::<Option<i64>, _>("is_live");
+
+        let content_key = ContentKey::derive(
+            tmdb_id,
+            tmdb_type.as_deref(),
+            &name,
+            tvg_id.as_deref(),
+            &url,
+        )
+        .into_string();
+
+        let (kind, season, ep) = if let Some(ref t) = tmdb_type {
+            if t == "tv" || t == "series" {
+                let (s, e) = parse_season_episode(&name).unwrap_or((1, 1));
+                ("series", Some(s), Some(e))
+            } else {
+                ("movie", None, None)
+            }
+        } else if is_live == Some(1) {
+            ("channel", None, None)
+        } else {
+            ("movie", None, None)
+        };
+
+        sqlx::query(
+            "INSERT INTO titles (content_key, kind, title, tmdb_id, tmdb_type, season, episode, release_year, poster_path, backdrop_path, overview, genres, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (content_key) DO UPDATE SET \
+               title = excluded.title, \
+               poster_path = COALESCE(titles.poster_path, excluded.poster_path), \
+               backdrop_path = COALESCE(titles.backdrop_path, excluded.backdrop_path), \
+               overview = COALESCE(titles.overview, excluded.overview), \
+               updated_at = excluded.updated_at",
+        )
+        .bind(&content_key)
+        .bind(kind)
+        .bind(&name)
+        .bind(tmdb_id)
+        .bind(&tmdb_type)
+        .bind(season)
+        .bind(ep)
+        .bind(release_year)
+        .bind(&poster_path)
+        .bind(&backdrop_path)
+        .bind(&overview)
+        .bind(&genre_names)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+        sqlx::query(
+            "INSERT INTO title_sources (content_key, channel_id, stream_url, rank, headers, is_live, created_at) \
+             VALUES (?, ?, ?, 0, ?, ?, ?) \
+             ON CONFLICT (content_key, stream_url) DO UPDATE SET \
+               channel_id = excluded.channel_id, \
+               headers = excluded.headers, \
+               is_live = excluded.is_live",
+        )
+        .bind(&content_key)
+        .bind(channel_id)
+        .bind(&url)
+        .bind(extra_headers.unwrap_or_else(|| "{}".into()))
+        .bind(is_live)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+        // Backfill content_key into favorites matching this url
+        sqlx::query("UPDATE favorites SET content_key = ? WHERE channel_url = ? AND content_key IS NULL")
+            .bind(&content_key)
+            .bind(&url)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+        // Backfill content_key into history matching this url or channel_id
+        sqlx::query("UPDATE history SET content_key = ? WHERE (path = ? OR channel_id = ?) AND content_key IS NULL")
+            .bind(&content_key)
+            .bind(&url)
+            .bind(channel_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    }
+
+    // For any remaining history or favorites rows, generate a stream/file fallback content_key
+    // SQLite doesn't have sha256 built-in, so derive using URL prefix or rowid fallback
+    sqlx::query(
+        "UPDATE favorites SET content_key = 'stream:' || hex(channel_url) \
+         WHERE content_key IS NULL",
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    sqlx::query(
+        "UPDATE history SET content_key = CASE \
+           WHEN path LIKE 'http%' THEN 'stream:' || hex(path) \
+           ELSE 'file:' || hex(path) \
+         END \
+         WHERE content_key IS NULL",
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    tx.commit().await.map_err(|e| PlayerError::Sql(e.to_string()))?;
+    set_setting(pool, TITLES_BACKFILL_SETTING, "done").await?;
     Ok(())
 }
 
@@ -287,6 +440,7 @@ pub async fn delete_playlist(pool: &Pool<Sqlite>, playlist_id: i64) -> Result<()
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
     for (profile_id, url) in orphaned {
+        let content_key = resolve_content_key(pool, None, &url).await;
         sqlx::query(
             "UPDATE favorites SET active = 0, updated_at = ? WHERE profile_id = ? AND channel_url = ?",
         )
@@ -296,7 +450,7 @@ pub async fn delete_playlist(pool: &Pool<Sqlite>, playlist_id: i64) -> Result<()
         .execute(&mut *tx)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
-        sync::queue_favorite(&mut tx, profile_id, &url, false, now).await?;
+        sync::queue_favorite(&mut tx, profile_id, &content_key, &url, false, now).await?;
     }
 
     tx.commit()
@@ -529,22 +683,71 @@ pub async fn channel_exists(pool: &Pool<Sqlite>, channel_id: i64) -> Result<bool
     Ok(row.is_some())
 }
 
+/// Resolves the canonical content key for a channel, falling back to a derived stream URL key.
+pub async fn resolve_content_key(
+    pool: &Pool<Sqlite>,
+    channel_id: Option<i64>,
+    path: &str,
+) -> String {
+    if let Some(cid) = channel_id {
+        let row = sqlx::query(
+            "SELECT name, url, group_title, tvg_id, tmdb_id, tmdb_type FROM channels WHERE id = ?",
+        )
+        .bind(cid)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+        if let Some(r) = row {
+            let name: String = r.get("name");
+            let url: String = r.get("url");
+            let tvg_id = r.get::<Option<String>, _>("tvg_id");
+            let tmdb_id = r.get::<Option<i64>, _>("tmdb_id");
+            let tmdb_type = r.get::<Option<String>, _>("tmdb_type");
+            return ContentKey::derive(
+                tmdb_id,
+                tmdb_type.as_deref(),
+                &name,
+                tvg_id.as_deref(),
+                &url,
+            )
+            .into_string();
+        }
+    }
+    ContentKey::derive(None, None, "", None, path).into_string()
+}
+
 /// Toggles a favorite and returns whether the stream is now a favorite. Favorites are keyed
-/// by stream URL, not channel id, so they survive a playlist re-import, which gives channels
-/// new ids. A removed favorite stays as a tombstone (`active = 0`) so a sync can carry it.
+/// by content_key (with stream URL fallback), surviving re-imports and cross-stream swaps.
 pub async fn toggle_favorite(
     pool: &Pool<Sqlite>,
     profile_id: i64,
     channel_id: i64,
 ) -> Result<bool> {
-    let url: Option<String> = sqlx::query_scalar("SELECT url FROM channels WHERE id = ?")
-        .bind(channel_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| PlayerError::Sql(e.to_string()))?;
-    let Some(url) = url else {
+    let row = sqlx::query(
+        "SELECT name, url, group_title, tvg_id, tmdb_id, tmdb_type FROM channels WHERE id = ?",
+    )
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let Some(row) = row else {
         return Err(PlayerError::NotFound("Channel no longer exists".into()));
     };
+    let url: String = row.get("url");
+    let name: String = row.get("name");
+    let tvg_id = row.get::<Option<String>, _>("tvg_id");
+    let tmdb_id = row.get::<Option<i64>, _>("tmdb_id");
+    let tmdb_type = row.get::<Option<String>, _>("tmdb_type");
+
+    let content_key = ContentKey::derive(
+        tmdb_id,
+        tmdb_type.as_deref(),
+        &name,
+        tvg_id.as_deref(),
+        &url,
+    )
+    .into_string();
 
     let mut tx = pool
         .begin()
@@ -552,9 +755,10 @@ pub async fn toggle_favorite(
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
     let active: Option<i64> = sqlx::query_scalar(
-        "SELECT active FROM favorites WHERE profile_id = ? AND channel_url = ?",
+        "SELECT active FROM favorites WHERE profile_id = ? AND (content_key = ? OR channel_url = ?)",
     )
     .bind(profile_id)
+    .bind(&content_key)
     .bind(&url)
     .fetch_optional(&mut *tx)
     .await
@@ -563,20 +767,22 @@ pub async fn toggle_favorite(
     let favorite = active.unwrap_or(0) == 0;
     let now = Utc::now().timestamp_millis();
     sqlx::query(
-        "INSERT INTO favorites (profile_id, channel_url, active, updated_at) VALUES (?, ?, ?, ?)
+        "INSERT INTO favorites (profile_id, channel_url, content_key, active, updated_at) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT (profile_id, channel_url) DO UPDATE SET
+           content_key = excluded.content_key,
            active = excluded.active,
            updated_at = excluded.updated_at",
     )
     .bind(profile_id)
     .bind(&url)
+    .bind(&content_key)
     .bind(i64::from(favorite))
     .bind(now)
     .execute(&mut *tx)
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    sync::queue_favorite(&mut tx, profile_id, &url, favorite, now).await?;
+    sync::queue_favorite(&mut tx, profile_id, &content_key, &url, favorite, now).await?;
 
     tx.commit()
         .await
@@ -588,7 +794,9 @@ pub async fn toggle_favorite(
 /// lists each of its channel rows.
 pub async fn list_favorites(pool: &Pool<Sqlite>, profile_id: i64) -> Result<Vec<i64>> {
     let rows = sqlx::query(
-        "SELECT c.id FROM favorites f JOIN channels c ON c.url = f.channel_url
+        "SELECT DISTINCT c.id FROM favorites f \
+         LEFT JOIN title_sources ts ON ts.content_key = f.content_key \
+         JOIN channels c ON (c.id = ts.channel_id OR c.url = f.channel_url) \
          WHERE f.profile_id = ? AND f.active = 1 ORDER BY c.id",
     )
     .bind(profile_id)
@@ -1009,10 +1217,13 @@ pub async fn add_history(
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
+    let content_key = resolve_content_key(pool, channel_id, path).await;
+
     let previous = sqlx::query(
-        "SELECT channel_id, position, duration FROM history WHERE profile_id = ? AND path = ? ORDER BY played_at DESC, id DESC LIMIT 1",
+        "SELECT channel_id, position, duration FROM history WHERE profile_id = ? AND (content_key = ? OR path = ?) ORDER BY played_at DESC, id DESC LIMIT 1",
     )
     .bind(profile_id)
+    .bind(&content_key)
     .bind(path)
     .fetch_optional(&mut *tx)
     .await
@@ -1040,19 +1251,21 @@ pub async fn add_history(
         None => (channel_id, position, duration),
     };
 
-    sqlx::query("DELETE FROM history WHERE profile_id = ? AND path = ?")
+    sqlx::query("DELETE FROM history WHERE profile_id = ? AND (content_key = ? OR path = ?)")
         .bind(profile_id)
+        .bind(&content_key)
         .bind(path)
         .execute(&mut *tx)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
     sqlx::query(
-        "INSERT INTO history (profile_id, channel_id, path, position, duration, played_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO history (profile_id, channel_id, path, content_key, position, duration, played_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(profile_id)
     .bind(channel_id)
     .bind(path)
+    .bind(&content_key)
     .bind(position)
     .bind(duration)
     .bind(now)
@@ -1060,7 +1273,7 @@ pub async fn add_history(
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    sync::queue_progress(&mut tx, profile_id, path, position, duration, now).await?;
+    sync::queue_progress(&mut tx, profile_id, &content_key, path, position, duration, now).await?;
 
     prune_history_with(&mut tx, DEFAULT_HISTORY_RETENTION).await?;
 
@@ -1119,16 +1332,80 @@ pub async fn get_resume_position(
     profile_id: i64,
     path: &str,
 ) -> Result<Option<f64>> {
+    let content_key = resolve_content_key(pool, None, path).await;
     let row = sqlx::query(
-        "SELECT position FROM history WHERE profile_id = ? AND path = ? AND duration > 0 AND position > 0 AND position < duration ORDER BY played_at DESC LIMIT 1",
+        "SELECT position FROM history WHERE profile_id = ? AND (content_key = ? OR path = ?) AND duration > 0 AND position > 0 AND position < duration ORDER BY played_at DESC LIMIT 1",
     )
     .bind(profile_id)
+    .bind(&content_key)
     .bind(path)
     .fetch_optional(pool)
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
     Ok(row.map(|r| r.get("position")))
+}
+
+/// Resolves the preferred/ranked stream URL for a content key at play time.
+/// Returns (stream_url, headers, channel_id).
+pub async fn resolve_playback_source(
+    pool: &Pool<Sqlite>,
+    content_key: &str,
+) -> Result<Option<(String, Option<String>, Option<i64>)>> {
+    let row = sqlx::query(
+        "SELECT stream_url, headers, channel_id FROM title_sources \
+         WHERE content_key = ? ORDER BY rank DESC, id ASC LIMIT 1",
+    )
+    .bind(content_key)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    Ok(row.map(|r| (r.get("stream_url"), r.get("headers"), r.get("channel_id"))))
+}
+
+/// Lists all available sources for a title in order of rank (for fallback).
+pub async fn list_ranked_sources(
+    pool: &Pool<Sqlite>,
+    content_key: &str,
+) -> Result<Vec<(String, Option<String>, Option<i64>)>> {
+    let rows = sqlx::query(
+        "SELECT stream_url, headers, channel_id FROM title_sources \
+         WHERE content_key = ? ORDER BY rank DESC, id ASC",
+    )
+    .bind(content_key)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.get("stream_url"), r.get("headers"), r.get("channel_id")))
+        .collect())
+}
+
+/// The source ranked directly below `failed_url` for the same title. Used when the current stream
+/// fails to play. Returns None when the URL is not a ranked source or is already the last one.
+pub async fn next_ranked_source_after(
+    pool: &Pool<Sqlite>,
+    failed_url: &str,
+) -> Result<Option<(String, Option<String>, Option<i64>)>> {
+    let key_row = sqlx::query(
+        "SELECT content_key FROM title_sources WHERE stream_url = ? \
+         ORDER BY rank DESC, id ASC LIMIT 1",
+    )
+    .bind(failed_url)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    let Some(key_row) = key_row else {
+        return Ok(None);
+    };
+    let content_key: String = key_row.get("content_key");
+    let ranked = list_ranked_sources(pool, &content_key).await?;
+    let position = ranked.iter().position(|(url, _, _)| url == failed_url);
+    Ok(position.and_then(|index| ranked.into_iter().nth(index + 1)))
 }
 
 #[derive(Debug, Serialize)]
@@ -1198,6 +1475,53 @@ mod tests {
         // `list_channels` reads the enrichment columns, which `init_db` adds after migrating.
         migrate_tmdb_columns(&pool).await.unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn test_next_ranked_source_after_follows_rank_order() {
+        let pool = test_pool().await;
+        sqlx::query(
+            "INSERT INTO titles (content_key, kind, title, created_at, updated_at) \
+             VALUES ('tmdb:movie:550', 'movie', 'Fight Club', 1000, 1000)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (url, rank) in [
+            ("https://a.example/hd.m3u8", 2),
+            ("https://b.example/sd.m3u8", 1),
+            ("https://c.example/lo.m3u8", 0),
+        ] {
+            sqlx::query(
+                "INSERT INTO title_sources (content_key, stream_url, rank, created_at) \
+                 VALUES ('tmdb:movie:550', ?, ?, 1000)",
+            )
+            .bind(url)
+            .bind(rank)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let next = next_ranked_source_after(&pool, "https://a.example/hd.m3u8")
+            .await
+            .unwrap();
+        assert_eq!(next.map(|(url, _, _)| url), Some("https://b.example/sd.m3u8".to_string()));
+
+        let next = next_ranked_source_after(&pool, "https://b.example/sd.m3u8")
+            .await
+            .unwrap();
+        assert_eq!(next.map(|(url, _, _)| url), Some("https://c.example/lo.m3u8".to_string()));
+
+        // The lowest-ranked source has nothing below it, and unknown URLs have no title.
+        assert!(next_ranked_source_after(&pool, "https://c.example/lo.m3u8")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(next_ranked_source_after(&pool, "https://unknown.example/x.m3u8")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     fn playlist(name: &str) -> Playlist {
@@ -1676,6 +2000,15 @@ mod tests {
             .unwrap();
         // Favorites move from channel ids to channel URLs; the favorite must survive that.
         sqlx::raw_sql(include_str!("../migrations/006_sync.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        // The remaining migrations an upgraded database runs before the app reads these tables.
+        sqlx::raw_sql(include_str!("../migrations/007_channel_live.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/008_titles.sql"))
             .execute(&pool)
             .await
             .unwrap();

@@ -1,6 +1,6 @@
 # Lumen
 
-A Linux-first media library and player built with Tauri v2, React 19, TypeScript, Rust, SQLite, native mpv, and a Python extraction sidecar.
+A Linux-first media library and player built with Tauri v2, React 19, TypeScript, Rust, SQLite, native mpv, and in-process Rust extraction, harvesting, and probing.
 
 ## Experience
 
@@ -42,7 +42,7 @@ npm ci
 npm run tauri dev
 ```
 
-Native development needs the platform's Tauri/WebKitGTK build dependencies and `mpv`. Extraction needs the sidecar executable; inspect `sidecar/scripts/build.sh` and the release limitations in [AUDIT.md](AUDIT.md) before packaging.
+Native development needs the platform's Tauri/WebKitGTK build dependencies, `mpv`, and `yt-dlp` for extraction (or use 'Update extractor' in Settings). Extraction, M3U harvesting, and live probing run in Rust (`crates/lumen-core`). See the release limitations in [AUDIT.md](AUDIT.md) before packaging.
 
 ## Checks
 
@@ -51,13 +51,12 @@ npm test
 npm run typecheck
 npm run build
 cd src-tauri && cargo test --lib
-cd ../sidecar && .venv/bin/python -m pytest
+cargo test -p lumen-core
 ```
 
 `cargo test --lib` needs the Tauri build dependencies (on Debian/Ubuntu: `libwebkit2gtk-4.1-dev`,
 `libgtk-3-dev`, `libsoup-3.0-dev`, `libjavascriptcoregtk-4.1-dev`), plus `ffmpeg` for the poster tests
-and `mpv` for the playback tests (those skip with a message when `mpv` is missing). The sidecar test
-starts `sidecar/.venv`, so create it first: `cd sidecar && python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'`.
+and `mpv` for the playback tests (those skip with a message when `mpv` is missing).
 
 The account Worker has its own checks. With `npx wrangler dev --port 8787` running (and
 `--var FREEBUFF_CLIENT_ID:test --var APP_ORIGIN:http://127.0.0.1:8787`), run `node test/desktop-flow.mjs`

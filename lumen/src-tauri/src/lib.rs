@@ -38,6 +38,7 @@ pub fn run() {
             sync::sync_now_cmd,
             sync::sync_status_cmd,
             play_url,
+            next_fallback_source,
             pause,
             seek,
             set_volume,
