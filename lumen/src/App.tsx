@@ -24,6 +24,7 @@ import type { BrowseTitle } from "./lib/types";
 import type { CastState, Channel, HistoryEntry, PlayerPrefs, Profile, UpdateEventPayload } from "./lib/types";
 import { readPreferences, recommendChannels, catalogShelves, contentKind, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
 import { isLocalPath } from "./lib/local";
+import { refreshNetworkPrivacyEnabled } from "./lib/networkPrivacy";
 import { nextEpisode } from "./lib/episodes";
 import { buildBoard } from "./lib/board";
 import { launchNotice, planLaunch } from "./lib/launch";
@@ -144,6 +145,10 @@ function App() {
       .catch(() => { if (active) setBrowseTitles([]); });
     return () => { active = false; };
   }, [refresh]);
+
+  // Whether remote images (TMDB art, channel logos) go through the network-privacy proxy or
+  // load directly depends on this; read once so it's right from the first thing rendered.
+  useEffect(() => { void refreshNetworkPrivacyEnabled(); }, []);
 
   useEffect(() => {
     document.documentElement.classList.toggle("reduce-motion", preferences.reduceMotion);

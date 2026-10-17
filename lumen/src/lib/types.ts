@@ -14,6 +14,16 @@ export interface SyncStatus {
   skipped: number;
 }
 
+/** Whether, and through what, Lumen's own network traffic is being routed. */
+export interface NetworkPrivacyState {
+  enabled: boolean;
+  upstream: string;
+  username: string;
+  hasPassword: boolean;
+  status: "off" | "active" | "unavailable";
+  error?: string;
+}
+
 export interface Channel {
   id: number;
   playlist_id: number;

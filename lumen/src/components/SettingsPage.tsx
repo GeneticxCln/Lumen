@@ -7,6 +7,7 @@ import type { Preferences } from "../lib/discovery";
 import { POSTER_FRAME_OPTIONS } from "../lib/local";
 import { ProfileSettings } from "./ProfileSettings";
 import { SyncSettings } from "./SyncSettings";
+import { NetworkPrivacySettings } from "./NetworkPrivacySettings";
 import { PlayerPrefsSettings } from "./PlayerPrefsSettings";
 import { OnlineSubtitlesSettings } from "./OnlineSubtitlesSettings";
 import { LanguageSetting } from "./LanguageSetting";
@@ -370,6 +371,7 @@ export function SettingsPage({
         {section === "account" && (
           <>
             <SyncSettings />
+            <NetworkPrivacySettings />
             <h3 className="settings-section-title">{t("settings.account.whoTitle")}</h3>
             <p>{t("settings.account.whoNote")}</p>
             <ProfileSettings
