@@ -82,6 +82,28 @@ pub fn scrub(command: &mut Command) {
     }
 }
 
+/// Variables that could make mpv or yt-dlp pick a different proxy (or none) than the one Lumen
+/// explicitly tells them to use, or bypass it for hosts `no_proxy` names.
+const PROXY_ENV: &[&str] = &[
+    "http_proxy",
+    "HTTP_PROXY",
+    "https_proxy",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "ALL_PROXY",
+    "no_proxy",
+    "NO_PROXY",
+];
+
+/// Removes proxy-related environment variables from `command`, so it can only reach the network
+/// the way Lumen explicitly set it up (direct, or through the network-privacy relay) rather than
+/// whatever this desktop session happens to have set.
+pub fn strip_proxy_env(command: &mut Command) {
+    for name in PROXY_ENV {
+        command.env_remove(name);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +171,29 @@ mod tests {
         let env = vars(&[("PATH", "/usr/bin"), ("LD_LIBRARY_PATH", "/opt/lib")]);
         assert!(changes(&env, "/tmp/app").is_empty());
         assert!(changes(&env, "").is_empty());
+    }
+
+    #[test]
+    fn strip_proxy_env_removes_every_variant() {
+        let mut command = Command::new("true");
+        for name in PROXY_ENV {
+            command.env(name, "set");
+        }
+        command.env("HOME", "/home/me");
+        strip_proxy_env(&mut command);
+        let remaining: Vec<&std::ffi::OsStr> = command
+            .get_envs()
+            .filter_map(|(k, v)| v.map(|_| k))
+            .collect();
+        for name in PROXY_ENV {
+            assert!(
+                !remaining.contains(&std::ffi::OsStr::new(name)),
+                "{name} should have been removed"
+            );
+        }
+        assert!(
+            remaining.contains(&std::ffi::OsStr::new("HOME")),
+            "unrelated variables are left alone"
+        );
     }
 }
