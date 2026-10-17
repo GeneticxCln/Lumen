@@ -8,6 +8,8 @@ use serde_json::Value;
 const KEYCHAIN_SERVICE: &str = "dev.lumen.app.search-providers";
 const TMDB_KEYCHAIN_SERVICE: &str = "dev.lumen.app.tmdb";
 const TMDB_KEYCHAIN_ACCOUNT: &str = "api-key";
+const PROXY_KEYCHAIN_SERVICE: &str = "dev.lumen.app.network-proxy";
+const PROXY_KEYCHAIN_ACCOUNT: &str = "upstream-password";
 
 /// On Linux the keychain is the Secret Service; a session without one (a bare window manager)
 /// cannot store secrets until one is started.
@@ -104,6 +106,33 @@ pub fn load_tmdb_key() -> Result<Option<String>> {
 
 pub fn delete_tmdb_key() -> Result<()> {
     match tmdb_entry()?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(keychain_error(error)),
+    }
+}
+
+fn proxy_entry() -> Result<keyring::Entry> {
+    keyring::Entry::new(PROXY_KEYCHAIN_SERVICE, PROXY_KEYCHAIN_ACCOUNT).map_err(keychain_error)
+}
+
+/// Stores the network-privacy upstream proxy's password in the keychain. Errors propagate
+/// rather than falling back to plaintext; the settings table never holds it.
+pub fn store_proxy_password(password: &str) -> Result<()> {
+    proxy_entry()?
+        .set_password(password)
+        .map_err(keychain_error)
+}
+
+pub fn load_proxy_password() -> Result<Option<String>> {
+    match proxy_entry()?.get_password() {
+        Ok(password) => Ok(Some(password)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(keychain_error(error)),
+    }
+}
+
+pub fn delete_proxy_password() -> Result<()> {
+    match proxy_entry()?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(error) => Err(keychain_error(error)),
     }

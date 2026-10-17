@@ -15,6 +15,7 @@ mod launch;
 #[cfg(target_os = "linux")]
 mod mpris;
 mod playback;
+mod privacy;
 mod sync;
 mod updater;
 
@@ -24,6 +25,11 @@ use tauri::{Manager, RunEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before anything else can possibly make a network call: if network privacy turns out to be
+    // on, nothing must go direct in the gap between process start and `privacy::init` actually
+    // reading the setting (further down, once the database is ready).
+    lumen_core::privacy::set_route(lumen_core::privacy::Route::Pending);
+
     // A way out for machines where the page engine's newer compositing path is slow or broken
     // (some NVIDIA/Wayland setups): `LUMEN_WEBKIT_SAFE=1 lumen`. Not the default, because it
     // trades speed elsewhere for safety.
@@ -58,6 +64,7 @@ pub fn run() {
                     if let Err(e) = init_db(&app_dir).await {
                         eprintln!("Failed to init database: {}", e);
                     } else if let Ok(pool) = ensure_db(&app_handle).await {
+                        privacy::init(&app_handle).await;
                         sync::start(pool);
                         updater::start(app_handle.clone());
                     }
@@ -148,6 +155,9 @@ pub fn run() {
             get_settings,
             set_setting_cmd,
             set_tmdb_api_key,
+            privacy::network_privacy_state_cmd,
+            privacy::network_privacy_set_cmd,
+            privacy::network_privacy_test_cmd,
             tmdb_status,
             tmdb_enrich,
             tmdb_browse,

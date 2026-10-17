@@ -14,6 +14,7 @@ pub mod netguard;
 pub mod pin_guard;
 pub mod player_prefs;
 pub mod playlist;
+pub mod privacy;
 pub mod probe;
 pub mod search;
 pub mod secrets;

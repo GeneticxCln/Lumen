@@ -142,7 +142,7 @@ pub fn extract_streams_from_html(base_url: &Url, html_text: &str) -> Vec<String>
 pub async fn harvest_streams(url: &str, allow_lan: bool) -> Result<HarvestResponse> {
     let target = netguard::validate_url(url, allow_lan)?;
 
-    let client = netguard::guarded_client(allow_lan)
+    let client = netguard::guarded_client(allow_lan)?
         .timeout(HARVEST_TIMEOUT)
         .user_agent(
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Lumen/0.1",

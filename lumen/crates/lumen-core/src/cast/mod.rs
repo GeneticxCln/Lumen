@@ -58,12 +58,6 @@ pub struct Status {
     pub duration: f64,
 }
 
-/// Whether `ip` is an address on a local network (private, link-local or loopback) and not on the
-/// internet: the only place a renderer may be.
-pub fn is_local_network(ip: IpAddr) -> bool {
-    netguard::is_allowed_ip(ip, true) && !netguard::is_allowed_ip(ip, false)
-}
-
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -79,8 +73,8 @@ fn client() -> &'static reqwest::Client {
 
 fn local_ip(url: &Url) -> Option<IpAddr> {
     match url.host()? {
-        Host::Ipv4(ip) => Some(IpAddr::V4(ip)).filter(|ip| is_local_network(*ip)),
-        Host::Ipv6(ip) => Some(IpAddr::V6(ip)).filter(|ip| is_local_network(*ip)),
+        Host::Ipv4(ip) => Some(IpAddr::V4(ip)).filter(|ip| netguard::is_local_network(*ip)),
+        Host::Ipv6(ip) => Some(IpAddr::V6(ip)).filter(|ip| netguard::is_local_network(*ip)),
         Host::Domain(_) => None,
     }
 }

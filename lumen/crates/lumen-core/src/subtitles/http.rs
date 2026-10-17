@@ -74,7 +74,7 @@ impl Guard {
 
 /// A client that refuses private addresses (unless the user allowed their network) and times out.
 pub fn client(allow_lan: bool) -> Result<reqwest::Client> {
-    netguard::guarded_client(allow_lan)
+    netguard::guarded_client(allow_lan)?
         .timeout(REQUEST_TIMEOUT)
         .user_agent(concat!("Lumen/", env!("CARGO_PKG_VERSION")))
         .build()

@@ -63,8 +63,12 @@ fn build_header_map(extra: &HashMap<String, String>) -> HeaderMap {
 }
 
 fn build_probe_client(allow_lan: bool) -> Option<reqwest::Client> {
-    reqwest::Client::builder()
-        .dns_resolver(Arc::new(netguard::PublicOnlyResolver::new(allow_lan)))
+    // Starts from the same guarded builder as everything else (so the network-privacy proxy
+    // route is respected here too), then overrides the redirect policy: probing already checks
+    // each hop itself (`MAX_SAME_HOST_REDIRECTS`, same-host only), which `guarded_client`'s own
+    // policy does not enforce.
+    netguard::guarded_client(allow_lan)
+        .ok()?
         .redirect(reqwest::redirect::Policy::none())
         .timeout(PROBE_TIMEOUT)
         .user_agent("Mozilla/5.0 (X11; Linux x86_64) Lumen/0.1")
