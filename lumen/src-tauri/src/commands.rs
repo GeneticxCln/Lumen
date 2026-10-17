@@ -53,6 +53,20 @@ pub(crate) async fn ensure_db(app: &AppHandle) -> Result<&'static sqlx::Pool<sql
     get_pool().ok_or_else(|| PlayerError::Sql("Database pool not initialized".into()))
 }
 
+/// Appends the mpv options that keep it inside the network-privacy proxy when one applies:
+/// `--http-proxy` itself, and `--ytdl=no`/`--load-unsafe-playlists=no` to close the two ways mpv
+/// could otherwise reach the network on its own (its built-in yt-dlp hook, and a playlist entry
+/// fetching another URL) without going through either Lumen's own extraction or this proxy.
+/// Appended last, so a user's own `extra_mpv_args` cannot point mpv away from the proxy.
+fn with_privacy_args(extra_args: &str, proxy: Option<String>) -> String {
+    match proxy {
+        None => extra_args.to_string(),
+        Some(proxy) => {
+            format!("{extra_args} --http-proxy={proxy} --ytdl=no --load-unsafe-playlists=no")
+        }
+    }
+}
+
 /// The running backend, or an error when nothing is playing. Holds the lock only to clone.
 pub(crate) async fn current_backend() -> Result<SharedBackend> {
     let cell = get_playback_backend().await?;
@@ -99,6 +113,9 @@ async fn play_url_inner(
     let extra_args = get_setting(pool, "extra_mpv_args")
         .await?
         .unwrap_or_default();
+    // Fails closed the same way a guarded `reqwest` client does: if network privacy is meant to
+    // be on but the relay is not usable, refuse rather than ever start mpv unproxied.
+    let extra_args = with_privacy_args(&extra_args, lumen_core::privacy::child_proxy_url()?);
 
     let backend_cell = get_playback_backend().await?;
     let existing = {
@@ -2370,5 +2387,37 @@ mod setting_allowlist_tests {
                 "{key:?} must not be writable from the UI"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod privacy_args_tests {
+    use super::with_privacy_args;
+
+    #[test]
+    fn no_proxy_leaves_the_users_own_arguments_untouched() {
+        assert_eq!(with_privacy_args("--really-quiet", None), "--really-quiet");
+        assert_eq!(with_privacy_args("", None), "");
+    }
+
+    #[test]
+    fn a_proxy_is_appended_after_the_users_own_arguments() {
+        let args = with_privacy_args(
+            "--really-quiet",
+            Some("http://lumen:tok@127.0.0.1:12345".to_string()),
+        );
+        assert_eq!(
+            args,
+            "--really-quiet --http-proxy=http://lumen:tok@127.0.0.1:12345 --ytdl=no --load-unsafe-playlists=no"
+        );
+        // Appended last, so a conflicting value earlier in the user's own arguments loses: mpv
+        // takes the last occurrence of an option.
+        let args = with_privacy_args(
+            "--http-proxy=http://attacker.invalid:1",
+            Some("http://lumen:tok@127.0.0.1:12345".to_string()),
+        );
+        assert!(args.ends_with(
+            "--http-proxy=http://lumen:tok@127.0.0.1:12345 --ytdl=no --load-unsafe-playlists=no"
+        ));
     }
 }

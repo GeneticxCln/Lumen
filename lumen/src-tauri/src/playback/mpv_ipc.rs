@@ -327,6 +327,10 @@ impl MpvIpcBackend {
 
         // Inside an AppImage, mpv must not load the AppImage's copies of system libraries.
         lumen_core::child_env::scrub(mpv_cmd.as_std_mut());
+        // mpv must reach the network only the way `extra_args` above just told it to (direct, or
+        // through the network-privacy relay's `--http-proxy`), never a proxy this desktop session
+        // happens to have set in the environment.
+        lumen_core::child_env::strip_proxy_env(mpv_cmd.as_std_mut());
         mpv_cmd
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
