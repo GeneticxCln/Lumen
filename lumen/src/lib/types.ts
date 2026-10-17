@@ -48,6 +48,10 @@ export interface Channel {
   rating?: number;
   genre_names?: string;
   enriched_at?: number;
+  // A user's manual Kind/Genre correction, present only when tmdb_id is absent — TMDB stays
+  // authoritative whenever it has actually matched this title.
+  category_override_kind?: "movie" | "series" | "live";
+  category_override_genres?: string;
 }
 
 /** Whether a TMDB credential is available, and where the backend found it. */

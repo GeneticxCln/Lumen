@@ -104,6 +104,8 @@ export function contentKind(channel: Channel): ContentKind {
   // Trust the real TMDB media type over playlist naming/group heuristics whenever enriched.
   if (channel.tmdb_type === "movie") return "movie";
   if (channel.tmdb_type === "tv") return "series";
+  // A user's own correction, for a title TMDB never matched.
+  if (channel.category_override_kind) return channel.category_override_kind;
   const text = `${channel.group_title || ""} ${channel.name}`.toLocaleLowerCase();
   if (/\b(series|show|shows|season|episode|episodes|sitcom|soap|anime)\b/.test(text)) return "series";
   if (/\b(movie|movies|film|films|cinema|feature|vod|demo|documentary|short)\b/.test(text)) return "movie";
@@ -226,12 +228,17 @@ export function inferGenre(group?: string, name = ""): string | undefined {
 
 export interface ChannelGenres {
   names: string[];
-  source: "tmdb" | "inferred";
+  source: "tmdb" | "override" | "inferred";
 }
+
+/** The de-duplicated genre labels `inferGenres` can produce, for a category picker's options. */
+export const CANONICAL_GENRES = [...new Set(GENRE_KEYWORDS.map(([, name]) => name))];
 
 export function genresOf(channel: Channel): ChannelGenres {
   const fromTmdb = (channel.genre_names || "").split(";").map((value) => value.trim()).filter(Boolean);
   if (fromTmdb.length) return { names: [...new Set(fromTmdb)], source: "tmdb" };
+  const fromOverride = (channel.category_override_genres || "").split(";").map((value) => value.trim()).filter(Boolean);
+  if (fromOverride.length) return { names: [...new Set(fromOverride)], source: "override" };
   return { names: inferGenres(channel.group_title, channel.name), source: "inferred" };
 }
 

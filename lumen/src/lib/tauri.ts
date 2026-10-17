@@ -38,6 +38,7 @@ import type {
   UpdateState,
 } from "./types";
 import type { PosterCandidate } from "./types";
+import type { ContentKind } from "./discovery";
 import type { EpisodeMark, UpcomingSeries } from "./series";
 import type { OpenTarget } from "./launch";
 
@@ -372,6 +373,16 @@ export async function boardNewChannelIds() {
 // Favorites & History
 export async function toggleFavorite(channelId: number) {
   return callBackend<boolean>("toggle_favorite_cmd", { channelId });
+}
+
+/** Saves a manual Kind/Genre correction for a title TMDB has not matched. Refused once TMDB
+ * has actually matched the channel. */
+export async function setCategoryOverride(channelId: number, kind: ContentKind | null, genres: string[] | null) {
+  return callBackend("set_category_override_cmd", { channelId, kind, genres });
+}
+
+export async function clearCategoryOverride(channelId: number) {
+  return callBackend("clear_category_override_cmd", { channelId });
 }
 
 export async function listFavorites() {

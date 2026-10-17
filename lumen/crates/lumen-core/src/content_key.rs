@@ -123,6 +123,15 @@ pub struct TitleSource {
     pub last_verified: Option<i64>,
 }
 
+/// A user's manual Kind/Genre correction for a title TMDB never matched. See
+/// `migrations/011_category_overrides.sql`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CategoryOverride {
+    pub content_key: String,
+    pub kind: Option<String>,
+    pub genres: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Title {
     pub content_key: String,

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { listPlaylists, listChannels, probeUrls, toggleFavorite, listFavorites, deletePlaylist, errorMessage } from "../lib/tauri";
+import { listPlaylists, listChannels, probeUrls, toggleFavorite, setCategoryOverride, listFavorites, deletePlaylist, errorMessage } from "../lib/tauri";
 import type { Channel, Playlist } from "../lib/types";
-import { filterChannels } from "../lib/discovery";
+import { filterChannels, type ContentKind } from "../lib/discovery";
 
 export function useChannels(refreshTrigger = 0) {
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -87,6 +87,16 @@ export function useChannels(refreshTrigger = 0) {
     }
   }, []);
 
+  const handleSetCategoryOverride = useCallback(async (id: number, kind: ContentKind | null, genres: string[] | null) => {
+    try {
+      await setCategoryOverride(id, kind, genres);
+      reload();
+    } catch (failure) {
+      setError(errorMessage(failure));
+      throw failure;
+    }
+  }, [reload]);
+
   const handleDeletePlaylist = useCallback(async (id: number) => {
     try {
       await deletePlaylist(id);
@@ -99,5 +109,5 @@ export function useChannels(refreshTrigger = 0) {
 
   return { playlists, selectedPlaylistId, selectPlaylist, allChannels, channels, groups, selectedGroup, setSelectedGroup,
     searchQuery, setSearchQuery, favoritesOnly, setFavoritesOnly, favoriteIds, loading, probing, error,
-    loadPlaylists: reload, loadChannels: reload, handleProbeVisible, handleToggleFavorite, handleDeletePlaylist };
+    loadPlaylists: reload, loadChannels: reload, handleProbeVisible, handleToggleFavorite, handleSetCategoryOverride, handleDeletePlaylist };
 }
