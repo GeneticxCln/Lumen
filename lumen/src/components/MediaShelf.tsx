@@ -5,6 +5,7 @@ import { artworkCategory, browseCaption } from "../lib/discovery";
 import { remainingLabel } from "../lib/board";
 import type { ContinueItem } from "../lib/board";
 import { TMDB_BACKDROP_SIZE, tmdbImage } from "../lib/tauri";
+import { RemoteImage } from "./RemoteImage";
 import { Icon } from "./Icon";
 import { t } from "../i18n/index.ts";
 
@@ -16,9 +17,9 @@ export function ChannelArtwork({ channel, hero = false }: { channel: Channel; he
   const backdrop = tmdbImage(channel.backdrop_path, TMDB_BACKDROP_SIZE);
   return <div className={`channel-art art-${artworkCategory(channel.group_title)} ${hero ? "hero-art" : ""}`}>
     {backdrop && !artFailed
-      ? <img className="landscape-art tmdb-art" src={backdrop} alt="" loading="lazy" decoding="async" onError={() => setArtFailed(true)} />
+      ? <RemoteImage className="landscape-art tmdb-art" src={backdrop} alt="" loading="lazy" decoding="async" onError={() => setArtFailed(true)} />
       : <img className="landscape-art" src="/artwork/landscape.svg" alt="" aria-hidden="true" />}
-    {channel.tvg_logo && !logoFailed && <img className="source-logo" src={channel.tvg_logo} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setLogoFailed(true)} />}
+    {channel.tvg_logo && !logoFailed && <RemoteImage className="source-logo" src={channel.tvg_logo} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setLogoFailed(true)} />}
     {!hero && <span className="art-title">{channel.name}</span>}
   </div>;
 }
@@ -28,7 +29,7 @@ function BrowseArtwork({ title }: { title: BrowseTitle }) {
   const backdrop = tmdbImage(title.backdrop_path ?? undefined, TMDB_BACKDROP_SIZE);
   return <div className="channel-art">
     {backdrop && !artFailed
-      ? <img className="landscape-art tmdb-art" src={backdrop} alt="" loading="lazy" decoding="async" onError={() => setArtFailed(true)} />
+      ? <RemoteImage className="landscape-art tmdb-art" src={backdrop} alt="" loading="lazy" decoding="async" onError={() => setArtFailed(true)} />
       : <img className="landscape-art" src="/artwork/landscape.svg" alt="" aria-hidden="true" />}
     <span className="art-title">{title.name}</span>
   </div>;

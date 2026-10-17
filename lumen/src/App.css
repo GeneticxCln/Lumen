@@ -565,6 +565,13 @@ kbd { background: var(--bg-secondary); border-color: var(--border); color: var(-
 .sync-settings { margin-bottom: 32px; }
 .sync-settings .settings-actions { border: 0; background: none; box-shadow: none; padding: 0; margin-top: 18px; }
 
+/* Network privacy settings */
+.privacy-settings { margin-bottom: 32px; }
+.privacy-settings label:not(.privacy-toggle) { display: block; font-size: 12px; font-weight: 600; margin: 14px 0 6px; }
+.privacy-settings input[type="text"], .privacy-settings input[type="password"] { width: 100%; max-width: 420px; }
+.privacy-toggle { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-weight: 600; cursor: pointer; }
+.privacy-settings .settings-actions { border: 0; background: none; box-shadow: none; padding: 0; margin-top: 18px; }
+
 /* Continue watching progress bar */
 .card-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: #ffffff33; z-index: 3; }
 .card-progress > span { display: block; height: 100%; background: var(--accent, #e50914); }

@@ -1562,6 +1562,23 @@ fn generate_local_thumbnail(
     ))
 }
 
+/// Fetches `url` (a TMDB poster/backdrop, or a playlist's `tvg-logo`) through the guarded,
+/// network-privacy-aware client and returns it as a data URL, so the webview never has to make
+/// the request itself. The frontend only calls this once network privacy is on — rendering the
+/// URL directly is faster and is what every other browser does, so that stays the default; this
+/// exists for the one case where going direct would defeat the whole point of turning it on.
+#[tauri::command]
+pub async fn fetch_remote_image(url: String, app: AppHandle) -> Result<String> {
+    let pool = ensure_db(&app).await?;
+    let allow_lan = allow_lan_sources(pool).await;
+    let image = lumen_core::remote_image::fetch_image(&url, allow_lan).await?;
+    Ok(format!(
+        "data:{};base64,{}",
+        image.content_type,
+        base64::engine::general_purpose::STANDARD.encode(&image.bytes)
+    ))
+}
+
 #[tauri::command]
 pub async fn local_thumbnail(path: String, app: AppHandle) -> Result<String> {
     let pool = ensure_db(&app).await?;

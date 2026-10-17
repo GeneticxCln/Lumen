@@ -2,6 +2,7 @@ import { useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Channel, playUrl } from "../lib/tauri";
 import { useChannels } from "../hooks/useChannels";
+import { RemoteImage } from "./RemoteImage";
 import { t } from "../i18n/index.ts";
 
 interface ChannelListProps {
@@ -165,15 +166,12 @@ export function ChannelList({ onPlayChannel, refreshTrigger = 0 }: ChannelListPr
                     {isFav ? "★" : "☆"}
                   </button>
                   {channel.tvg_logo && (
-                    <img
+                    <RemoteImage
                       src={channel.tvg_logo}
                       alt=""
                       className="channel-logo"
                       loading="lazy"
                       decoding="async"
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).style.display = "none";
-                      }}
                     />
                   )}
                   <span className="channel-name" title={channel.name}>

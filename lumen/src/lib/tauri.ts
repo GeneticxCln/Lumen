@@ -21,6 +21,7 @@ import type {
   SearchResponse,
   SyncState,
   SyncStatus,
+  NetworkPrivacyState,
   PlayerPrefs,
   PlayingItem,
   SubtitleCandidate,
@@ -485,6 +486,35 @@ export async function setSetting(key: string, value: string) {
 // TMDB metadata enrichment. The API key goes to the OS keychain through its own command. It is never written to the settings table.
 export async function setTmdbApiKey(key: string) {
   return callBackend("set_tmdb_api_key", { key });
+}
+
+// Network privacy: an optional local relay that Lumen's own traffic (metadata, playback, and
+// extraction) can be routed through, which forwards to a SOCKS5 or HTTP proxy. Off by default.
+export async function networkPrivacyState() {
+  return callBackend<NetworkPrivacyState>("network_privacy_state_cmd");
+}
+
+/** Validates and saves the settings, then starts or stops the relay to match. `password`
+ * left out keeps the saved one; an empty string clears it. */
+export async function setNetworkPrivacy(
+  enabled: boolean,
+  upstream: string,
+  username: string,
+  password?: string,
+) {
+  return callBackend<NetworkPrivacyState>("network_privacy_set_cmd", { enabled, upstream, username, password });
+}
+
+/** Tries connecting through the given upstream without saving anything; resolves to how long it took. */
+export async function testNetworkPrivacy(upstream: string, username: string, password?: string) {
+  return callBackend<string>("network_privacy_test_cmd", { upstream, username, password });
+}
+
+/** Fetches a remote image (a TMDB poster/backdrop, or a playlist's `tvg-logo`) through the
+ * guarded, network-privacy-aware client and returns it as a data URL. Only called once network
+ * privacy is on — see `useRemoteImageSrc`. */
+export async function fetchRemoteImage(url: string) {
+  return callBackend<string>("fetch_remote_image", { url });
 }
 
 // Cross-device sync. There are no accounts: a random sync key, kept in the OS keychain by the

@@ -4,6 +4,7 @@ import type { Channel } from "../lib/types";
 import type { Facets, FacetSelection, FacetValue } from "../lib/discovery";
 import { ALL_FACETS, artworkCategory, genresOf, groupLabel, yearOf } from "../lib/discovery";
 import { TMDB_POSTER_SIZE, tmdbImage } from "../lib/tauri";
+import { RemoteImage } from "./RemoteImage";
 import { Icon } from "./Icon";
 import { t, tn } from "../i18n/index.ts";
 
@@ -78,10 +79,10 @@ function PosterCard({
   return <article className="poster-card" style={{ width }}>
     <button className="poster-art-button" aria-label={t("episodes.play", { name: channel.name })} onClick={() => onPlay(channel)}>
       {poster && !posterFailed
-        ? <img className="poster-image" src={poster} alt="" loading="lazy" decoding="async" onError={() => setPosterFailed(true)} />
+        ? <RemoteImage className="poster-image" src={poster} alt="" loading="lazy" decoding="async" onError={() => setPosterFailed(true)} />
         : <span className={`channel-art poster-fallback art-${artworkCategory(channel.group_title)}`}>
             <img className="landscape-art" src="/artwork/landscape.svg" alt="" aria-hidden="true" />
-            {channel.tvg_logo && !logoFailed && <img className="source-logo" src={channel.tvg_logo} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setLogoFailed(true)} />}
+            {channel.tvg_logo && !logoFailed && <RemoteImage className="source-logo" src={channel.tvg_logo} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setLogoFailed(true)} />}
             <span className="poster-fallback-title">{channel.name}</span>
           </span>}
       <span className="card-play"><Icon name="play" size={24} /></span>

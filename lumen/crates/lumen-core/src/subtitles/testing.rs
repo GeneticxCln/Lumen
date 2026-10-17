@@ -30,6 +30,12 @@ impl Canned {
         Self::new(path, 200, "application/octet-stream", body)
     }
 
+    /// A 200 response with a caller-chosen `Content-Type`, for tests that care about it (image
+    /// fetches, in particular).
+    pub fn typed(path: &str, content_type: &'static str, body: Vec<u8>) -> Self {
+        Self::new(path, 200, content_type, body)
+    }
+
     pub fn status(path: &str, status: u16) -> Self {
         Self::new(path, status, "text/plain", Vec::new())
     }

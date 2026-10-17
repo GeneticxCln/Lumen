@@ -25,6 +25,7 @@ pub async fn init(app: &AppHandle) {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NetworkPrivacyState {
     pub enabled: bool,
     pub upstream: String,
@@ -107,6 +108,7 @@ pub async fn network_privacy_set_cmd(
 
     let allow_lan = allow_lan_sources(pool).await;
     privacy::reconcile(pool, allow_lan).await;
+    crate::apply_webview_proxy(&app);
     state(&app).await
 }
 

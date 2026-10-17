@@ -65,6 +65,7 @@ pub fn run() {
                         eprintln!("Failed to init database: {}", e);
                     } else if let Ok(pool) = ensure_db(&app_handle).await {
                         privacy::init(&app_handle).await;
+                        apply_webview_proxy(&app_handle);
                         sync::start(pool);
                         updater::start(app_handle.clone());
                     }
@@ -147,6 +148,7 @@ pub fn run() {
             set_profile_pin_cmd,
             activate_profile_cmd,
             list_local_dir,
+            fetch_remote_image,
             local_thumbnail,
             local_filmstrip,
             local_poster_candidates,
@@ -193,4 +195,93 @@ fn tune_page_engine(app: &tauri::AppHandle) {
             settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Always);
         }
     });
+}
+
+/// How the embedded page engine's own network requests (not this app's — see `remote_image.rs`
+/// and the network-privacy module for those) should relate to the current route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WebviewProxyMode {
+    /// Network privacy is off: behave exactly as before this feature existed.
+    Default,
+    /// Network privacy is meant to be on. Carries either the real relay's address, or, if the
+    /// relay turned out not to be usable, an address nothing listens on — so the page engine's
+    /// own requests fail the same way every other guarded path does rather than ever going
+    /// direct.
+    Custom(String),
+}
+
+/// Maps `lumen_core::privacy::child_proxy_url()`'s result to a [`WebviewProxyMode`]. A pure
+/// function so this mapping is tested without needing a real webview.
+fn webview_proxy_target(proxy: lumen_core::error::Result<Option<String>>) -> WebviewProxyMode {
+    match proxy {
+        Ok(None) => WebviewProxyMode::Default,
+        Ok(Some(url)) => WebviewProxyMode::Custom(url),
+        // Nothing is listening on port 1 (it's in the reserved range); any request through it
+        // simply fails to connect.
+        Err(_) => WebviewProxyMode::Custom("http://127.0.0.1:1".to_string()),
+    }
+}
+
+/// Points the embedded page engine's own network requests (favicon prefetch, speculative
+/// preconnects, and anything the frontend was not already updated to route itself — see
+/// `fetch_remote_image`) at the current network-privacy route, as defense in depth. Called once
+/// at startup, once the route is resolved, and again whenever the network-privacy setting
+/// changes.
+#[cfg(target_os = "linux")]
+pub(crate) fn apply_webview_proxy(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let target = webview_proxy_target(lumen_core::privacy::child_proxy_url());
+    let _ = window.with_webview(move |webview| {
+        use webkit2gtk::{
+            NetworkProxyMode, NetworkProxySettings, WebContextExt, WebViewExt,
+            WebsiteDataManagerExt,
+        };
+        let Some(context) = webview.inner().context() else {
+            return;
+        };
+        let Some(data_manager) = context.website_data_manager() else {
+            return;
+        };
+        match target {
+            WebviewProxyMode::Default => {
+                data_manager.set_network_proxy_settings(NetworkProxyMode::Default, None);
+            }
+            WebviewProxyMode::Custom(url) => {
+                let mut settings = NetworkProxySettings::new(Some(url.as_str()), &[]);
+                data_manager
+                    .set_network_proxy_settings(NetworkProxyMode::Custom, Some(&mut settings));
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn apply_webview_proxy(_app: &tauri::AppHandle) {}
+
+#[cfg(test)]
+mod webview_proxy_tests {
+    use super::*;
+
+    #[test]
+    fn privacy_off_uses_the_default_system_proxy() {
+        assert_eq!(webview_proxy_target(Ok(None)), WebviewProxyMode::Default);
+    }
+
+    #[test]
+    fn privacy_on_points_the_page_engine_at_the_relay() {
+        assert_eq!(
+            webview_proxy_target(Ok(Some("http://lumen:tok@127.0.0.1:12345".to_string()))),
+            WebviewProxyMode::Custom("http://lumen:tok@127.0.0.1:12345".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unusable_relay_fails_closed_rather_than_going_direct() {
+        let target = webview_proxy_target(Err(lumen_core::error::PlayerError::Http(
+            "down".to_string(),
+        )));
+        assert_ne!(target, WebviewProxyMode::Default);
+    }
 }

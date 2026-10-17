@@ -9,7 +9,7 @@ Built with Tauri v2, React 19, TypeScript, Rust, SQLite and native mpv.
 
 ## Contents
 
-- [Features](#features) · [Install](#install) · [Updates](#updates) · [Subtitles](#subtitles) · [Player settings](#player-settings) · [Linux integration](#linux-integration) · [Casting to a TV](#casting-to-a-tv) · [Sync](#sync) · [Translating Lumen](#translating-lumen)
+- [Features](#features) · [Install](#install) · [Updates](#updates) · [Subtitles](#subtitles) · [Player settings](#player-settings) · [Linux integration](#linux-integration) · [Casting to a TV](#casting-to-a-tv) · [Network privacy](#network-privacy) · [Sync](#sync) · [Translating Lumen](#translating-lumen)
 - [Development](#development) · [Checks](#checks) · [Contributing](#contributing) · [License](#license)
 
 ## Features
@@ -107,6 +107,16 @@ In the player's settings, **Cast…** lists TVs, receivers and speakers on your 
 - A file on this computer is served to that one device only, under a random address, for as long as the cast lasts. Only media files are served.
 - Devices must be on the local network: anything that announces a public address is ignored, and addresses on your network are only used as sources if you turned on local-network sources in Settings.
 - Chromecast and AirPlay are different protocols and are not supported. Subtitles added in Lumen are not sent to the device.
+
+## Network privacy
+
+Off by default, and adds no overhead while off: images and metadata keep loading directly, exactly as before this feature existed. Turn it on in **Settings → Account → Network privacy** with a SOCKS5 or HTTP proxy address (a VPN client, Tor, Shadowsocks, or any proxy you run yourself) and, if it needs one, a username and password. **Test connection** checks it before you rely on it.
+
+Once it is on, Lumen's own metadata requests, mpv's playback, yt-dlp's extraction, and remote images (TMDB art, a playlist's channel logos) are all routed through it, via a small local relay Lumen runs for itself — the upstream proxy's address and credentials are never handed to mpv or yt-dlp directly, only Lumen's own relay speaks to it. If the relay cannot start, or the saved proxy address stops working, Lumen refuses those requests rather than ever falling back to a direct connection.
+
+- Sources on your local network always connect directly, the same as a VPN's split tunnel. Turn off "allow local network sources" in Settings if that is not what you want.
+- Device casting and the **Open on GitHub** link (Settings → About) are not covered: casting only ever talks to devices on your local network, and that link opens in your system's own browser, not inside Lumen.
+- This can make playback and browsing slower, depending on the proxy; nothing before this feature's release has changed if you leave it off.
 
 ## Sync
 
