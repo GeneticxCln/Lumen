@@ -47,10 +47,17 @@ fn entry() -> Result<keyring::Entry> {
     keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(keychain_error)
 }
 
+/// A keychain entry that can't be parsed as a key (foreign data left by another app/version,
+/// or partial corruption) reads as "no key" rather than failing every sync call outright --
+/// including `disable(pool, true)`, which otherwise could never clear it.
+fn parse_stored_key(text: &str) -> Option<[u8; 32]> {
+    sync_crypto::parse_key(text).ok()
+}
+
 impl RootStore for KeyringStore {
     fn load(&self) -> Result<Option<[u8; 32]>> {
         match entry()?.get_password() {
-            Ok(text) => sync_crypto::parse_key(&text).map(Some),
+            Ok(text) => Ok(parse_stored_key(&text)),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(error) => Err(keychain_error(error)),
         }
@@ -295,6 +302,17 @@ pub(crate) async fn disable_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_malformed_stored_key_reads_as_no_key_instead_of_an_error() {
+        assert_eq!(parse_stored_key("not a key"), None);
+        assert_eq!(parse_stored_key(""), None);
+        let root = [7u8; 32];
+        assert_eq!(
+            parse_stored_key(&sync_crypto::format_key(&root)),
+            Some(root)
+        );
+    }
 
     #[test]
     fn server_addresses_must_be_https_except_on_this_machine() {

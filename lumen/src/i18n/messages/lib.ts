@@ -48,4 +48,10 @@ export const lib = {
 
   "lib.notice.sourceFailed": "{title} failed to play from that source, so Lumen switched to another one.",
   "lib.notice.thisTitle": "This title",
+
+  "lib.units.bytes": "{value} B",
+  "lib.units.kilobytes": "{value} KB",
+  "lib.units.megabytes": "{value} MB",
+  "lib.units.gigabytes": "{value} GB",
+  "lib.units.secondsDelay": "{value} s",
 } as const;

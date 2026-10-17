@@ -61,12 +61,12 @@ export function formatClock(seconds: number): string {
 
 export function formatSize(bytes?: number): string {
   if (bytes === undefined || bytes === null) return "";
-  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024) return t("lib.units.bytes", { value: bytes });
   const kb = bytes / 1024;
-  if (kb < 1024) return `${kb.toFixed(0)} KB`;
+  if (kb < 1024) return t("lib.units.kilobytes", { value: kb.toFixed(0) });
   const mb = kb / 1024;
-  if (mb < 1024) return `${mb.toFixed(1)} MB`;
-  return `${(mb / 1024).toFixed(2)} GB`;
+  if (mb < 1024) return t("lib.units.megabytes", { value: mb.toFixed(1) });
+  return t("lib.units.gigabytes", { value: (mb / 1024).toFixed(2) });
 }
 
 /** A stream URL is remote; anything else is a path on this machine. */

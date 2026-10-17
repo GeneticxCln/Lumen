@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { Channel } from "../lib/types";
 import { CANONICAL_GENRES, contentKind, genresOf, type ContentKind } from "../lib/discovery";
 import { t } from "../i18n/index.ts";
@@ -19,8 +19,13 @@ export function CategoryOverridePicker({ channel, onSave }: CategoryOverridePick
     () => new Set(genresOf(channel).names.filter((name) => CANONICAL_GENRES.includes(name))),
   );
   const [error, setError] = useState<string | null>(null);
+  // Rapidly toggling two chips can leave two saves in flight at once. If the older one rejects
+  // after the newer one already applied its own change, the older call's rollback must not
+  // overwrite it — so a rollback only runs when no newer call has started since.
+  const latestSave = useRef(0);
 
   const save = async (nextKind: ContentKind, nextGenres: Set<string>) => {
+    const callId = ++latestSave.current;
     const previousKind = kind;
     const previousGenres = genres;
     setKind(nextKind);
@@ -29,6 +34,7 @@ export function CategoryOverridePicker({ channel, onSave }: CategoryOverridePick
     try {
       await onSave(nextKind, nextGenres.size ? [...nextGenres] : null);
     } catch {
+      if (latestSave.current !== callId) return;
       setKind(previousKind);
       setGenres(previousGenres);
       setError(t("app.details.category.saveFailed"));
