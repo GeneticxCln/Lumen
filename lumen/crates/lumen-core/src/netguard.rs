@@ -122,7 +122,13 @@ pub fn check_url(url: &Url, allow_lan: bool) -> Result<()> {
     }
 }
 
-fn is_local_name(name: &str) -> bool {
+/// Whether `ip` is on a local network (private, link-local or loopback) and not on the
+/// internet: the only place a cast renderer or a privacy-relay local-bypass target may be.
+pub fn is_local_network(ip: IpAddr) -> bool {
+    is_allowed_ip(ip, true) && !is_allowed_ip(ip, false)
+}
+
+pub fn is_local_name(name: &str) -> bool {
     let name = name.trim_end_matches('.').to_ascii_lowercase();
     name == "localhost"
         || name.ends_with(".localhost")
@@ -185,11 +191,16 @@ impl Resolve for PublicOnlyResolver {
     }
 }
 
-/// A client builder wired with all three checks. Callers add their own timeout and user agent.
-pub fn guarded_client(allow_lan: bool) -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
+/// A client builder wired with all three checks, plus the network-privacy proxy route if one is
+/// active (see `crate::privacy`) — this is the one place both are applied together, so a caller
+/// cannot build a guarded client that forgets to respect the proxy setting. Callers add their
+/// own timeout and user agent. Errors when privacy is meant to be on but is not usable; this
+/// never silently returns a client that would connect directly instead.
+pub fn guarded_client(allow_lan: bool) -> Result<reqwest::ClientBuilder> {
+    let builder = reqwest::Client::builder()
         .dns_resolver(Arc::new(PublicOnlyResolver { allow_lan }))
-        .redirect(redirect_policy(allow_lan))
+        .redirect(redirect_policy(allow_lan));
+    crate::privacy::apply(builder)
 }
 
 #[cfg(test)]

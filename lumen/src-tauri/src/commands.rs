@@ -1763,7 +1763,11 @@ pub async fn set_setting_cmd(key: String, value: String, app: AppHandle) -> Resu
     if key == POSTER_FRAME_SETTING {
         return set_poster_frame_seconds(pool, &thumbnail_cache_dir(&app)?, &value).await;
     }
-    set_setting(pool, &key, &value).await
+    set_setting(pool, &key, &value).await?;
+    if key == ALLOW_LAN_SETTING {
+        lumen_core::privacy::set_allow_lan(value == "true").await;
+    }
+    Ok(())
 }
 
 /// Saves the poster frame. Cached posters are cleared only when the frame actually changes.
@@ -2354,6 +2358,11 @@ mod setting_allowlist_tests {
             // Online subtitle search is switched only through its own command, after the notice.
             "subtitle_online",
             "subtitle_provider_gestdown",
+            // Network privacy is switched only through its own command: turning it on has to be
+            // validated and applied to the relay together, not written one key at a time.
+            lumen_core::privacy::ENABLED_SETTING,
+            lumen_core::privacy::UPSTREAM_SETTING,
+            lumen_core::privacy::USERNAME_SETTING,
             "",
         ] {
             assert!(

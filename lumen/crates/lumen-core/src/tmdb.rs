@@ -32,6 +32,16 @@ const HTTP_TIMEOUT_SECS: u64 = 20;
 /// Titles returned by one browse call. Bounded so the Discovery shelves stay light.
 pub const BROWSE_LIMIT: usize = 40;
 
+/// The one client every TMDB call uses: the host is fixed and public, so the DNS-rebinding
+/// check (`allow_lan: false`) matters less here than the network-privacy proxy route does, and
+/// `guarded_client` is where both are applied.
+fn http_client() -> Result<reqwest::Client> {
+    crate::netguard::guarded_client(false)?
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| PlayerError::Http(format!("Could not set up the TMDB client: {e}")))
+}
+
 #[derive(Debug)]
 pub struct EnrichOutcome {
     pub enriched: i64,
@@ -413,10 +423,7 @@ pub async fn enrich(pool: &Pool<Sqlite>, limit: i64, force: bool) -> Result<Enri
         .await?
         .ok_or_else(|| PlayerError::InvalidArg("TMDB API key not configured".into()))?;
 
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| PlayerError::Http(e.to_string()))?;
+    let http = http_client()?;
 
     let candidates: Vec<(i64, String)> = sqlx::query_as(
         "SELECT id, name FROM channels WHERE (enriched_at IS NULL OR ?) ORDER BY id LIMIT ?",
@@ -688,10 +695,7 @@ async fn browse_list<T: serde::de::DeserializeOwned>(
 
 /// Trending and top-rated titles, for browsing beyond the local library. Makes five requests.
 pub async fn browse(key: &str) -> Result<Vec<BrowseTitle>> {
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| PlayerError::Http(e.to_string()))?;
+    let http = http_client()?;
     let mut requests = 0_i64;
 
     let trending: ListResponse =
@@ -721,10 +725,7 @@ pub async fn imdb_id_for(key: &str, tmdb_type: &str, tmdb_id: i64) -> Result<Opt
         "tv" | "series" => "tv",
         _ => return Ok(None),
     };
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| PlayerError::Http(e.to_string()))?;
+    let http = http_client()?;
     let mut requests = 0_i64;
     let payload = tmdb_get(
         &http,
@@ -769,10 +770,7 @@ pub async fn refresh_airing(pool: &Pool<Sqlite>, profile_id: i64, limit: i64) ->
     if ids.is_empty() {
         return Ok(0);
     }
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| PlayerError::Http(e.to_string()))?;
+    let http = http_client()?;
     let mut requests = 0_i64;
     let mut refreshed = 0;
     for id in ids {

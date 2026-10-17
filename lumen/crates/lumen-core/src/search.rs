@@ -670,6 +670,7 @@ async fn query_user_json_provider(
         .map_err(|e| ("error".to_string(), String::from(e)))?;
 
     let client = netguard::guarded_client(allow_lan)
+        .map_err(|e| ("error".to_string(), String::from(e)))?
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs_f64(cfg.timeout))
         .user_agent("Lumen/0.1")

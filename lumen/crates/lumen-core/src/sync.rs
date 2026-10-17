@@ -603,12 +603,33 @@ pub(crate) struct Remote {
 
 impl Remote {
     pub(crate) fn new(origin: &str, keys: SyncKeys) -> Result<Self> {
-        // Redirects are never followed: the bearer token must only ever go to the address the
-        // user configured.
-        let client = reqwest::Client::builder()
+        // A sync server on this network (your own, for development or self-hosting) bypasses
+        // the network-privacy proxy like any other local-network source; everything else
+        // respects it. Either way, redirects are never followed: the bearer token must only
+        // ever go to the address the user configured.
+        let is_local = url::Url::parse(origin)
+            .ok()
+            .and_then(|u| {
+                u.host().map(|h| match h {
+                    url::Host::Domain(name) => crate::netguard::is_local_name(name),
+                    url::Host::Ipv4(ip) => {
+                        crate::netguard::is_local_network(std::net::IpAddr::V4(ip))
+                    }
+                    url::Host::Ipv6(ip) => {
+                        crate::netguard::is_local_network(std::net::IpAddr::V6(ip))
+                    }
+                })
+            })
+            .unwrap_or(false);
+        let builder = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
+            .redirect(reqwest::redirect::Policy::none());
+        let builder = if is_local {
+            builder.no_proxy()
+        } else {
+            crate::privacy::apply(builder)?
+        };
+        let client = builder.build()?;
         Ok(Self {
             client,
             origin: origin.trim_end_matches('/').to_string(),

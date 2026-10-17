@@ -148,7 +148,7 @@ pub async fn read_capped_body(mut response: reqwest::Response, limit: usize) -> 
 pub async fn fetch_playlist_text(url: &str, allow_lan: bool) -> Result<String> {
     let target = crate::netguard::validate_url(url, allow_lan)?;
 
-    let client = crate::netguard::guarded_client(allow_lan)
+    let client = crate::netguard::guarded_client(allow_lan)?
         .timeout(std::time::Duration::from_secs(30))
         .user_agent("Mozilla/5.0 (X11; Linux x86_64) Lumen/0.1")
         .build()

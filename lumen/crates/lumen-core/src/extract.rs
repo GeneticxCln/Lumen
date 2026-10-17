@@ -286,7 +286,7 @@ pub async fn update_managed_extractor(
     let sums_target = netguard::validate_url(&sums_url, allow_lan)?;
     let bin_target = netguard::validate_url(&bin_url, allow_lan)?;
 
-    let client = netguard::guarded_client(allow_lan)
+    let client = netguard::guarded_client(allow_lan)?
         .timeout(Duration::from_secs(60))
         .user_agent("Lumen/0.1")
         .build()
