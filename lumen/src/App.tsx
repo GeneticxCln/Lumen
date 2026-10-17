@@ -22,7 +22,7 @@ import { useChannels } from "./hooks/useChannels";
 import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, getPlayerPrefs, listProfiles, setPlayerFullscreen, tmdbStatus, updateRestart } from "./lib/tauri";
 import type { BrowseTitle } from "./lib/types";
 import type { CastState, Channel, HistoryEntry, PlayerPrefs, Profile, UpdateEventPayload } from "./lib/types";
-import { readPreferences, recommendChannels, catalogShelves, contentKind, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
+import { readPreferences, recommendChannels, catalogShelves, contentKind, isAdult, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
 import { isLocalPath } from "./lib/local";
 import { refreshNetworkPrivacyEnabled } from "./lib/networkPrivacy";
 import { nextEpisode } from "./lib/episodes";
@@ -386,7 +386,11 @@ function App() {
   }, [preferences.keyboardShortcuts, player, playerOpen, findingSubtitles, castOpen, seekStep, toggleFullscreen, closePlayer]);
 
   // Files on this computer belong to the Local Device page only; every other tab shows sources.
-  const available = useMemo(() => library.channels.filter((channel) => !isLocalPath(channel.url) && (!preferences.hideUnavailable || !channel.last_error)), [library.channels, preferences.hideUnavailable]);
+  const available = useMemo(() => library.channels.filter((channel) =>
+    !isLocalPath(channel.url) &&
+    (!preferences.hideUnavailable || !channel.last_error) &&
+    (preferences.showAdult || !isAdult(channel))
+  ), [library.channels, preferences.hideUnavailable, preferences.showAdult]);
   const catalog = useMemo(() => catalogShelves(available), [available]);
   // The following episode is looked up across the whole library, not just the current search results.
   const followingEpisode = useMemo(() => {

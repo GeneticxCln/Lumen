@@ -1,4 +1,4 @@
-import { filterChannels, recommendChannels, uniqueHistory, readPreferences, artworkCategory, themes, resolveTheme, contentKind, inferGenre, inferGenres, groupsOf, genresOf, yearOf, matchesFacets, buildFacets, facetCount, catalogShelves, isCatalogTitle, browseCaption, EMPTY_FACETS, ALL_FACETS, UNKNOWN_FACET } from "./discovery.ts";
+import { filterChannels, recommendChannels, uniqueHistory, readPreferences, artworkCategory, themes, resolveTheme, contentKind, inferGenre, inferGenres, groupsOf, genresOf, yearOf, matchesFacets, buildFacets, facetCount, catalogShelves, isCatalogTitle, browseCaption, isAdult, EMPTY_FACETS, ALL_FACETS, UNKNOWN_FACET } from "./discovery.ts";
 import type { FacetValue } from "./discovery.ts";
 import type { Channel, HistoryEntry } from "./types.ts";
 
@@ -14,10 +14,10 @@ const history: HistoryEntry[] = [
   { id: 2, path: channels[0].url, channel_id: 1, position: 50, duration: 100, played_at: 20 },
   { id: 3, path: "/video.mp4", position: 15, duration: 120, played_at: 20 },
 ];
-assert(filterChannels(channels, "WORLD news", "all", false).length === 2, "Search includes title/category terms across sources");
-assert(filterChannels(channels, "", "Science", true).length === 0, "Unavailable filter excludes failed checks");
-assert(filterChannels(channels, "", "all", true).length === 3, "Unchecked streams stay visible");
-assert(filterChannels(channels, "", "Other", false).length === 0, "Unknown category should not match existing groups");
+assert(filterChannels(channels, "WORLD news", "all", false, true).length === 2, "Search includes title/category terms across sources");
+assert(filterChannels(channels, "", "Science", true, true).length === 0, "Unavailable filter excludes failed checks");
+assert(filterChannels(channels, "", "all", true, true).length === 3, "Unchecked streams stay visible");
+assert(filterChannels(channels, "", "Other", false, true).length === 0, "Unknown category should not match existing groups");
 const recent = uniqueHistory(history);
 assert(recent.length === 2 && recent[0].id === 3 && recent[1].position === 50, "History is unique and latest entry wins, including timestamp ties");
 const picks = recommendChannels(channels, history, new Set([2]));
@@ -43,7 +43,7 @@ stored = "not json";
 assert(readPreferences().defaultVolume === 80, "Malformed preferences recover to defaults");
 const large = Array.from({ length: 10000 }, (_, index) => ({ ...channels[index % channels.length], id: index + 1, name: `Title ${index}` }));
 const start = performance.now();
-const results = recommendChannels(filterChannels(large, "title", "all", true), history, new Set([2]));
+const results = recommendChannels(filterChannels(large, "title", "all", true, true), history, new Set([2]));
 assert(results.length === 7500, "10k-entry filtering and ranking retain all available items");
 console.log(`Discovery regression checks passed; 10,000 entries filtered + ranked in ${(performance.now() - start).toFixed(2)}ms.`);
 
@@ -162,3 +162,14 @@ assert(browseCaption({ tmdb_id: 2, tmdb_type: "tv", name: "Show", release_year: 
 
 console.log("Category facet checks passed; every title reachable via Group, Genre and Year.");
 console.log("Discovery shelf checks passed.");
+
+// --- Adult content: hidden by default, gated by group/name keywords --------
+const adultByGroup: Channel = { id: 201, playlist_id: 1, name: "Late Night Movie", url: "u201", group_title: "XXX Adult" };
+const adultByName: Channel = { id: 202, playlist_id: 1, name: "Hardcore Porn Channel", url: "u202", group_title: "Entertainment" };
+const notAdult: Channel = { id: 203, playlist_id: 1, name: "Class of 18", url: "u203", group_title: "Drama" };
+assert(isAdult(adultByGroup), "A group tag containing an adult keyword is classified as adult");
+assert(isAdult(adultByName), "A title name containing an adult keyword is classified as adult");
+assert(isAdult({ ...adultByGroup, group_title: "xxx adult" }), "Adult classification is case-insensitive");
+assert(!isAdult(notAdult), "A plain '18' in a title does not falsely match the adult-content guard");
+assert(filterChannels([adultByGroup], "", "all", false, false).length === 0, "Adult titles are hidden when showAdult is off");
+assert(filterChannels([adultByGroup], "", "all", false, true).length === 1, "Adult titles appear once showAdult is on");
