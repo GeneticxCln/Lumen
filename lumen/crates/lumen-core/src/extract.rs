@@ -652,6 +652,31 @@ pub fn parse_ytdlp_json(
     })
 }
 
+/// The yt-dlp command line for extracting `url`, with `--proxy` inserted (before the `--`
+/// positional separator) when network privacy applies. Kept as its own pure function so this is
+/// testable without touching the privacy module's global route state.
+fn ytdlp_args(url: &str, proxy: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "-J",
+        "--no-playlist",
+        "--no-warnings",
+        "--socket-timeout",
+        "15",
+        "-f",
+        YTDLP_FORMAT_SPEC,
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    if let Some(proxy) = proxy {
+        args.push("--proxy".to_string());
+        args.push(proxy.to_string());
+    }
+    args.push("--".to_string());
+    args.push(url.to_string());
+    args
+}
+
 /// Runs `yt-dlp` on `url` and returns the extracted stream URL(s), title, and HTTP headers.
 pub async fn extract_stream(
     url: &str,
@@ -667,20 +692,19 @@ pub async fn extract_stream(
         )
     })?;
 
+    // Fails closed the same way a guarded `reqwest` client and mpv's own startup do: if network
+    // privacy is meant to be on but the relay isn't usable, refuse rather than ever run yt-dlp
+    // (which makes its own HTTP requests, independent of anything this process fetches) unproxied.
+    let proxy = crate::privacy::child_proxy_url()?;
+
     tokio::task::spawn_blocking(move || {
         let mut cmd = Command::new(&binary);
         crate::child_env::scrub(&mut cmd);
-        cmd.args([
-            "-J",
-            "--no-playlist",
-            "--no-warnings",
-            "--socket-timeout",
-            "15",
-            "-f",
-            YTDLP_FORMAT_SPEC,
-            "--",
-            &url_str,
-        ]);
+        // yt-dlp honors `http_proxy`/`https_proxy` from the environment; stripped so an ambient
+        // system proxy can never override the `--proxy` flag this command line sets (or its
+        // absence).
+        crate::child_env::strip_proxy_env(&mut cmd);
+        cmd.args(ytdlp_args(&url_str, proxy.as_deref()));
 
         let (status, stdout, stderr) =
             run_capped_with_timeout(cmd, EXTRACT_TIMEOUT, MAX_EXTRACT_JSON_BYTES)?;
@@ -704,6 +728,41 @@ pub async fn extract_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ytdlp_args_without_a_proxy_is_unchanged() {
+        let args = ytdlp_args("https://example.com/watch", None);
+        assert_eq!(
+            args,
+            vec![
+                "-J",
+                "--no-playlist",
+                "--no-warnings",
+                "--socket-timeout",
+                "15",
+                "-f",
+                YTDLP_FORMAT_SPEC,
+                "--",
+                "https://example.com/watch",
+            ]
+        );
+    }
+
+    #[test]
+    fn ytdlp_args_with_a_proxy_inserts_it_before_the_positional_separator() {
+        let args = ytdlp_args(
+            "https://example.com/watch",
+            Some("http://lumen:tok@127.0.0.1:12345"),
+        );
+        let separator = args.iter().position(|a| a == "--").unwrap();
+        let proxy_flag = args.iter().position(|a| a == "--proxy").unwrap();
+        assert!(
+            proxy_flag < separator,
+            "--proxy must come before -- so it is never mistaken for a URL to extract"
+        );
+        assert_eq!(args[proxy_flag + 1], "http://lumen:tok@127.0.0.1:12345");
+        assert_eq!(args.last().unwrap(), "https://example.com/watch");
+    }
 
     #[test]
     fn parses_combined_stream_json() {
