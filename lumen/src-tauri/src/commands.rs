@@ -1050,6 +1050,26 @@ pub async fn toggle_favorite_cmd(channel_id: i64, app: AppHandle) -> Result<bool
     Ok(favorite)
 }
 
+/// Saves a manual Kind/Genre correction for a title TMDB has not matched. Refused once TMDB has
+/// actually matched the channel, since TMDB stays authoritative there.
+#[tauri::command]
+pub async fn set_category_override_cmd(
+    channel_id: i64,
+    kind: Option<String>,
+    genres: Option<Vec<String>>,
+    app: AppHandle,
+) -> Result<()> {
+    let pool = ensure_db(&app).await?;
+    set_category_override(pool, channel_id, kind.as_deref(), genres.as_deref()).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn clear_category_override_cmd(channel_id: i64, app: AppHandle) -> Result<()> {
+    let pool = ensure_db(&app).await?;
+    clear_category_override(pool, channel_id).await
+}
+
 #[tauri::command]
 pub async fn list_favorites_cmd(app: AppHandle) -> Result<Vec<i64>> {
     let pool = ensure_db(&app).await?;

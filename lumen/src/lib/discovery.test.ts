@@ -72,6 +72,13 @@ assert(genresOf(categorised[2]).source === "inferred" && genresOf(categorised[2]
 assert(genresOf(categorised[4]).names[0] === "Unmapped", "An unfamiliar source group stays reachable through Genre");
 assert(genresOf(categorised[5]).names[0] === "Uncategorized", "A title without source tags gets an explicit fallback genre");
 
+// --- Manual category override: a correction TMDB never matched ------------
+const overridden = { ...categorised[2], category_override_kind: "series" as const, category_override_genres: "Comedy;Family" };
+assert(genresOf(overridden).source === "override" && genresOf(overridden).names.join(",") === "Comedy,Family", "A saved override wins over the inferred guess");
+assert(genresOf({ ...categorised[0], category_override_genres: "Comedy" }).source === "tmdb", "TMDB stays authoritative over an override that should never have been saved for a matched title");
+assert(contentKind(overridden) === "series", "A saved Kind override wins over the group/name guess");
+assert(contentKind({ ...categorised[0], category_override_kind: "series" }) === "movie", "TMDB's own media type still wins over an override");
+
 assert(contentKind(categorised[0]) === "movie" && contentKind({ ...categorised[0], tmdb_type: "tv" }) === "series", "TMDB media type classifies enriched titles for the right browse layout");
 assert(contentKind({ ...categorised[0], tmdb_type: undefined, group_title: "Movies" }) === "movie", "Unmatched titles retain the source-name classification fallback");
 const plain: Channel = { id: 90, playlist_id: 1, name: "Channel 9", url: "https://example.org/9", group_title: "General" };

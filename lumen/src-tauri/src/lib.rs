@@ -137,6 +137,8 @@ pub fn run() {
             harvest_page,
             probe_urls,
             toggle_favorite_cmd,
+            set_category_override_cmd,
+            clear_category_override_cmd,
             list_favorites_cmd,
             get_history_cmd,
             save_progress_cmd,

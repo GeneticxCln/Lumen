@@ -288,6 +288,13 @@ kbd { background: var(--bg-secondary); border-color: var(--border); color: var(-
 .facet-chip:disabled{opacity:.32}
 .facet-count{color:var(--muted);font-size:9px;font-variant-numeric:tabular-nums}
 .facet-results{min-width:0}
+
+/* Manual category override (Details dialog) */
+.category-override{margin:16px 0 20px;padding:14px 16px;border:1px solid var(--border);border-radius:8px;background:var(--bg-secondary)}
+.category-override-field{display:flex;align-items:center;gap:10px;margin:10px 0}
+.category-override-field span{font-size:11px;font-weight:650;color:var(--fg-secondary)}
+.category-override-field select{width:auto;margin:0}
+.category-override-genres{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
 .facet-results-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:2px 0 16px}
 .facet-results-heading h2{margin:0;font-size:19px;letter-spacing:-.35px}
 .facet-results-heading p{margin:5px 0 0;color:var(--muted);font-size:11px}

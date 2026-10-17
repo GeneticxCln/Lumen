@@ -1,5 +1,5 @@
 use crate::auth;
-use crate::content_key::{ContentKey, parse_season_episode};
+use crate::content_key::{CategoryOverride, ContentKey, parse_season_episode};
 use crate::error::{PlayerError, Result};
 use crate::pin_guard;
 use crate::playlist::import::{Channel, Playlist, import_m3u_file};
@@ -565,6 +565,10 @@ pub struct EnrichedChannel {
     pub rating: Option<f64>,
     pub genre_names: Option<String>,
     pub enriched_at: Option<i64>,
+    /// A user's manual Kind/Genre correction, merged in only when `tmdb_id` is `None` — TMDB
+    /// stays authoritative whenever it has actually matched this title.
+    pub category_override_kind: Option<String>,
+    pub category_override_genres: Option<String>,
 }
 
 /// The single channel-listing query, used by both the command layer and the tests.
@@ -623,36 +627,104 @@ pub async fn list_channels(
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
+    // A content_key per row that has no TMDB match, so its override (if any) can be looked up;
+    // `None` for a TMDB-matched row, since TMDB stays authoritative and any leftover override
+    // row must be ignored.
+    let content_keys: Vec<Option<String>> = rows
+        .iter()
+        .map(|row| {
+            let tmdb_id: Option<i64> = row.get("tmdb_id");
+            if tmdb_id.is_some() {
+                return None;
+            }
+            let name: String = row.get("name");
+            let url: String = row.get("url");
+            let tvg_id: Option<String> = row.get("tvg_id");
+            Some(ContentKey::derive(None, None, &name, tvg_id.as_deref(), &url).into_string())
+        })
+        .collect();
+
+    let overrides =
+        fetch_category_overrides(pool, content_keys.iter().filter_map(|key| key.as_deref()))
+            .await?;
+
     let channels = rows
         .into_iter()
-        .map(|row| EnrichedChannel {
-            channel: Channel {
-                id: Some(row.get("id")),
-                playlist_id: row.get("playlist_id"),
-                name: row.get("name"),
-                url: row.get("url"),
-                group_title: row.get("group_title"),
-                tvg_id: row.get("tvg_id"),
-                tvg_logo: row.get("tvg_logo"),
-                language: row.get("language"),
-                extra_headers: row.get("extra_headers"),
-                last_ok: row.get("last_ok"),
-                last_error: row.get("last_error"),
-                is_live: row.get::<Option<i64>, _>("is_live").map(|value| value != 0),
-            },
-            tmdb_id: row.get("tmdb_id"),
-            tmdb_type: row.get("tmdb_type"),
-            poster_path: row.get("poster_path"),
-            backdrop_path: row.get("backdrop_path"),
-            overview: row.get("overview"),
-            release_year: row.get("release_year"),
-            rating: row.get("rating"),
-            genre_names: row.get("genre_names"),
-            enriched_at: row.get("enriched_at"),
+        .zip(content_keys)
+        .map(|(row, content_key)| {
+            let override_row = content_key.as_deref().and_then(|key| overrides.get(key));
+            EnrichedChannel {
+                channel: Channel {
+                    id: Some(row.get("id")),
+                    playlist_id: row.get("playlist_id"),
+                    name: row.get("name"),
+                    url: row.get("url"),
+                    group_title: row.get("group_title"),
+                    tvg_id: row.get("tvg_id"),
+                    tvg_logo: row.get("tvg_logo"),
+                    language: row.get("language"),
+                    extra_headers: row.get("extra_headers"),
+                    last_ok: row.get("last_ok"),
+                    last_error: row.get("last_error"),
+                    is_live: row.get::<Option<i64>, _>("is_live").map(|value| value != 0),
+                },
+                tmdb_id: row.get("tmdb_id"),
+                tmdb_type: row.get("tmdb_type"),
+                poster_path: row.get("poster_path"),
+                backdrop_path: row.get("backdrop_path"),
+                overview: row.get("overview"),
+                release_year: row.get("release_year"),
+                rating: row.get("rating"),
+                genre_names: row.get("genre_names"),
+                enriched_at: row.get("enriched_at"),
+                category_override_kind: override_row.and_then(|o| o.kind.clone()),
+                category_override_genres: override_row.and_then(|o| o.genres.clone()),
+            }
         })
         .collect();
 
     Ok(channels)
+}
+
+/// Batch-fetches overrides for exactly the given content keys, so listing channels never issues
+/// one query per row.
+async fn fetch_category_overrides<'a>(
+    pool: &Pool<Sqlite>,
+    keys: impl Iterator<Item = &'a str>,
+) -> Result<HashMap<String, CategoryOverride>> {
+    let keys: Vec<&str> = keys.collect();
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+        "SELECT content_key, kind, genres FROM category_overrides WHERE content_key IN (",
+    );
+    {
+        let mut separated = qb.separated(", ");
+        for key in &keys {
+            separated.push_bind(*key);
+        }
+    }
+    qb.push(")");
+    let rows = qb
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let content_key: String = row.get("content_key");
+            (
+                content_key.clone(),
+                CategoryOverride {
+                    content_key,
+                    kind: row.get("kind"),
+                    genres: row.get("genres"),
+                },
+            )
+        })
+        .collect())
 }
 
 pub async fn get_channel(pool: &Pool<Sqlite>, channel_id: i64) -> Result<Channel> {
@@ -835,6 +907,79 @@ pub async fn list_favorites(pool: &Pool<Sqlite>, profile_id: i64) -> Result<Vec<
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
     Ok(rows.into_iter().map(|r| r.get("id")).collect())
+}
+
+/// Saves the manual Kind/Genre correction for a title TMDB has not matched, replacing whatever
+/// was saved before (`None` for a field means "no override for that piece", not "leave it
+/// alone" — the caller always sends the whole desired state). Passing `None` for both clears the
+/// row entirely. Keyed by content_key so the correction survives re-imports and applies to every
+/// playlist row that resolves to the same title. Refuses a channel that already carries a real
+/// TMDB match: TMDB stays authoritative there.
+pub async fn set_category_override(
+    pool: &Pool<Sqlite>,
+    channel_id: i64,
+    kind: Option<&str>,
+    genres: Option<&[String]>,
+) -> Result<CategoryOverride> {
+    let row = sqlx::query("SELECT name, url, tvg_id, tmdb_id FROM channels WHERE id = ?")
+        .bind(channel_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let Some(row) = row else {
+        return Err(PlayerError::NotFound("Channel no longer exists".into()));
+    };
+    let tmdb_id: Option<i64> = row.get("tmdb_id");
+    if tmdb_id.is_some() {
+        return Err(PlayerError::InvalidArg(
+            "This title already has real metadata from TMDB; it cannot be overridden".into(),
+        ));
+    }
+    let name: String = row.get("name");
+    let url: String = row.get("url");
+    let tvg_id: Option<String> = row.get("tvg_id");
+    let content_key = ContentKey::derive(None, None, &name, tvg_id.as_deref(), &url).into_string();
+    let genres_joined = genres.map(|g| g.join(";"));
+
+    if kind.is_none() && genres_joined.is_none() {
+        sqlx::query("DELETE FROM category_overrides WHERE content_key = ?")
+            .bind(&content_key)
+            .execute(pool)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        return Ok(CategoryOverride {
+            content_key,
+            kind: None,
+            genres: None,
+        });
+    }
+
+    let now = Utc::now().timestamp();
+    sqlx::query(
+        "INSERT INTO category_overrides (content_key, kind, genres, created_at, updated_at) VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT(content_key) DO UPDATE SET kind = excluded.kind, genres = excluded.genres, updated_at = excluded.updated_at",
+    )
+    .bind(&content_key)
+    .bind(kind)
+    .bind(&genres_joined)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    Ok(CategoryOverride {
+        content_key,
+        kind: kind.map(String::from),
+        genres: genres_joined,
+    })
+}
+
+/// Clears any override for a channel's content_key. Equivalent to
+/// `set_category_override(pool, channel_id, None, None)`.
+pub async fn clear_category_override(pool: &Pool<Sqlite>, channel_id: i64) -> Result<()> {
+    set_category_override(pool, channel_id, None, None).await?;
+    Ok(())
 }
 
 /// A local identity. `pin_hash` is never sent to the frontend; `has_pin` says whether one is
@@ -1607,6 +1752,158 @@ mod tests {
             extract_origin_for_channel(&pool, 9_999).await.unwrap(),
             None
         );
+    }
+
+    fn test_channel(name: &str, url: &str, tvg_id: Option<&str>) -> Channel {
+        Channel {
+            id: None,
+            playlist_id: 0,
+            name: name.into(),
+            url: url.into(),
+            group_title: None,
+            tvg_id: tvg_id.map(String::from),
+            tvg_logo: None,
+            language: None,
+            extra_headers: None,
+            last_ok: None,
+            last_error: None,
+            is_live: None,
+        }
+    }
+
+    async fn insert_test_playlist(pool: &Pool<Sqlite>, channels: &[Channel]) -> i64 {
+        let playlist = Playlist {
+            id: None,
+            name: "Test".into(),
+            source: "url".into(),
+            origin: None,
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        import_playlist(pool, &playlist, channels).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn setting_an_override_is_merged_into_list_channels() {
+        let pool = test_pool().await;
+        let playlist_id = insert_test_playlist(
+            &pool,
+            &[test_channel(
+                "Local News",
+                "https://cdn.example/news.m3u8",
+                Some("news.local"),
+            )],
+        )
+        .await;
+        let channels = list_channels(&pool, playlist_id, None, None).await.unwrap();
+        let channel_id = channels[0].channel.id.unwrap();
+        assert_eq!(channels[0].category_override_kind, None);
+
+        set_category_override(
+            &pool,
+            channel_id,
+            Some("series"),
+            Some(&["Comedy".to_string(), "Family".to_string()]),
+        )
+        .await
+        .unwrap();
+
+        let channels = list_channels(&pool, playlist_id, None, None).await.unwrap();
+        assert_eq!(
+            channels[0].category_override_kind.as_deref(),
+            Some("series")
+        );
+        assert_eq!(
+            channels[0].category_override_genres.as_deref(),
+            Some("Comedy;Family")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_override_is_refused_once_tmdb_has_matched_the_channel() {
+        let pool = test_pool().await;
+        let playlist_id = insert_test_playlist(
+            &pool,
+            &[test_channel(
+                "Fight Club",
+                "https://cdn.example/fc.m3u8",
+                None,
+            )],
+        )
+        .await;
+        let channels = list_channels(&pool, playlist_id, None, None).await.unwrap();
+        let channel_id = channels[0].channel.id.unwrap();
+        sqlx::query("UPDATE channels SET tmdb_id = 550, tmdb_type = 'movie' WHERE id = ?")
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let error = set_category_override(&pool, channel_id, Some("movie"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PlayerError::InvalidArg(_)));
+
+        // list_channels must never surface an override for a TMDB-matched row either, even if
+        // one somehow still exists in the table.
+        let channels = list_channels(&pool, playlist_id, None, None).await.unwrap();
+        assert_eq!(channels[0].category_override_kind, None);
+    }
+
+    #[tokio::test]
+    async fn two_channels_sharing_a_tvg_id_share_one_override() {
+        let pool = test_pool().await;
+        let playlist_id = insert_test_playlist(
+            &pool,
+            &[
+                test_channel("News HD", "https://a.example/news.m3u8", Some("news.id")),
+                test_channel(
+                    "News SD (mirror)",
+                    "https://b.example/news-mirror.m3u8",
+                    Some("news.id"),
+                ),
+            ],
+        )
+        .await;
+        let channels = list_channels(&pool, playlist_id, None, None).await.unwrap();
+        let first_id = channels[0].channel.id.unwrap();
+
+        set_category_override(&pool, first_id, Some("live"), Some(&["News".to_string()]))
+            .await
+            .unwrap();
+
+        let channels = list_channels(&pool, playlist_id, None, None).await.unwrap();
+        assert!(
+            channels
+                .iter()
+                .all(|c| c.category_override_kind.as_deref() == Some("live")),
+            "both rows share a content_key, so both must see the same override"
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_an_override_reverts_to_inferred_values() {
+        let pool = test_pool().await;
+        let playlist_id = insert_test_playlist(
+            &pool,
+            &[test_channel(
+                "Local News",
+                "https://cdn.example/news.m3u8",
+                Some("news.local"),
+            )],
+        )
+        .await;
+        let channels = list_channels(&pool, playlist_id, None, None).await.unwrap();
+        let channel_id = channels[0].channel.id.unwrap();
+
+        set_category_override(&pool, channel_id, Some("series"), None)
+            .await
+            .unwrap();
+        clear_category_override(&pool, channel_id).await.unwrap();
+
+        let channels = list_channels(&pool, playlist_id, None, None).await.unwrap();
+        assert_eq!(channels[0].category_override_kind, None);
+        assert_eq!(channels[0].category_override_genres, None);
     }
 
     #[tokio::test]
