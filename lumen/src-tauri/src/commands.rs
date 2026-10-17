@@ -35,6 +35,31 @@ static PLAYBACK_BACKEND: OnceLock<BackendCell> = OnceLock::new();
 /// another file has been started since.
 static PLAY_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+// Starting mpv for a new backend happens with `PLAYBACK_BACKEND` unlocked (see above), so a Stop
+// or a newer Play can land while one is still starting. Each attempt to create a backend gets a
+// ticket from `BACKEND_START_ATTEMPT`; `stop()` bumps `BACKEND_CANCELLED_THROUGH` to the latest
+// ticket when it finds the cell empty, so an in-flight start it couldn't reach yet stops itself
+// instead of being silently ignored. The same ticket also means that of two Plays racing while
+// the cell is empty, only the newest one is ever stored — the other stops itself rather than
+// being left running as an orphaned, uncontrollable mpv process.
+static BACKEND_START_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BACKEND_CANCELLED_THROUGH: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Whether a backend-creation attempt has been superseded by a Stop or a newer Play issued
+/// since it started, and so should stop itself instead of being stored.
+fn backend_attempt_is_stale(attempt: u64) -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    attempt <= BACKEND_CANCELLED_THROUGH.load(SeqCst)
+        || attempt != BACKEND_START_ATTEMPT.load(SeqCst)
+}
+
+/// A per-call uniquifier for poster/filmstrip scratch filenames, alongside the (constant for
+/// the whole app run) process id: two concurrent requests for the same cache key — e.g. a shelf
+/// thumbnail and a detail-view poster for the same video — would otherwise run `ffmpeg` against
+/// the identical temp path and corrupt or delete each other's output.
+static THUMBNAIL_CALL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub async fn get_playback_backend() -> Result<BackendCell> {
     let backend = PLAYBACK_BACKEND.get_or_init(|| Arc::new(Mutex::new(None)));
     Ok(backend.clone())
@@ -130,6 +155,8 @@ async fn play_url_inner(
         None => {
             // Starting mpv can take up to its full socket-wait timeout, so build the new backend
             // with the lock released: Stop/Pause/Seek must never block behind a slow start.
+            let attempt =
+                BACKEND_START_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             let mut args = extra_args.clone();
             embed::set_in_use(false);
             let mut in_window = None;
@@ -171,7 +198,21 @@ async fn play_url_inner(
                 }
                 None => MpvIpcBackend::new(Some(app.clone()), &hwdec, &cache, &args).await?,
             });
+
+            // A Stop that arrived while this was starting, or a newer Play that has since
+            // superseded it, means this backend was never wanted: stop it instead of storing it,
+            // rather than leaving it running as an orphan nothing can reach, or playing it
+            // despite the Stop the user already issued.
+            if backend_attempt_is_stale(attempt) {
+                let _ = backend.stop().await;
+                return Ok(());
+            }
             let mut guard = backend_cell.lock().await;
+            if backend_attempt_is_stale(attempt) {
+                drop(guard);
+                let _ = backend.stop().await;
+                return Ok(());
+            }
             *guard = Some(backend.clone());
             backend
         }
@@ -516,9 +557,21 @@ pub async fn stop(app: AppHandle) -> Result<()> {
         let mut guard = backend_cell.lock().await;
         guard.take()
     };
-    if let Some(backend) = taken {
-        // `stop` cancels any load still waiting on this backend before telling mpv to quit.
-        let _ = backend.stop().await;
+    match taken {
+        Some(backend) => {
+            // `stop` cancels any load still waiting on this backend before telling mpv to quit.
+            let _ = backend.stop().await;
+        }
+        None => {
+            // No backend exists yet, but one may currently be starting (`play_url_inner` builds
+            // it with this lock released). Cancel every attempt issued so far so that backend
+            // stops itself the moment it finishes starting, instead of this Stop being silently
+            // swallowed and mpv playing anyway.
+            BACKEND_CANCELLED_THROUGH.store(
+                BACKEND_START_ATTEMPT.load(std::sync::atomic::Ordering::SeqCst),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
     }
     let _ = app.emit("player://state", PlayerStateEvent::default());
     if embed::in_use() {
@@ -1295,7 +1348,8 @@ fn generate_local_filmstrip(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<u8>
         })?;
 
     std::fs::create_dir_all(&cache_dir)?;
-    let temporary = cache_dir.join(format!(".{key}-{}.jpg", std::process::id()));
+    let call_id = THUMBNAIL_CALL_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let temporary = cache_dir.join(format!(".{key}-{}-{call_id}.jpg", std::process::id()));
     let mut command = Command::new("ffmpeg");
     command.args(["-nostdin", "-hide_banner", "-loglevel", "error"]);
     for fraction in [0.12, 0.36, 0.62, 0.88] {
@@ -1517,7 +1571,8 @@ fn generate_local_thumbnail(
     }
 
     std::fs::create_dir_all(&cache_dir)?;
-    let temporary = cache_dir.join(format!(".{key}-{}.jpg", std::process::id()));
+    let call_id = THUMBNAIL_CALL_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let temporary = cache_dir.join(format!(".{key}-{}-{call_id}.jpg", std::process::id()));
     let mut last_error = None;
     // The requested frame skips intros; for saved posters, retry at the first frame for clips shorter than that.
     let requested = frame_seconds.to_string();
@@ -2164,6 +2219,58 @@ mod local_path_tests {
         fs::remove_dir_all(temp).expect("remove test fixture");
     }
 
+    /// Two requests for the same video (e.g. a shelf thumbnail and a detail-view poster both
+    /// racing before either's cache entry exists) must not collide on one scratch filename and
+    /// corrupt or delete each other's output.
+    #[test]
+    fn concurrent_requests_for_the_same_video_do_not_collide_on_one_temp_file() {
+        let temp = std::env::temp_dir().join(format!(
+            "lumen-concurrent-poster-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).expect("temporary test directory");
+        let video = temp.join("clip.mp4");
+        let generated = std::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=640x360:d=1",
+                "-frames:v",
+                "1",
+                "-y",
+            ])
+            .arg(&video)
+            .output()
+            .expect("ffmpeg should be installed for the concurrency integration test");
+        assert!(
+            generated.status.success(),
+            "could not create test video: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+
+        let cache = temp.join("cache");
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let video = video.clone();
+                let cache = cache.clone();
+                thread::spawn(move || generate_local_thumbnail(video, cache, 0, true))
+            })
+            .collect();
+        for handle in handles {
+            let bytes = handle
+                .join()
+                .expect("thread did not panic")
+                .expect("concurrent requests for the same video must all succeed");
+            assert!(bytes.starts_with(&[0xff, 0xd8]), "poster is a valid JPEG");
+        }
+        fs::remove_dir_all(temp).expect("remove test fixture");
+    }
+
     #[test]
     fn poster_frame_setting_accepts_only_offered_times() {
         assert_eq!(parse_poster_frame_seconds("5"), Some(5));
@@ -2456,5 +2563,50 @@ mod privacy_args_tests {
         assert!(args.ends_with(
             "--http-proxy=http://lumen:tok@127.0.0.1:12345 --ytdl=no --load-unsafe-playlists=no"
         ));
+    }
+}
+
+#[cfg(test)]
+mod backend_start_attempt_tests {
+    // Both scenarios live in one test function so they run strictly sequentially: these
+    // statics are process-global, and nothing else in this binary touches them, but two
+    // `#[test]` functions mutating the same counters could otherwise interleave across
+    // threads and see each other's tickets.
+    use super::{BACKEND_CANCELLED_THROUGH, BACKEND_START_ATTEMPT, backend_attempt_is_stale};
+    use std::sync::atomic::Ordering::SeqCst;
+
+    #[test]
+    fn backend_attempt_staleness_tracks_stop_and_newer_plays() {
+        // Mirrors `play_url_inner`'s `None =>` branch taking a ticket, and `stop()`'s `None =>`
+        // branch cancelling every ticket issued so far when it finds the backend cell empty.
+        let attempt = BACKEND_START_ATTEMPT.fetch_add(1, SeqCst) + 1;
+        assert!(
+            !backend_attempt_is_stale(attempt),
+            "a fresh attempt is not stale on its own"
+        );
+
+        // Stop runs while this attempt is still "starting mpv" and finds the cell empty.
+        BACKEND_CANCELLED_THROUGH.store(BACKEND_START_ATTEMPT.load(SeqCst), SeqCst);
+        assert!(
+            backend_attempt_is_stale(attempt),
+            "the in-flight attempt must stop itself once Stop cancels everything issued so far"
+        );
+
+        // A later, unrelated Play is not punished by an earlier Stop.
+        let later = BACKEND_START_ATTEMPT.fetch_add(1, SeqCst) + 1;
+        assert!(!backend_attempt_is_stale(later));
+
+        // Two Plays racing while the backend cell is empty: only the newest attempt ever gets
+        // stored, so fast channel-surfing never leaves an orphaned mpv process nothing can reach.
+        let older = BACKEND_START_ATTEMPT.fetch_add(1, SeqCst) + 1;
+        let newer = BACKEND_START_ATTEMPT.fetch_add(1, SeqCst) + 1;
+        assert!(
+            backend_attempt_is_stale(older),
+            "the older attempt was superseded before it ever finished starting"
+        );
+        assert!(
+            !backend_attempt_is_stale(newer),
+            "the newest attempt is the one that should be stored"
+        );
     }
 }

@@ -426,7 +426,10 @@ function App() {
     series: available.filter((channel) => contentKind(channel) === "series"),
     live: available.filter((channel) => contentKind(channel) === "live"),
   }), [available]);
-  const myList = useMemo(() => library.allChannels.filter((channel) => library.favoriteIds.has(channel.id) && !isLocalPath(channel.url)), [library.allChannels, library.favoriteIds]);
+  // Favorites always show regardless of availability (unlike `available`, there's no
+  // `hideUnavailable` check here), but the Adult toggle is a content-visibility policy, not an
+  // availability signal, so it still applies here the same as everywhere else.
+  const myList = useMemo(() => library.allChannels.filter((channel) => library.favoriteIds.has(channel.id) && !isLocalPath(channel.url) && (preferences.showAdult || !isAdult(channel))), [library.allChannels, library.favoriteIds, preferences.showAdult]);
   // Entries added since this profile last used Lumen. The backend answers the same way for the
   // whole session, so this is "since the previous session" however often it is asked.
   const [newChannelIds, setNewChannelIds] = useState<number[]>([]);

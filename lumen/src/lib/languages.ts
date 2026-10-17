@@ -1,4 +1,4 @@
-import { currentLocale } from "../i18n/index.ts";
+import { currentLocale, t } from "../i18n/index.ts";
 
 // Codes are ISO 639-1, which mpv matches against track tags. The English names are the fallback.
 const ENGLISH_NAMES: [string, string][] = [
@@ -69,6 +69,7 @@ export function clampScale(scale: number): number {
 
 /** "+0.5 s", "-1.0 s", "0 s". */
 export function formatDelay(seconds: number): string {
-  if (seconds === 0) return "0 s";
-  return `${seconds > 0 ? "+" : "-"}${Math.abs(seconds).toFixed(1)} s`;
+  if (seconds === 0) return t("lib.units.secondsDelay", { value: "0" });
+  const sign = seconds > 0 ? "+" : "-";
+  return t("lib.units.secondsDelay", { value: `${sign}${Math.abs(seconds).toFixed(1)}` });
 }

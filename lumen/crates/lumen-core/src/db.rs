@@ -450,8 +450,8 @@ pub async fn delete_playlist(pool: &Pool<Sqlite>, playlist_id: i64) -> Result<()
 
     // Favorites are keyed by URL and outlive channel rows. A favorite whose stream only this
     // playlist carried can no longer be reached, so it is tombstoned and the removal syncs.
-    let orphaned: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT f.profile_id, f.channel_url FROM favorites f
+    let orphaned: Vec<(i64, String, Option<String>)> = sqlx::query_as(
+        "SELECT f.profile_id, f.channel_url, f.content_key FROM favorites f
          WHERE f.active = 1
            AND f.channel_url IN (SELECT url FROM channels WHERE playlist_id = ?)
            AND NOT EXISTS (
@@ -470,8 +470,15 @@ pub async fn delete_playlist(pool: &Pool<Sqlite>, playlist_id: i64) -> Result<()
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    for (profile_id, url) in orphaned {
-        let content_key = resolve_content_key(pool, None, &url).await;
+    for (profile_id, url, stored_content_key) in orphaned {
+        // Use the content_key already stored on the favorite, the same one `sync::queue_favorite`
+        // used when the favorite was created: the channel row (and its tvg_id/TMDB match) is
+        // already gone at this point, so re-deriving it would silently fall back to a different
+        // key and the tombstone would miss the original synced record entirely.
+        let content_key = match stored_content_key {
+            Some(key) => key,
+            None => resolve_content_key(pool, None, &url).await,
+        };
         sqlx::query(
             "UPDATE favorites SET active = 0, updated_at = ? WHERE profile_id = ? AND channel_url = ?",
         )
@@ -692,28 +699,36 @@ async fn fetch_category_overrides<'a>(
     pool: &Pool<Sqlite>,
     keys: impl Iterator<Item = &'a str>,
 ) -> Result<HashMap<String, CategoryOverride>> {
-    let keys: Vec<&str> = keys.collect();
+    // Dedupe first: channels sharing a tvg_id (and so one content_key) would otherwise each
+    // count separately toward the per-chunk bind limit below.
+    let keys: Vec<&str> = keys
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
     if keys.is_empty() {
         return Ok(HashMap::new());
     }
-    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
-        "SELECT content_key, kind, genres FROM category_overrides WHERE content_key IN (",
-    );
-    {
-        let mut separated = qb.separated(", ");
-        for key in &keys {
-            separated.push_bind(*key);
+    let mut overrides = HashMap::new();
+    // Chunked at 100, the same limit `insert_channel_rows` uses, to stay well below SQLite's
+    // 999/32766 bind parameter limits: an aggregated IPTV playlist can carry tens of thousands
+    // of unmatched channels, and one query for all of them can exceed the limit outright.
+    for chunk in keys.chunks(100) {
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+            "SELECT content_key, kind, genres FROM category_overrides WHERE content_key IN (",
+        );
+        {
+            let mut separated = qb.separated(", ");
+            for key in chunk {
+                separated.push_bind(*key);
+            }
         }
-    }
-    qb.push(")");
-    let rows = qb
-        .build()
-        .fetch_all(pool)
-        .await
-        .map_err(|e| PlayerError::Sql(e.to_string()))?;
-    Ok(rows
-        .into_iter()
-        .map(|row| {
+        qb.push(")");
+        let rows = qb
+            .build()
+            .fetch_all(pool)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        overrides.extend(rows.into_iter().map(|row| {
             let content_key: String = row.get("content_key");
             (
                 content_key.clone(),
@@ -723,8 +738,9 @@ async fn fetch_category_overrides<'a>(
                     genres: row.get("genres"),
                 },
             )
-        })
-        .collect())
+        }));
+    }
+    Ok(overrides)
 }
 
 pub async fn get_channel(pool: &Pool<Sqlite>, channel_id: i64) -> Result<Channel> {
@@ -1819,6 +1835,46 @@ mod tests {
         );
     }
 
+    /// `fetch_category_overrides` chunks its `IN (...)` query at 100 keys, the same limit
+    /// `insert_channel_rows` uses for batch inserts. A playlist with more unmatched channels
+    /// than that must still return every override merged in, not fail or silently drop some.
+    #[tokio::test]
+    async fn overrides_past_the_single_query_chunk_size_are_all_merged_in() {
+        let pool = test_pool().await;
+        let channels: Vec<Channel> = (0..150)
+            .map(|index| {
+                test_channel(
+                    &format!("Channel {index}"),
+                    &format!("https://cdn.example/ch{index}.m3u8"),
+                    Some(&format!("ch{index}")),
+                )
+            })
+            .collect();
+        let playlist_id = insert_test_playlist(&pool, &channels).await;
+        let listed = list_channels(&pool, playlist_id, None, None).await.unwrap();
+        assert_eq!(listed.len(), 150);
+
+        for channel in &listed {
+            set_category_override(
+                &pool,
+                channel.channel.id.unwrap(),
+                Some("live"),
+                Some(&["News".to_string()]),
+            )
+            .await
+            .unwrap();
+        }
+
+        let listed = list_channels(&pool, playlist_id, None, None).await.unwrap();
+        assert_eq!(listed.len(), 150);
+        assert!(
+            listed
+                .iter()
+                .all(|channel| channel.category_override_kind.as_deref() == Some("live")),
+            "every one of the 150 overrides must be merged in, not just the first chunk"
+        );
+    }
+
     #[tokio::test]
     async fn an_override_is_refused_once_tmdb_has_matched_the_channel() {
         let pool = test_pool().await;
@@ -2864,5 +2920,67 @@ mod tests {
         assert!(list_playlists(pool).await.unwrap().is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Deleting a playlist tombstones an orphaned favorite under the exact same sync item_key
+    /// it was created with, not a freshly re-derived one — otherwise the tombstone pushes a new,
+    /// unrelated sync record and the original "active favorite" record never gets cleared on
+    /// other devices.
+    #[tokio::test]
+    async fn deleting_a_playlist_tombstones_a_favorite_under_its_original_sync_key() {
+        let pool = test_pool().await;
+        let playlist_id = insert_test_playlist(
+            &pool,
+            &[test_channel(
+                "BBC One",
+                "https://cdn.example/bbc1.m3u8",
+                Some("bbc1.uk"),
+            )],
+        )
+        .await;
+        let channel_id = list_channels(&pool, playlist_id, None, None).await.unwrap()[0]
+            .channel
+            .id
+            .unwrap();
+
+        // A profile with a sync key behaves as if sync is enabled, without needing the real
+        // keyring/server plumbing: `queue_favorite` only checks `profiles.sync_key`.
+        sqlx::query("UPDATE profiles SET sync_key = 'test-sync-key' WHERE id = ?")
+            .bind(DEFAULT_PROFILE_ID)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(
+            toggle_favorite(&pool, DEFAULT_PROFILE_ID, channel_id)
+                .await
+                .unwrap()
+        );
+        let queued_before: Vec<(String, i64)> =
+            sqlx::query_as("SELECT item_key, deleted FROM sync_queue WHERE kind = 'favorite'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(queued_before.len(), 1, "one favorite queued for sync");
+        assert_eq!(queued_before[0].1, 0, "queued as active");
+        let item_key = queued_before[0].0.clone();
+
+        delete_playlist(&pool, playlist_id).await.unwrap();
+
+        let queued_after: Vec<(String, i64)> =
+            sqlx::query_as("SELECT item_key, deleted FROM sync_queue WHERE kind = 'favorite'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            queued_after.len(),
+            1,
+            "the tombstone must update the existing sync record, not add a second one"
+        );
+        assert_eq!(
+            queued_after[0].0, item_key,
+            "the tombstone must reuse the favorite's original sync item_key"
+        );
+        assert_eq!(queued_after[0].1, 1, "queued as removed");
     }
 }
