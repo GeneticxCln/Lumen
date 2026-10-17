@@ -100,7 +100,7 @@ export function SettingsPage({
   const [loadRevision, setLoadRevision] = useState(0);
   const [engineError, setEngineError] = useState<string | null>(null);
   const [savedEngine, setSavedEngine] = useState({ hwdec: "auto-safe", cache: "yes", extraArgs: "" });
-  const appearanceKeys = ["theme", "compactCards", "reduceMotion", "personalizedRows", "hideUnavailable"] as const;
+  const appearanceKeys = ["theme", "compactCards", "reduceMotion", "personalizedRows", "hideUnavailable", "showAdult"] as const;
   const draftDirty = section === "appearance" ? appearanceKeys.some((key) => draft[key] !== preferences[key])
     : section === "shortcuts" ? draft.keyboardShortcuts !== preferences.keyboardShortcuts
     : section === "playback" ? hwdec !== savedEngine.hwdec || cache !== savedEngine.cache || extraArgs.trim() !== savedEngine.extraArgs || draft.defaultVolume !== preferences.defaultVolume : false;
@@ -284,7 +284,7 @@ export function SettingsPage({
         setSavedEngine({ hwdec, cache, extraArgs: extraArgs.trim() });
         next.defaultVolume = draft.defaultVolume;
       } else if (section === "appearance") {
-        next = { ...next, theme: draft.theme, compactCards: draft.compactCards, reduceMotion: draft.reduceMotion, personalizedRows: draft.personalizedRows, hideUnavailable: draft.hideUnavailable };
+        next = { ...next, theme: draft.theme, compactCards: draft.compactCards, reduceMotion: draft.reduceMotion, personalizedRows: draft.personalizedRows, hideUnavailable: draft.hideUnavailable, showAdult: draft.showAdult };
       } else if (section === "shortcuts") next.keyboardShortcuts = draft.keyboardShortcuts;
       localStorage.setItem("lumen.preferences", JSON.stringify(next));
       onPreferencesChange(next);
@@ -297,7 +297,7 @@ export function SettingsPage({
   };
 
   const toggle = (
-    key: "compactCards" | "reduceMotion" | "hideUnavailable" | "personalizedRows" | "keyboardShortcuts",
+    key: "compactCards" | "reduceMotion" | "hideUnavailable" | "showAdult" | "personalizedRows" | "keyboardShortcuts",
     label: string,
     description: string
   ) => (
@@ -677,6 +677,7 @@ export function SettingsPage({
             {toggle("reduceMotion", t("settings.appearance.reduceMotionLabel"), t("settings.appearance.reduceMotionDescription"))}
             {toggle("personalizedRows", t("settings.appearance.personalizedLabel"), t("settings.appearance.personalizedDescription"))}
             {toggle("hideUnavailable", t("settings.appearance.hideUnavailableLabel"), t("settings.appearance.hideUnavailableDescription"))}
+            {toggle("showAdult", t("settings.appearance.showAdultLabel"), t("settings.appearance.showAdultDescription"))}
           </>
         )}
 
@@ -708,7 +709,7 @@ export function SettingsPage({
         {(section === "playback" || section === "appearance" || section === "shortcuts") && (
           <div className="settings-actions">
             <span className={`settings-save-state ${draftDirty ? "dirty" : ""}`}><Icon name={draftDirty ? "info" : "check"} size={14} />{draftDirty ? t("settings.save.dirty") : t("settings.save.clean")}</span>
-            <button className="secondary-button" disabled={saving || !draftDirty} onClick={() => { if (section === "playback") { setHwdec(savedEngine.hwdec); setCache(savedEngine.cache); setExtraArgs(savedEngine.extraArgs); setDraft((previous) => ({ ...previous, defaultVolume: preferences.defaultVolume })); } else if (section === "appearance") { setDraft((previous) => ({ ...previous, theme: preferences.theme, compactCards: preferences.compactCards, reduceMotion: preferences.reduceMotion, personalizedRows: preferences.personalizedRows, hideUnavailable: preferences.hideUnavailable })); } else setDraft((previous) => ({ ...previous, keyboardShortcuts: preferences.keyboardShortcuts })); setNotice(null); }}>{t("settings.save.discard")}</button>
+            <button className="secondary-button" disabled={saving || !draftDirty} onClick={() => { if (section === "playback") { setHwdec(savedEngine.hwdec); setCache(savedEngine.cache); setExtraArgs(savedEngine.extraArgs); setDraft((previous) => ({ ...previous, defaultVolume: preferences.defaultVolume })); } else if (section === "appearance") { setDraft((previous) => ({ ...previous, theme: preferences.theme, compactCards: preferences.compactCards, reduceMotion: preferences.reduceMotion, personalizedRows: preferences.personalizedRows, hideUnavailable: preferences.hideUnavailable, showAdult: preferences.showAdult })); } else setDraft((previous) => ({ ...previous, keyboardShortcuts: preferences.keyboardShortcuts })); setNotice(null); }}>{t("settings.save.discard")}</button>
             <button onClick={() => void save()} disabled={saving || !draftDirty || (section === "playback" && (loading || Boolean(engineError)))}>
               {saving ? t("settings.save.saving") : t("settings.save.save")}
             </button>
@@ -716,7 +717,7 @@ export function SettingsPage({
               className="secondary-button"
               onClick={() => {
                 if (section === "playback") { setHwdec("auto-safe"); setCache("yes"); setExtraArgs(""); setDraft((previous) => ({ ...previous, defaultVolume: defaultPreferences.defaultVolume })); }
-                else if (section === "appearance") setDraft((previous) => ({ ...previous, theme: defaultPreferences.theme, compactCards: defaultPreferences.compactCards, reduceMotion: defaultPreferences.reduceMotion, personalizedRows: defaultPreferences.personalizedRows, hideUnavailable: defaultPreferences.hideUnavailable }));
+                else if (section === "appearance") setDraft((previous) => ({ ...previous, theme: defaultPreferences.theme, compactCards: defaultPreferences.compactCards, reduceMotion: defaultPreferences.reduceMotion, personalizedRows: defaultPreferences.personalizedRows, hideUnavailable: defaultPreferences.hideUnavailable, showAdult: defaultPreferences.showAdult }));
                 else setDraft((previous) => ({ ...previous, keyboardShortcuts: defaultPreferences.keyboardShortcuts }));
                 setNotice(t("settings.save.restored"));
               }}

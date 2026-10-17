@@ -137,6 +137,9 @@ export const settings = {
   "settings.appearance.hideUnavailableLabel": "Hide unavailable streams",
   "settings.appearance.hideUnavailableDescription":
     "Hide titles whose most recent stream check failed. Unchecked streams remain visible.",
+  "settings.appearance.showAdultLabel": "Show adult content",
+  "settings.appearance.showAdultDescription":
+    "Show titles classified as adult content. Hidden everywhere by default.",
 
   // --- Keyboard shortcuts ---
   "settings.shortcuts.title": "Less clicking. More watching.",

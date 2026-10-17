@@ -53,7 +53,10 @@ export function useChannels(refreshTrigger = 0) {
 
   const sourceChannels = useMemo(() => selectedPlaylistId === null ? allChannels : allChannels.filter((channel) => channel.playlist_id === selectedPlaylistId), [allChannels, selectedPlaylistId]);
   const groups = useMemo(() => [...new Set(sourceChannels.map((channel) => channel.group_title || "Other"))].sort(), [sourceChannels]);
-  const channels = useMemo(() => filterChannels(sourceChannels, searchQuery, selectedGroup, false).filter((channel) => !favoritesOnly || favoriteIds.has(channel.id)), [sourceChannels, searchQuery, selectedGroup, favoritesOnly, favoriteIds]);
+  // This hook powers the Sources management page too, where every channel must stay visible
+  // and manageable regardless of the "hide unavailable"/"show adult content" preferences —
+  // those only gate what the Home/Discover/My List pages show, not what you can see and edit here.
+  const channels = useMemo(() => filterChannels(sourceChannels, searchQuery, selectedGroup, false, true).filter((channel) => !favoritesOnly || favoriteIds.has(channel.id)), [sourceChannels, searchQuery, selectedGroup, favoritesOnly, favoriteIds]);
   const selectPlaylist = useCallback((id: number | null) => {
     setSelectedGroup("all");
     setSelectedPlaylistId(id);

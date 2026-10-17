@@ -28,6 +28,9 @@ export interface Preferences {
   personalizedRows: boolean;
   keyboardShortcuts: boolean;
   defaultVolume: number;
+  /** Off by default. Playlists carry no such flag, so this is detected from group/name text,
+   * the same way everything else in this file is. */
+  showAdult: boolean;
 }
 
 export const defaultPreferences: Preferences = {
@@ -38,6 +41,7 @@ export const defaultPreferences: Preferences = {
   personalizedRows: true,
   keyboardShortcuts: true,
   defaultVolume: 80,
+  showAdult: false,
 };
 
 export function readPreferences(): Preferences {
@@ -69,10 +73,11 @@ export function uniqueHistory(history: HistoryEntry[]): HistoryEntry[] {
   return [...latest.values()];
 }
 
-export function filterChannels(channels: Channel[], query: string, group: string, hideUnavailable: boolean): Channel[] {
+export function filterChannels(channels: Channel[], query: string, group: string, hideUnavailable: boolean, showAdult: boolean): Channel[] {
   const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   return channels.filter((channel) =>
     (!hideUnavailable || !channel.last_error) &&
+    (showAdult || !isAdult(channel)) &&
     (group === "all" || (channel.group_title || "Other") === group) &&
     terms.every((term) => `${channel.name} ${channel.group_title || ""}`.toLocaleLowerCase().includes(term))
   );
@@ -113,6 +118,15 @@ export function contentKind(channel: Channel): ContentKind {
   // providers write -1 for everything, films included, so -1 proves nothing and stays "live".
   if (channel.is_live === false) return "movie";
   return "live";
+}
+
+// Hidden from every browse view until turned on in Settings. Playlists carry no adult/mature
+// flag, so this matches group/name text the same way contentKind and GENRE_KEYWORDS do. The `+`
+// in `18+` is deliberate: it keeps a benign title like "Class of 18" from matching.
+const ADULT_PATTERN = /\b(xxx|porn(?:ographic)?|adult|18\+|nsfw|erotic(?:a)?)\b/i;
+
+export function isAdult(channel: Channel): boolean {
+  return ADULT_PATTERN.test(`${channel.group_title || ""} ${channel.name}`);
 }
 
 export function artworkCategory(group?: string): string {
