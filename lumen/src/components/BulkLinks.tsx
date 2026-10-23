@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { bulkAdd, bulkCancel, bulkCheck, bulkExtractText, bulkReadFile, errorMessage, onBulkResult } from "../lib/tauri";
+import { bulkAdd, bulkCancel, bulkCheck, bulkExtractText, bulkReadFile, errorMessage, onBulkAddResult, onBulkResult } from "../lib/tauri";
 import type { FoundLinks, LinkCheck, LinkOutcome } from "../lib/types";
 import { t, tn } from "../i18n/index.ts";
 
@@ -31,6 +31,7 @@ export function BulkLinks({ onAdded, onError }: BulkLinksProps) {
   const [chosen, setChosen] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<"reading" | "testing" | "adding" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [addDone, setAddDone] = useState(0);
   const unlisten = useRef<(() => void) | null>(null);
 
   useEffect(() => () => { unlisten.current?.(); void bulkCancel().catch(() => {}); }, []);
@@ -94,7 +95,11 @@ export function BulkLinks({ onAdded, onError }: BulkLinksProps) {
   const add = async () => {
     setBusy("adding");
     onError(null);
+    setAddDone(0);
     try {
+      unlisten.current = await onBulkAddResult(() => {
+        setAddDone((previous) => previous + 1);
+      });
       const outcome = await bulkAdd([...chosen]);
       if (outcome.failed.length > 0) {
         onError(outcome.failed.map((failedLink) => t("bulk.addFailed", { url: failedLink.url, reason: failedLink.reason })).join(" "));
@@ -115,6 +120,8 @@ export function BulkLinks({ onAdded, onError }: BulkLinksProps) {
     } catch (failure) {
       onError(errorMessage(failure));
     } finally {
+      unlisten.current?.();
+      unlisten.current = null;
       setBusy(null);
     }
   };
@@ -187,10 +194,15 @@ export function BulkLinks({ onAdded, onError }: BulkLinksProps) {
             })}
           </ul>
           <div className="extract-buttons">
-            <button className="primary-button" disabled={busy !== null || chosen.size === 0} onClick={() => void add()}>
-              {busy === "adding" ? t("bulk.adding") : t("bulk.add", { count: chosen.size })}
-            </button>
+            {busy === "adding"
+              ? <button onClick={() => void bulkCancel()}>{t("bulk.stop")}</button>
+              : <button className="primary-button" disabled={busy !== null || chosen.size === 0} onClick={() => void add()}>
+                  {t("bulk.add", { count: chosen.size })}
+                </button>}
           </div>
+          {busy === "adding" && (
+            <p className="muted-note" role="status">{t("bulk.addingProgress", { done: addDone, total: chosen.size })}</p>
+          )}
         </>
       )}
       {message && <p role="status">{message}</p>}

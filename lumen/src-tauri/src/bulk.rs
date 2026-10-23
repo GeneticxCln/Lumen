@@ -5,13 +5,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use lumen_core::bulk::{self, LinkCheck};
-use lumen_core::playlist::import::import_m3u_url;
+use lumen_core::bulk::{self, AddOutcome, AddResult, LinkCheck};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use crate::commands::{allow_lan_sources, ensure_db};
-use crate::db::{import_playlist, list_playlists};
+use crate::db::list_playlists;
 use crate::error::{PlayerError, Result};
 
 /// The biggest text file read for links.
@@ -86,7 +85,9 @@ pub async fn bulk_check_cmd(urls: Vec<String>, app: AppHandle) -> Result<usize> 
     {
         let mut run = RUN.lock().unwrap();
         if run.is_some() {
-            return Err(PlayerError::InvalidArg("A check is already running".into()));
+            return Err(PlayerError::InvalidArg(
+                "A check or add is already running".into(),
+            ));
         }
         *run = Some(cancel.clone());
     }
@@ -130,7 +131,11 @@ pub struct BulkAdded {
     pub failed: Vec<NotAdded>,
 }
 
-/// Adds each link as its own source. A link that is already a source is skipped.
+/// Adds each link as its own source, a few at a time (like `bulk_check_cmd`), sending each result
+/// to the page as a `bulk://add-result` event as soon as it lands instead of leaving the dialog
+/// on one opaque "Adding…" for however long the whole batch takes. A link that is already a
+/// source is skipped. Only one run (check or add) at a time; `bulk_cancel_cmd` stops links that
+/// have not started yet.
 #[tauri::command]
 pub async fn bulk_add_cmd(urls: Vec<String>, app: AppHandle) -> Result<BulkAdded> {
     if urls.len() > bulk::MAX_LINKS {
@@ -139,36 +144,40 @@ pub async fn bulk_add_cmd(urls: Vec<String>, app: AppHandle) -> Result<BulkAdded
             bulk::MAX_LINKS
         )));
     }
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut run = RUN.lock().unwrap();
+        if run.is_some() {
+            return Err(PlayerError::InvalidArg(
+                "A check or add is already running".into(),
+            ));
+        }
+        *run = Some(cancel.clone());
+    }
+
     let pool = ensure_db(&app).await?;
     let allow_lan = allow_lan_sources(pool).await;
-    let mut known: std::collections::HashSet<String> = list_playlists(pool)
+    let known: std::collections::HashSet<String> = list_playlists(pool)
         .await?
         .into_iter()
         .filter_map(|playlist| playlist.origin)
         .collect();
+
+    let emitter = app.clone();
+    let results = bulk::add_links(pool, urls, allow_lan, &known, cancel, move |result| {
+        let _ = emitter.emit("bulk://add-result", result);
+    })
+    .await;
+    *RUN.lock().unwrap() = None;
+
     let mut result = BulkAdded {
         added: Vec::new(),
         failed: Vec::new(),
     };
-    for url in urls {
-        if known.contains(&url) {
-            continue;
-        }
-        let name = Some(bulk::name_from_link(&url));
-        let outcome = async {
-            let (playlist, channels) = import_m3u_url(&url, name, allow_lan).await?;
-            import_playlist(pool, &playlist, &channels).await
-        }
-        .await;
+    for AddResult { url, outcome } in results {
         match outcome {
-            Ok(playlist_id) => {
-                known.insert(url.clone());
-                result.added.push(Added { url, playlist_id });
-            }
-            Err(error) => result.failed.push(NotAdded {
-                url,
-                reason: String::from(error),
-            }),
+            AddOutcome::Added { playlist_id } => result.added.push(Added { url, playlist_id }),
+            AddOutcome::Failed { reason } => result.failed.push(NotAdded { url, reason }),
         }
     }
     Ok(result)

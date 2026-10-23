@@ -34,6 +34,7 @@ import type {
   FoundLinks,
   LinkCheck,
   BulkAdded,
+  AddResult,
   UpdateMode,
   UpdateState,
 } from "./types";
@@ -609,6 +610,10 @@ export async function bulkAdd(urls: string[]) {
 
 export function onBulkResult(callback: (check: LinkCheck) => void) {
   return listen<LinkCheck>("bulk://result", (event: Event<LinkCheck>) => callback(event.payload));
+}
+
+export function onBulkAddResult(callback: (result: AddResult) => void) {
+  return listen<AddResult>("bulk://add-result", (event: Event<AddResult>) => callback(event.payload));
 }
 
 // Player state events
