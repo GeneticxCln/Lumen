@@ -27,6 +27,13 @@ struct Active {
 
 static ACTIVE: LazyLock<Mutex<Option<Active>>> = LazyLock::new(Default::default);
 
+/// Serializes concurrent `cast_start_cmd` calls against each other, so two targets started at
+/// once can't both connect and race on which one's swap into `ACTIVE` wins (leaving the other
+/// orphaned and uncontrollable). `cast_state_cmd`/`cast_control_cmd` only ever touch `ACTIVE`,
+/// never this, so a slow connect held here never blocks the status poll or controls for whatever
+/// is already casting.
+static STARTING: LazyLock<Mutex<()>> = LazyLock::new(Default::default);
+
 /// What the page shows while a cast is running.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,19 +77,30 @@ pub async fn cast_start_cmd(
         Source::File(item.source.clone().into())
     };
     let title = item.name.clone().unwrap_or_else(|| "Lumen".into());
-    let mut active = ACTIVE.lock().await;
+    // Serializes this start against any other start in progress, but not against `ACTIVE`: the
+    // status poll and controls for whatever is already casting must stay responsive for the
+    // whole, possibly slow, connect below.
+    let _starting = STARTING.lock().await;
     // Start the new session before touching the old one: if the new device is unreachable, the
     // `?` below must leave a working cast alone rather than having already torn it down.
     let session = cast::start(&renderer, source, &title, start_at, allow_lan).await?;
-    if let Some(previous) = active.take() {
+    let previous = {
+        let mut active = ACTIVE.lock().await;
+        let previous = active.take();
+        *active = Some(Active {
+            session,
+            title: title.clone(),
+        });
+        previous
+    };
+    if let Some(previous) = previous {
         let _ = previous.session.renderer.stop().await;
     }
     let state = CastState {
         device: renderer.name.clone(),
-        title: title.clone(),
+        title,
         status: None,
     };
-    *active = Some(Active { session, title });
     Ok(state)
 }
 

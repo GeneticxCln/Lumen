@@ -1282,8 +1282,9 @@ static CACHE_WRITES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 
 /// A page of local videos asks for dozens of posters at once. Only a few ffmpeg processes run at a
 /// time; the rest wait here instead of starting a process (and a blocking thread) each.
+const FFMPEG_SLOTS_TOTAL: u32 = 3;
 static FFMPEG_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> =
-    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(3));
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(FFMPEG_SLOTS_TOTAL as usize));
 
 fn note_cache_write(cache_dir: &Path) {
     if CACHE_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % PRUNE_EVERY_WRITES
@@ -1403,11 +1404,13 @@ fn generate_local_filmstrip(path: PathBuf, cache_dir: PathBuf) -> Result<Vec<u8>
 
 #[tauri::command]
 pub async fn local_filmstrip(path: String, app: AppHandle) -> Result<String> {
+    // Its own directory, separate from posters: a filmstrip's cache key never depends on the
+    // poster-frame setting, so changing that setting must not invalidate it too.
     let cache_dir = app
         .path()
         .app_cache_dir()
         .map_err(|error| PlayerError::Io(error.to_string()))?
-        .join("thumbnails");
+        .join("filmstrips");
     let _slot = FFMPEG_SLOTS
         .acquire()
         .await
@@ -1524,7 +1527,8 @@ fn thumbnail_cache_dir(app: &AppHandle) -> Result<PathBuf> {
         .join("thumbnails"))
 }
 
-/// Removes cached posters and filmstrips so they regenerate with the current settings.
+/// Removes cached posters so they regenerate with the current frame-time setting. Filmstrips live
+/// in their own cache directory and are unaffected, since their cache key never depends on it.
 fn clear_thumbnail_cache(cache_dir: &Path) -> Result<()> {
     match std::fs::remove_dir_all(cache_dir) {
         Ok(()) => Ok(()),
@@ -1891,7 +1895,19 @@ async fn set_poster_frame_seconds(
     let previous = poster_frame_seconds_from(get_setting(pool, POSTER_FRAME_SETTING).await?);
     set_setting(pool, POSTER_FRAME_SETTING, &seconds.to_string()).await?;
     if previous != seconds {
-        clear_thumbnail_cache(cache_dir)?;
+        // Wait for any poster generation already in flight to finish before wiping the directory
+        // its temp file and rename live in — otherwise a concurrent call's rename can land on a
+        // just-deleted parent directory and fail with a spurious "could not extract a frame" error.
+        let _slots = FFMPEG_SLOTS
+            .acquire_many(FFMPEG_SLOTS_TOTAL)
+            .await
+            .map_err(|error| PlayerError::Io(error.to_string()))?;
+        let cache_dir = cache_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || clear_thumbnail_cache(&cache_dir))
+            .await
+            .map_err(|error| {
+                PlayerError::Io(format!("Clearing the poster cache failed: {error}"))
+            })??;
     }
     Ok(())
 }
@@ -1968,10 +1984,10 @@ pub async fn tmdb_clear_enrichment(app: AppHandle) -> Result<serde_json::Value> 
 #[cfg(test)]
 mod local_path_tests {
     use super::{
-        POSTER_FRAME_CHOICES, POSTER_FRAME_SETTING, expand_home, generate_local_filmstrip,
-        generate_local_thumbnail, get_file_poster_frame, home_dir, parse_poster_frame_seconds,
-        poster_frame_seconds_from, render_poster_candidates, resolve_poster_frame,
-        save_file_poster_frame, set_poster_frame_seconds,
+        FFMPEG_SLOTS, POSTER_FRAME_CHOICES, POSTER_FRAME_SETTING, expand_home,
+        generate_local_filmstrip, generate_local_thumbnail, get_file_poster_frame, home_dir,
+        parse_poster_frame_seconds, poster_frame_seconds_from, render_poster_candidates,
+        resolve_poster_frame, save_file_poster_frame, set_poster_frame_seconds,
     };
     use crate::db::{get_setting, set_setting};
     use std::path::{Path, PathBuf};
@@ -2343,6 +2359,63 @@ mod local_path_tests {
             !cache.exists(),
             "changing the frame again clears cached posters"
         );
+        fs::remove_dir_all(temp).expect("remove test fixture");
+    }
+
+    /// Reproduces the race: a poster/filmstrip generation call holds one of the shared ffmpeg
+    /// slots while writing its temp file. Changing the frame setting while that slot is held must
+    /// wait for it, not wipe the cache directory out from under the in-flight write.
+    #[tokio::test]
+    async fn changing_poster_frame_waits_for_in_flight_generation_before_clearing() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+
+        let temp = std::env::temp_dir().join(format!(
+            "lumen-poster-setting-race-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let cache = temp.join("thumbnails");
+        fs::create_dir_all(&cache).expect("cache directory");
+        fs::write(cache.join("0000000000000000.jpg"), [0xff, 0xd8, 0xff, 0xd9])
+            .expect("cached poster");
+
+        // Simulate an in-flight generation call holding every ffmpeg slot, as a real concurrent
+        // poster/filmstrip generation would hold at least one.
+        let held = FFMPEG_SLOTS
+            .acquire_many(super::FFMPEG_SLOTS_TOTAL)
+            .await
+            .unwrap();
+
+        let handle = tokio::spawn({
+            let pool = pool.clone();
+            let cache = cache.clone();
+            async move { set_poster_frame_seconds(&pool, &cache, "5").await }
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !handle.is_finished(),
+            "the clear must wait for the held ffmpeg slots, not race past them"
+        );
+        assert!(
+            cache.exists(),
+            "the cache directory must still exist while a slot is held"
+        );
+
+        drop(held);
+        handle
+            .await
+            .expect("task did not panic")
+            .expect("changing the frame saves");
+        assert!(
+            !cache.exists(),
+            "the cache clears once the slot is released"
+        );
+
         fs::remove_dir_all(temp).expect("remove test fixture");
     }
 
