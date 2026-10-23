@@ -206,7 +206,10 @@ mod tests {
             let cancel = Arc::new(AtomicBool::new(false));
             {
                 let mut run = RUN.lock().unwrap();
-                assert!(run.is_none(), "a prior test left RUN set; run tests serially");
+                assert!(
+                    run.is_none(),
+                    "a prior test left RUN set; run tests serially"
+                );
                 *run = Some(cancel.clone());
             }
             let _run_guard = RunGuard;

@@ -1905,7 +1905,9 @@ async fn set_poster_frame_seconds(
         let cache_dir = cache_dir.to_path_buf();
         tokio::task::spawn_blocking(move || clear_thumbnail_cache(&cache_dir))
             .await
-            .map_err(|error| PlayerError::Io(format!("Clearing the poster cache failed: {error}")))??;
+            .map_err(|error| {
+                PlayerError::Io(format!("Clearing the poster cache failed: {error}"))
+            })??;
     }
     Ok(())
 }
@@ -2383,7 +2385,10 @@ mod local_path_tests {
 
         // Simulate an in-flight generation call holding every ffmpeg slot, as a real concurrent
         // poster/filmstrip generation would hold at least one.
-        let held = FFMPEG_SLOTS.acquire_many(super::FFMPEG_SLOTS_TOTAL).await.unwrap();
+        let held = FFMPEG_SLOTS
+            .acquire_many(super::FFMPEG_SLOTS_TOTAL)
+            .await
+            .unwrap();
 
         let handle = tokio::spawn({
             let pool = pool.clone();
@@ -2406,7 +2411,10 @@ mod local_path_tests {
             .await
             .expect("task did not panic")
             .expect("changing the frame saves");
-        assert!(!cache.exists(), "the cache clears once the slot is released");
+        assert!(
+            !cache.exists(),
+            "the cache clears once the slot is released"
+        );
 
         fs::remove_dir_all(temp).expect("remove test fixture");
     }
