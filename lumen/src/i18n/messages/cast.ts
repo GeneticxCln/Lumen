@@ -2,7 +2,6 @@
 export const cast = {
   "cast.title": "Cast to a device",
   "cast.button": "Cast",
-  "cast.open": "Cast…",
   "cast.buttonHint": "Send this to a TV or speaker on your network",
   "cast.intro": "Shows TVs, receivers and speakers on your network that accept video (UPnP / DLNA). Chromecast and AirPlay are not supported.",
   "cast.search": "Search",
