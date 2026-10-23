@@ -19,6 +19,17 @@ const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
 /// The run in progress, if any: setting its flag stops the links that have not started.
 static RUN: LazyLock<Mutex<Option<Arc<AtomicBool>>>> = LazyLock::new(Default::default);
 
+/// Clears `RUN` when a check/add run ends, however it ends. A bare "clear it at the end of the
+/// function" relies on every path reaching that one line; an early `?` on a DB error taken after
+/// the lock was acquired would otherwise skip it and wedge every later check/add until restart.
+struct RunGuard;
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        *RUN.lock().unwrap() = None;
+    }
+}
+
 /// What was found in a text.
 #[derive(Serialize)]
 pub struct FoundLinks {
@@ -91,6 +102,7 @@ pub async fn bulk_check_cmd(urls: Vec<String>, app: AppHandle) -> Result<usize> 
         }
         *run = Some(cancel.clone());
     }
+    let _run_guard = RunGuard;
     let pool = ensure_db(&app).await;
     let allow_lan = match &pool {
         Ok(pool) => allow_lan_sources(pool).await,
@@ -101,7 +113,6 @@ pub async fn bulk_check_cmd(urls: Vec<String>, app: AppHandle) -> Result<usize> 
         let _ = emitter.emit("bulk://result", check);
     })
     .await;
-    *RUN.lock().unwrap() = None;
     Ok(tested)
 }
 
@@ -154,6 +165,7 @@ pub async fn bulk_add_cmd(urls: Vec<String>, app: AppHandle) -> Result<BulkAdded
         }
         *run = Some(cancel.clone());
     }
+    let _run_guard = RunGuard;
 
     let pool = ensure_db(&app).await?;
     let allow_lan = allow_lan_sources(pool).await;
@@ -168,7 +180,6 @@ pub async fn bulk_add_cmd(urls: Vec<String>, app: AppHandle) -> Result<BulkAdded
         let _ = emitter.emit("bulk://add-result", result);
     })
     .await;
-    *RUN.lock().unwrap() = None;
 
     let mut result = BulkAdded {
         added: Vec::new(),
@@ -181,4 +192,32 @@ pub async fn bulk_add_cmd(urls: Vec<String>, app: AppHandle) -> Result<BulkAdded
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reproduces the shape of the bug: a `?` taken after `RUN` is set, before the run's own
+    /// cleanup line. Without the guard, `RUN` stays `Some(..)` forever past this early return.
+    #[test]
+    fn run_guard_clears_run_on_an_early_return() {
+        fn simulate_early_db_failure() -> Result<()> {
+            let cancel = Arc::new(AtomicBool::new(false));
+            {
+                let mut run = RUN.lock().unwrap();
+                assert!(run.is_none(), "a prior test left RUN set; run tests serially");
+                *run = Some(cancel.clone());
+            }
+            let _run_guard = RunGuard;
+            Err(PlayerError::InvalidArg("simulated DB failure".into()))?;
+            unreachable!("the `?` above always returns early");
+        }
+
+        assert!(simulate_early_db_failure().is_err());
+        assert!(
+            RUN.lock().unwrap().is_none(),
+            "RunGuard must clear RUN even when an early `?` skips the run's own cleanup line"
+        );
+    }
 }

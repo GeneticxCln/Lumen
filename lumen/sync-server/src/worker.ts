@@ -211,6 +211,25 @@ function parsePush(value: unknown): PushItem[] | null {
   return parsed
 }
 
+/** D1 rejects a statement with too many bound parameters well below SQLite's own limit. */
+const MAX_BOUND_ITEM_IDS_PER_QUERY = 50
+
+/** How many of these item ids this group already holds, chunked to stay under D1's bind-parameter cap. */
+async function countAlreadyHeld(env: Env, syncId: string, itemIds: string[]): Promise<number> {
+  let count = 0
+  for (let start = 0; start < itemIds.length; start += MAX_BOUND_ITEM_IDS_PER_QUERY) {
+    const chunk = itemIds.slice(start, start + MAX_BOUND_ITEM_IDS_PER_QUERY)
+    const placeholders = chunk.map(() => '?').join(',')
+    const result = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM sync_blobs WHERE sync_id = ? AND item_id IN (${placeholders})`,
+    )
+      .bind(syncId, ...chunk)
+      .first<{ n: number }>()
+    count += result?.n ?? 0
+  }
+  return count
+}
+
 async function pushItems(request: Request, env: Env): Promise<Response> {
   const auth = await authenticate(request, env)
   if (auth instanceof Response) return auth
@@ -225,7 +244,12 @@ async function pushItems(request: Request, env: Env): Promise<Response> {
   const held = await env.DB.prepare('SELECT COUNT(*) AS n FROM sync_blobs WHERE sync_id = ?')
     .bind(auth.syncId)
     .first<{ n: number }>()
-  if ((held?.n ?? 0) + items.length > intVar(env.MAX_ITEMS, 20_000)) return json({ error: 'quota_exceeded' }, 413)
+  // The write below is an upsert, so a pushed item already held adds no new row. Only the ids
+  // this group does not yet hold should count against the cap — otherwise an actively re-synced,
+  // near-full group (mostly re-pushes of items it already has) gets rejected well below its real
+  // row count.
+  const newRows = items.length - (await countAlreadyHeld(env, auth.syncId, items.map((item) => item.id)))
+  if ((held?.n ?? 0) + newRows > intVar(env.MAX_ITEMS, 20_000)) return json({ error: 'quota_exceeded' }, 413)
 
   // Last write wins: a stale push never replaces a newer record.
   await env.DB.batch(

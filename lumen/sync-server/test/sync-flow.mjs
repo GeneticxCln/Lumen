@@ -201,6 +201,11 @@ await register(bulk)
   check('a push up to the cap is accepted', ok.status === 200, String(ok.status))
   const over = await push(bulk, [rec(9999, 8_000_001)])
   check('a push over the cap is refused', over.status === 413 && over.json?.error === 'quota_exceeded', String(over.status))
+
+  // A push is an upsert, so re-syncing items already held adds no new rows and must not count
+  // against the cap: `bulk` is already at MAX_ITEMS from the pushes above.
+  const resync = await push(bulk, Array.from({ length: 10 }, (_, n) => rec(n + 1, 8_000_002)))
+  check('a push that only re-syncs already-held items is accepted at a full group', resync.status === 200, String(resync.status))
 }
 
 // 8. Creating many groups from one address is limited (the server runs with GROUP_CREATE_LIMIT=4).

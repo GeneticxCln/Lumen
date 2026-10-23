@@ -46,6 +46,10 @@ export function usePlayer(options: PlayerOptions = {}) {
   const headersRef = useRef<Record<string, string> | undefined>(undefined);
   // The stream URL whose failure already triggered a fallback, so one failure moves on once.
   const fallbackFromRef = useRef<string | null>(null);
+  // Bumped by anything that supersedes whatever is currently loading or playing (Stop, a new
+  // channel, a new media item), so a slower-to-resolve fallback lookup started before it can tell
+  // it has been overtaken and must not apply its result.
+  const playEpochRef = useRef(0);
   const reportError = useCallback((failure: unknown) => {
     setPlayerState((previous) => ({ ...previous, error: errorMessage(failure) }));
   }, []);
@@ -69,10 +73,14 @@ export function usePlayer(options: PlayerOptions = {}) {
     const failedUrl = progressRef.current.currentUrl;
     if (!playerState.error || !failedUrl || fallbackFromRef.current === failedUrl) return;
     fallbackFromRef.current = failedUrl;
+    const epoch = playEpochRef.current;
     nextFallbackSource(failedUrl)
       .then(async (next) => {
-        if (!next) return;
+        // Superseded by a Stop, a new channel, or a new media item while this was in flight: that
+        // action already took its own, more recent action, and must not be undone by this one.
+        if (!next || playEpochRef.current !== epoch) return;
         await playUrl(next.url, next.headers ?? undefined, next.channel_id ?? undefined);
+        if (playEpochRef.current !== epoch) return;
         onNoticeRef.current?.(t("lib.notice.sourceFailed", { title: currentTitleRef.current ?? t("lib.notice.thisTitle") }));
         headersRef.current = next.headers ?? undefined;
         setCurrentUrl(next.url);
@@ -120,6 +128,7 @@ export function usePlayer(options: PlayerOptions = {}) {
       }
     }
     fallbackFromRef.current = null;
+    playEpochRef.current += 1;
     await playUrl(channel.url, parsedHeaders, channel.id, startVolume);
     applyStartVolume(startVolume);
     headersRef.current = parsedHeaders;
@@ -141,6 +150,7 @@ export function usePlayer(options: PlayerOptions = {}) {
   const playMedia = useCallback(
     async (url: string, title?: string, headers?: Record<string, string>, startVolume?: number, audioUrl?: string, channelId?: number) => {
       fallbackFromRef.current = null;
+      playEpochRef.current += 1;
       await playUrl(url, headers, channelId, startVolume, audioUrl);
       applyStartVolume(startVolume);
       headersRef.current = headers;
@@ -205,6 +215,7 @@ export function usePlayer(options: PlayerOptions = {}) {
   }, [muted, volume, changeVolume]);
 
   const stopPlayback = useCallback(async () => {
+    playEpochRef.current += 1;
     if (currentUrl && playerState.time > 1 && playerState.duration > 0) {
       await saveProgress(
         currentUrl,
