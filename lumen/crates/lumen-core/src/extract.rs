@@ -15,8 +15,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex as AsyncMutex;
 
 /// Maximum JSON output accepted from `yt-dlp -J` (8 MiB).
 pub const MAX_EXTRACT_JSON_BYTES: usize = 8 * 1024 * 1024;
@@ -264,6 +266,13 @@ pub fn verify_binary_checksum(
     Ok(actual)
 }
 
+/// Only one download+install of the managed binary runs at a time: a second concurrent call
+/// (a double-click, or a manual update racing the startup check) used to download to the exact
+/// same temp filename as the first and could rename a half-written file over the real binary.
+static UPDATE_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(Default::default);
+/// Per-call uniquifier for the temp file, kept as defense in depth alongside `UPDATE_LOCK`.
+static UPDATE_CALL_ID: AtomicU64 = AtomicU64::new(0);
+
 /// Downloads and installs the managed `yt-dlp` binary into `app_data_dir/bin/yt-dlp`
 /// after verifying its SHA-256 against the release's published `SHA2-256SUMS` and manifest.
 pub async fn update_managed_extractor(
@@ -271,6 +280,11 @@ pub async fn update_managed_extractor(
     base_url_override: Option<&str>,
     allow_lan: bool,
 ) -> Result<ExtractorStatus> {
+    let Ok(_guard) = UPDATE_LOCK.try_lock() else {
+        return Err(PlayerError::InvalidArg(
+            "The extractor is already being updated".into(),
+        ));
+    };
     let manifest = pinned_manifest()?;
     let triple = current_target_triple();
     let asset_info = manifest.assets.get(triple).ok_or_else(|| {
@@ -346,7 +360,8 @@ pub async fn update_managed_extractor(
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let temp = dest.with_extension(format!("tmp-{}", std::process::id()));
+    let call_id = UPDATE_CALL_ID.fetch_add(1, Ordering::SeqCst);
+    let temp = dest.with_extension(format!("tmp-{}-{call_id}", std::process::id()));
     std::fs::write(&temp, &bin_bytes)?;
     #[cfg(unix)]
     {
@@ -876,6 +891,26 @@ mod tests {
             assert_eq!(asset.sha256, published, "pinned hash for {target}");
             assert!(is_sha256_hex(&asset.sha256));
         }
+    }
+
+    /// A second `update_managed_extractor` call while one is already in progress must fail fast
+    /// with a clear error instead of racing the first on the same temp file. Held manually here
+    /// (rather than via two real concurrent downloads) so the test needs no network and is not
+    /// timing-dependent: the guard is checked before anything else the function does.
+    #[tokio::test]
+    async fn a_concurrent_update_is_refused_instead_of_racing() {
+        let _held = UPDATE_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!(
+            "lumen-ytdlp-concurrent-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let error = update_managed_extractor(&dir, None, false)
+            .await
+            .expect_err("a second update must not proceed while one is already running");
+        assert!(
+            error.to_string().contains("already being updated"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
