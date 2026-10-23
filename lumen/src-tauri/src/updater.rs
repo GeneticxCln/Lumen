@@ -3,6 +3,7 @@
 //! running copy can do, runs the daily check and tells the page.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use lumen_core::update::{self, Available, Kind};
@@ -24,6 +25,29 @@ const CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
 const MIN_GAP_SECS: i64 = 20 * 3600;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Set while a download+install is in flight, so the manual "Install" button and the background
+/// auto-update check can never run `install()` at the same time and race on the same temp file.
+static INSTALLING: AtomicBool = AtomicBool::new(false);
+
+/// Clears `INSTALLING` when dropped, so a failed or cancelled install still releases the guard.
+#[derive(Debug)]
+struct InstallGuard;
+
+impl Drop for InstallGuard {
+    fn drop(&mut self) {
+        INSTALLING.store(false, Ordering::SeqCst);
+    }
+}
+
+fn start_install() -> Result<InstallGuard> {
+    if INSTALLING.swap(true, Ordering::SeqCst) {
+        return Err(PlayerError::InvalidArg(
+            "An update is already downloading or installing".into(),
+        ));
+    }
+    Ok(InstallGuard)
+}
 
 /// How Lumen treats a newer release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -171,6 +195,7 @@ pub async fn update_install_cmd(app: AppHandle) -> Result<String> {
     let available = look(&app)
         .await?
         .ok_or_else(|| PlayerError::NotFound("Lumen is up to date".into()))?;
+    let _guard = start_install()?;
     install(&app, &available).await?;
     Ok(available.tag)
 }
@@ -235,7 +260,11 @@ async fn automatic(app: &AppHandle) {
         tag: available.tag.clone(),
         page: available.page.clone(),
     };
-    if mode == Mode::Auto && kind() == Kind::AppImage && available.package.is_some() {
+    if mode == Mode::Auto
+        && kind() == Kind::AppImage
+        && available.package.is_some()
+        && let Ok(_guard) = start_install()
+    {
         match install(app, &available).await {
             Ok(()) => {
                 let _ = app.emit("update://ready", event);
@@ -247,5 +276,25 @@ async fn automatic(app: &AppHandle) {
     if !said(NOTIFIED_TAG_SETTING).await {
         let _ = set_setting(pool, NOTIFIED_TAG_SETTING, &available.tag).await;
         let _ = app.emit("update://available", event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `INSTALLING` is a single process-wide flag, so this test (like any other touching it) must
+    /// not run in parallel with another that does; `#[serial]`-style isolation is unnecessary here
+    /// since it is the only test in this crate touching it, but a changed test name or a new test
+    /// added later that also calls `start_install` should use `cargo test -- --test-threads=1` or
+    /// its own guard if that stops being true.
+    #[test]
+    fn a_second_install_is_refused_while_one_is_in_progress() {
+        let first = start_install().expect("first caller gets the guard");
+        let error = start_install().expect_err("a second caller must not also get it");
+        assert!(error.to_string().contains("already"));
+        drop(first);
+        // Dropping the first guard releases the flag for the next caller.
+        start_install().expect("the flag is free once the holder is dropped");
     }
 }

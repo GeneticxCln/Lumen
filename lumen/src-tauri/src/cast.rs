@@ -71,10 +71,12 @@ pub async fn cast_start_cmd(
     };
     let title = item.name.clone().unwrap_or_else(|| "Lumen".into());
     let mut active = ACTIVE.lock().await;
+    // Start the new session before touching the old one: if the new device is unreachable, the
+    // `?` below must leave a working cast alone rather than having already torn it down.
+    let session = cast::start(&renderer, source, &title, start_at, allow_lan).await?;
     if let Some(previous) = active.take() {
         let _ = previous.session.renderer.stop().await;
     }
-    let session = cast::start(&renderer, source, &title, start_at, allow_lan).await?;
     let state = CastState {
         device: renderer.name.clone(),
         title: title.clone(),

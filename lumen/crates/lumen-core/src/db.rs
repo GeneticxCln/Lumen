@@ -43,15 +43,25 @@ pub async fn init_db(app_dir: &Path) -> Result<Pool<Sqlite>> {
     let db_path = app_dir.join("lumen.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
 
+    // Pragmas set via a one-off query only take effect on whichever single connection ran it, not
+    // on the other connections the pool opens — `after_connect` runs them on every connection
+    // instead. `busy_timeout` makes a write wait for a few seconds when another connection is
+    // mid-transaction rather than failing at once with "database is locked", which otherwise a
+    // user can hit from two ordinary actions (e.g. favoriting a channel while sync is writing).
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                sqlx::query("PRAGMA foreign_keys = ON;")
+                    .execute(&mut *conn)
+                    .await?;
+                sqlx::query("PRAGMA busy_timeout = 5000;")
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect(&db_url)
-        .await
-        .map_err(|e| PlayerError::Sql(e.to_string()))?;
-
-    // Enable foreign keys in SQLite
-    sqlx::query("PRAGMA foreign_keys = ON;")
-        .execute(&pool)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
