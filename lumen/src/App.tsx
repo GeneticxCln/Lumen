@@ -19,7 +19,8 @@ import { LocalDevicePage } from "./components/LocalDevicePage";
 import { SearchEnginePage } from "./components/SearchEnginePage";
 import { usePlayer } from "./hooks/usePlayer";
 import { useChannels } from "./hooks/useChannels";
-import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, getPlayerPrefs, listProfiles, setPlayerFullscreen, tmdbStatus, updateRestart } from "./lib/tauri";
+import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, getPlayerPrefs, listProfiles, setPlayerFullscreen, tmdbStatus, updateRestart, updateState } from "./lib/tauri";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type { BrowseTitle } from "./lib/types";
 import type { CastState, Channel, HistoryEntry, PlayerPrefs, Profile, UpdateEventPayload } from "./lib/types";
 import { readPreferences, recommendChannels, catalogShelves, contentKind, isAdult, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
@@ -146,6 +147,14 @@ function App() {
       .catch(() => { if (active) setBrowseTitles([]); });
     return () => { active = false; };
   }, [refresh]);
+
+  // Just for the footer signature; failing silently leaves it blank rather than breaking the page.
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    updateState().then((state) => { if (active) setAppVersion(state.current); }).catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   // Whether remote images (TMDB art, channel logos) go through the network-privacy proxy or
   // load directly depends on this; read once so it's right from the first thing rendered.
@@ -392,6 +401,12 @@ function App() {
     (preferences.showAdult || !isAdult(channel))
   ), [library.channels, preferences.hideUnavailable, preferences.showAdult]);
   const catalog = useMemo(() => catalogShelves(available), [available]);
+  // What's playing, looked up across the whole library so the idle/buffering player stage can
+  // show its art as a backdrop instead of flat black. Undefined for an external (non-library) URL.
+  const currentChannel = useMemo(
+    () => library.allChannels.find((channel) => channel.id === player.currentChannelId),
+    [library.allChannels, player.currentChannelId],
+  );
   // The following episode is looked up across the whole library, not just the current search results.
   const followingEpisode = useMemo(() => {
     const current = library.allChannels.find((channel) => channel.id === player.currentChannelId);
@@ -655,7 +670,7 @@ function App() {
       {page !== "settings" && <div className="browse-content">
         {historyError && <p className="muted-note" role="status">{t("app.history.unavailable", { error: historyError })}</p>}
         {profileError && <p className="muted-note" role="status">{t("app.profiles.unavailable", { error: profileError })}</p>}
-        <footer><span className="footer-brand">{t("app.brand.name")}</span><span>{t("app.footer.tagline")}</span><button onClick={() => openSettings("sources")}>{t("app.footer.settings")}</button></footer>
+        <footer><span className="footer-brand">{t("app.brand.name")}</span><span>{t("app.footer.tagline")}</span>{appVersion && <span>{t("app.footer.version", { version: appVersion })}</span>}<button onClick={() => openSettings("sources")}>{t("app.footer.settings")}</button><button onClick={() => void openUrl("https://github.com/GeneticxCln/Lumen")}>{t("app.footer.github")}</button></footer>
       </div>}
     </main>
 
@@ -679,7 +694,10 @@ function App() {
     >
       {embeddedActive
         ? null
-        : <div className="player-native-card"><Icon name="play" size={40} /><h2>{player.currentTitle}</h2><p>{t("app.nowPlaying.nativeNote")}</p></div>}
+        : <div className="player-native-card">
+            {currentChannel && <ChannelArtwork key={currentChannel.id} channel={currentChannel} hero />}
+            <div className="player-native-card-inner"><Icon name="play" size={40} /><h2>{player.currentTitle}</h2><p>{t("app.nowPlaying.nativeNote")}</p></div>
+          </div>}
     </PlayerOverlay>}
     </div>
     <FindSubtitles

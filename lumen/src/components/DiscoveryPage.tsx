@@ -1,10 +1,15 @@
+import { useMemo } from "react";
 import { Icon } from "./Icon";
 import { t } from "../i18n/index.ts";
 import { BrowseShelf, ContinueShelf, MediaShelf, UpcomingShelf } from "./MediaShelf";
 import type { UpcomingCard } from "./MediaShelf";
 import type { Board } from "../lib/board";
+import { contentKind } from "../lib/discovery";
 import type { BrowseTitle, Channel } from "../lib/types";
 import type { CatalogShelf } from "../lib/discovery";
+
+/** How many titles of each kind a cold-start explore shelf shows. */
+const EXPLORE_SHELF_SIZE = 20;
 
 interface DiscoveryPageProps {
   query: string;
@@ -49,6 +54,23 @@ export function DiscoveryPage({
   const shelfProps = { favorites, onPlay: onPlayChannel, onDetails, onFavorite, compact };
   const showFallback = !query && catalog.length === 0 && board.recommended.length > 0;
 
+  // A first run with no TMDB key and no watch history has only one shelf to show (the recommended
+  // one above) even though the library can hold thousands of titles — the rest of the page was
+  // dead space. These three draw straight from the library, split by kind, so there is something
+  // to browse immediately. `recommended` already carries every channel ranked by the same scoring
+  // as the shelf above; this only excludes what that shelf already shows, so nothing repeats.
+  const exploreShelves = useMemo(() => {
+    if (!showFallback) return null;
+    const alreadyShown = new Set(board.recommended.map((channel) => channel.id));
+    const byKind: Record<"movie" | "series" | "live", Channel[]> = { movie: [], series: [], live: [] };
+    for (const channel of recommended) {
+      if (alreadyShown.has(channel.id)) continue;
+      const bucket = byKind[contentKind(channel)];
+      if (bucket.length < EXPLORE_SHELF_SIZE) bucket.push(channel);
+    }
+    return byKind;
+  }, [showFallback, board.recommended, recommended]);
+
   return <div className="discovery-page">
     <div className="discovery-body">
       {query && libraryMatches.length > 0 && <MediaShelf
@@ -90,6 +112,9 @@ export function DiscoveryPage({
           {...shelfProps}
         />
         <p className="muted-note">{t("discovery.tmdbNote")}</p>
+        {exploreShelves && exploreShelves.movie.length > 0 && <MediaShelf title={t("discovery.exploreMovies.title")} subtitle={t("discovery.exploreMovies.subtitle")} channels={exploreShelves.movie} {...shelfProps} />}
+        {exploreShelves && exploreShelves.series.length > 0 && <MediaShelf title={t("discovery.exploreSeries.title")} subtitle={t("discovery.exploreSeries.subtitle")} channels={exploreShelves.series} {...shelfProps} />}
+        {exploreShelves && exploreShelves.live.length > 0 && <MediaShelf title={t("discovery.exploreLive.title")} subtitle={t("discovery.exploreLive.subtitle")} channels={exploreShelves.live} {...shelfProps} />}
       </>}
 
       {query && libraryMatches.length === 0 && <div className="empty-state">

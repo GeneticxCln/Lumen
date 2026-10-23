@@ -65,7 +65,7 @@ export function BrowseShelf({ title, subtitle, titles, compact }: BrowseShelfPro
             <BrowseArtwork title={item} />
             <span className="card-badge">{t("shelf.notInLibrary")}</span>
           </div>
-          <div className="card-bottom"><div><h3>{item.name}</h3><p>{browseCaption(item)}</p></div></div>
+          <div className="card-bottom"><div><h3 className="sr-only">{item.name}</h3><p>{browseCaption(item)}</p></div></div>
         </article>)}
       </div>
     </div>
@@ -104,7 +104,7 @@ export function MediaShelf({ title, subtitle, channels, favorites, onPlay, onDet
               <span className={`card-badge ${channel.last_error ? "unavailable" : ""}`}>{channel.last_error ? t("transport.qualityUnavailable") : channel.last_ok ? t("shelf.lastCheckedOk") : t("shelf.stream")}</span>
               {ranked && <span className="card-rank">{item.index + 1}</span>}
             </button>
-            <div className="card-bottom"><div><h3>{channel.name}</h3><p>{channel.group_title || t("shelf.yourLibrary")}</p></div><button className={`icon-button circle ${favorite ? "is-saved" : ""}`} aria-label={favorite ? t("shelf.removeFromList", { name: channel.name }) : t("shelf.addToList", { name: channel.name })} aria-pressed={favorite} onClick={() => onFavorite(channel.id)}><Icon name={favorite ? "check" : "plus"} size={17} /></button><button className="icon-button circle" aria-label={t("shelf.details", { name: channel.name })} onClick={() => onDetails(channel)}><Icon name="info" size={17} /></button></div>
+            <div className="card-bottom"><div><h3 className="sr-only">{channel.name}</h3><p>{channel.group_title || t("shelf.yourLibrary")}</p></div><button className={`icon-button circle ${favorite ? "is-saved" : ""}`} aria-label={favorite ? t("shelf.removeFromList", { name: channel.name }) : t("shelf.addToList", { name: channel.name })} aria-pressed={favorite} onClick={() => onFavorite(channel.id)}><Icon name={favorite ? "check" : "plus"} size={17} /></button><button className="icon-button circle" aria-label={t("shelf.details", { name: channel.name })} onClick={() => onDetails(channel)}><Icon name="info" size={17} /></button></div>
           </article>;
         })}
       </div>
@@ -137,7 +137,7 @@ export function ContinueShelf({ items, compact, onPlayChannel, onPlayFile }: Con
             <span className="card-play"><Icon name="play" size={24} /></span>
             <span className="card-progress" role="progressbar" aria-label={t("shelf.continue.progress", { title: item.title })} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(item.progress * 100)}><span style={{ width: `${Math.round(item.progress * 100)}%` }} /></span>
           </button>
-          <div className="card-bottom"><div><h3>{item.title}</h3><p>{item.path ? t("shelf.continue.onThisComputer", { remaining: remainingLabel(item.remainingSeconds) }) : remainingLabel(item.remainingSeconds)}</p></div></div>
+          <div className="card-bottom"><div><h3 className="sr-only">{item.title}</h3><p>{item.path ? t("shelf.continue.onThisComputer", { remaining: remainingLabel(item.remainingSeconds) }) : remainingLabel(item.remainingSeconds)}</p></div></div>
         </article>)}
       </div>
     </div>
@@ -170,7 +170,7 @@ export function UpcomingShelf({ items, compact, onDetails }: { items: UpcomingCa
               : <div className="channel-art"><img className="landscape-art" src="/artwork/landscape.svg" alt="" aria-hidden="true" /><span className="art-title">{item.name}</span></div>}
             <span className="card-badge">{item.kind === "aired" ? t("shelf.upcoming.newEpisode") : t("shelf.upcoming.upcoming")}</span>
           </button>
-          <div className="card-bottom"><div><h3>{item.name}</h3><p>{item.text}</p></div></div>
+          <div className="card-bottom"><div><h3 className="sr-only">{item.name}</h3><p>{item.text}</p></div></div>
         </article>)}
       </div>
     </div>

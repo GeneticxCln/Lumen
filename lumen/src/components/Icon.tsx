@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 
-export type IconName = "play" | "pause" | "search" | "plus" | "check" | "close" | "chevron" | "info" | "settings" | "volume" | "mute" | "stop" | "folder" | "grid" | "arrow" | "refresh" | "compass" | "film" | "series" | "tv" | "palette" | "keyboard" | "bookmark" | "sun" | "moon" | "monitor" | "profile" | "expand" | "collapse";
+export type IconName = "play" | "pause" | "search" | "plus" | "check" | "close" | "chevron" | "info" | "settings" | "volume" | "mute" | "stop" | "folder" | "grid" | "arrow" | "refresh" | "compass" | "film" | "series" | "tv" | "palette" | "keyboard" | "bookmark" | "sun" | "moon" | "monitor" | "profile" | "expand" | "collapse" | "captions" | "waveform" | "speed" | "cast";
 const paths: Record<IconName, string> = {
   profile: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM4 21a8 8 0 0 1 16 0",
   expand: "M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5",
@@ -31,6 +31,10 @@ const paths: Record<IconName, string> = {
   grid: "M3 3h7v7H3V3ZM14 3h7v7h-7V3ZM3 14h7v7H3v-7ZM14 14h7v7h-7v-7Z",
   arrow: "M19 12H5m7-7-7 7 7 7",
   refresh: "M20 7v5h-5M4 17v-5h5M5 7a8 8 0 0 1 13-2l2 7M4 12l2 7a8 8 0 0 0 13-2",
+  captions: "M3 5h18v14H3V5ZM7 13h4M13 13h4M7 9h4",
+  waveform: "M2 10v4M6 6v12M10 3v18M14 8v8M18 5v14M22 10v4",
+  speed: "M13 2 3 14h9l-1 8 10-12h-9l1-8Z",
+  cast: "M2 7V4a1 1 0 0 1 1-1h18a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1h-7M2 12a7 7 0 0 1 6 6M2 16a3 3 0 0 1 3 3M2 20h.01",
 };
 export function Icon({ name, size = 20, style }: { name: IconName; size?: number; style?: CSSProperties }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill={name === "play" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={style}><path d={paths[name]} /></svg>;

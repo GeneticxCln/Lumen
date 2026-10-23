@@ -142,48 +142,48 @@ export function Transport({
 
         <div className="transport-group transport-group-end">
           <div className="player-track-controls" aria-label={t("transport.tracks")}>
-            <label className="player-option">
-              <span>{t("transport.audio")}</span>
+            <label className="player-option" title={t("transport.audio")}>
+              <Icon name="waveform" size={15} />
               <select aria-label={t("transport.audioTrack")} value={state.audioTrack} onChange={(event) => onSelectTrack("audio", event.target.value)} disabled={!state.tracks.some((track) => track.kind === "audio")}>
                 <option value="auto">{t("transport.auto")}</option>
                 {state.tracks.filter((track) => track.kind === "audio").map((track) => <option key={track.id} value={track.id}>{track.label}</option>)}
               </select>
             </label>
-            <label className="player-option">
-              <span>{t("transport.subtitles")}</span>
+            <label className="player-option" title={t("transport.subtitles")}>
+              <Icon name="captions" size={15} />
               <select aria-label={t("transport.subtitleTrack")} value={state.subtitleTrack} onChange={(event) => onSelectTrack("subtitle", event.target.value)} disabled={!state.tracks.some((track) => track.kind === "subtitle")}>
                 <option value="off">{t("common.off")}</option>
                 {state.tracks.filter((track) => track.kind === "subtitle").map((track) => <option key={track.id} value={track.id}>{track.label}</option>)}
               </select>
             </label>
             <div className="player-option subtitle-tools" role="group" aria-label={t("transport.subtitleAdjustments")}>
-              <span>{t("transport.subtitleTools")}</span>
-              <div>
-                <button className="icon-button" disabled={!hasSubtitles} aria-label={t("transport.subtitlesEarlier")} title={t("transport.subtitlesEarlierHint")} onClick={() => onSubtitleDelay(-1)}>−</button>
-                <output aria-label={t("transport.subtitleDelay")}>{formatDelay(subtitleDelay)}</output>
-                <button className="icon-button" disabled={!hasSubtitles} aria-label={t("transport.subtitlesLater")} title={t("transport.subtitlesLaterHint")} onClick={() => onSubtitleDelay(1)}>+</button>
-                <button className="icon-button" disabled={!hasSubtitles} aria-label={t("transport.subtitlesSmaller")} title={t("transport.subtitlesSmaller")} onClick={() => onSubtitleScale(-1)}>{t("transport.subtitlesSmallerGlyph")}</button>
-                <button className="icon-button" disabled={!hasSubtitles} aria-label={t("transport.subtitlesLarger")} title={t("transport.subtitlesLarger")} onClick={() => onSubtitleScale(1)}>{t("transport.subtitlesLargerGlyph")}</button>
-                <button className="icon-button" aria-label={t("transport.addSubtitle")} title={t("transport.addSubtitle")} onClick={onAddSubtitle}>{t("transport.addSubtitleGlyph")}</button>
-                <button className="icon-button" aria-label={t("transport.findSubtitles")} title={t("transport.findSubtitles")} onClick={onFindSubtitles}>{t("transport.findSubtitlesGlyph")}</button>
-              </div>
+              <button className="icon-button" disabled={!hasSubtitles} aria-label={t("transport.subtitlesEarlier")} title={t("transport.subtitlesEarlierHint")} onClick={() => onSubtitleDelay(-1)}>−</button>
+              <output aria-label={t("transport.subtitleDelay")}>{formatDelay(subtitleDelay)}</output>
+              <button className="icon-button" disabled={!hasSubtitles} aria-label={t("transport.subtitlesLater")} title={t("transport.subtitlesLaterHint")} onClick={() => onSubtitleDelay(1)}>+</button>
+              <span className="subtitle-tools-divider" aria-hidden="true" />
+              <button className="icon-button" disabled={!hasSubtitles} aria-label={t("transport.subtitlesSmaller")} title={t("transport.subtitlesSmaller")} onClick={() => onSubtitleScale(-1)}>{t("transport.subtitlesSmallerGlyph")}</button>
+              <button className="icon-button" disabled={!hasSubtitles} aria-label={t("transport.subtitlesLarger")} title={t("transport.subtitlesLarger")} onClick={() => onSubtitleScale(1)}>{t("transport.subtitlesLargerGlyph")}</button>
+              <span className="subtitle-tools-divider" aria-hidden="true" />
+              <button className="icon-button" aria-label={t("transport.addSubtitle")} title={t("transport.addSubtitle")} onClick={onAddSubtitle}><Icon name="folder" size={14} /></button>
+              <button className="icon-button" aria-label={t("transport.findSubtitles")} title={t("transport.findSubtitles")} onClick={onFindSubtitles}><Icon name="search" size={14} /></button>
             </div>
-            <label className="player-option">
-              <span>{t("transport.speed")}</span>
+            <span className="transport-divider" aria-hidden="true" />
+            <label className="player-option" title={t("transport.speed")}>
+              <Icon name="speed" size={15} />
               <select aria-label={t("transport.speedLabel")} value={speed} onChange={(event) => onSpeed(Number(event.target.value))}>
                 {(SPEEDS.includes(speed) ? SPEEDS : [...SPEEDS, speed].sort((a, b) => a - b)).map((value) => <option key={value} value={value}>{t("transport.speedValue", { speed: value })}</option>)}
               </select>
             </label>
-            <div className="player-option">
-              <span>{t("cast.button")}</span>
-              <button className="icon-button" aria-label={t("cast.title")} title={t("cast.buttonHint")} onClick={onCast}>{t("cast.open")}</button>
-            </div>
-            <label className="player-option">
-              <span>{t("transport.quality")}</span>
+            <label className="player-option" title={t("transport.quality")}>
+              <Icon name="monitor" size={15} />
               <select aria-label={t("transport.qualityLabel")} value={state.quality} onChange={(event) => onSelectQuality(event.target.value)} disabled={!state.qualityLevels.length} title={state.qualityHelp}>
                 {state.qualityLevels.length ? state.qualityLevels.map((quality) => <option key={quality.id} value={quality.id}>{quality.label}</option>) : <option value="">{t("transport.qualityUnavailable")}</option>}
               </select>
             </label>
+            <span className="transport-divider" aria-hidden="true" />
+            <button type="button" className="player-option player-option-button" aria-label={t("cast.title")} title={t("cast.buttonHint")} onClick={onCast}>
+              <Icon name="cast" size={15} /><span>{t("cast.button")}</span>
+            </button>
           </div>
           <button
             type="button"
