@@ -235,4 +235,5 @@ export const base = {
   "transport.fullscreenHint": "Fullscreen (F)",
   "transport.exitFullscreen": "Exit fullscreen",
   "transport.exitFullscreenHint": "Exit fullscreen (F)",
+  "transport.playbackFailed": "Couldn't play this: {reason}",
 } as const;

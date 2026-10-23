@@ -533,7 +533,7 @@ function App() {
   const detailSource = details ? library.playlists.find((source) => source.id === details.playlist_id)?.name : undefined;
 
   return <>
-    <div className="app" inert={locked}>
+    <div className={`app${player.currentUrl ? " has-dock" : ""}`} inert={locked}>
     <a className="skip-link" href="#main-content">{t("app.skipToContent")}</a>
     <header className="app-header">
       <div className="brand-lockup"><button className="wordmark" onClick={() => navigate("discovery")} aria-label={t("app.brand.home")}>{t("app.brand.name")}<span>•</span></button><span className="brand-caption">{t("app.brand.caption")}</span></div>
