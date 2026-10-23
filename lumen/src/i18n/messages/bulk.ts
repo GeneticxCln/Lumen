@@ -27,7 +27,7 @@ export const bulk = {
   "bulk.select": "Add {link}",
   "bulk.selectAll": "Select the usable ones",
   "bulk.add": "Add selected ({count})",
-  "bulk.adding": "Adding…",
+  "bulk.addingProgress": "Adding… {done} of {total}",
   "bulk.added.one": "Added {count} source.",
   "bulk.added.other": "Added {count} sources.",
   "bulk.addFailed": "{url} could not be added: {reason}",

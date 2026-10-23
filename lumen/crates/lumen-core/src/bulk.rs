@@ -9,7 +9,8 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::sync::Semaphore;
 
-use crate::playlist::import::fetch_playlist_text;
+use crate::db;
+use crate::playlist::import::{fetch_playlist_text, import_m3u_url};
 use crate::playlist::m3u::{Channel, ParsedPlaylist, is_hls_manifest, parse_m3u};
 use crate::probe::{ProbeTarget, probe_targets_bounded};
 
@@ -19,6 +20,12 @@ pub const MAX_LINKS: usize = 500;
 const CONCURRENT_CHECKS: usize = 4;
 /// How long one link gets, fetch and sample together.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(25);
+/// How many links are added at the same time.
+const CONCURRENT_ADDS: usize = 4;
+/// How long one link gets to be fetched and imported before it is treated as failed. A slow or
+/// unresponsive host must not turn one click into an hours-long, silent wait that looks exactly
+/// like a hang because nothing tells the page it is still working.
+const ADD_TIMEOUT: Duration = Duration::from_secs(35);
 /// Channels of a playlist that are tried to see whether it points at anything alive.
 const SAMPLE_SIZE: usize = 5;
 const SAMPLE_DEADLINE: Duration = Duration::from_secs(8);
@@ -261,6 +268,84 @@ where
     tested
 }
 
+/// What adding one link found.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AddOutcome {
+    Added { playlist_id: i64 },
+    Failed { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AddResult {
+    pub url: String,
+    pub outcome: AddOutcome,
+}
+
+/// Adds each of `urls` as its own playlist, a few at a time — the same shape `check_links`
+/// already tests links in — reporting each result to `on_result` as soon as it is ready instead
+/// of leaving a whole batch to resolve silently behind one "Adding…". `known` is skipped before
+/// anything starts; `cancel` stops links that have not started yet.
+pub async fn add_links<F>(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    urls: Vec<String>,
+    allow_lan: bool,
+    known: &HashSet<String>,
+    cancel: Arc<AtomicBool>,
+    on_result: F,
+) -> Vec<AddResult>
+where
+    F: Fn(AddResult) + Send + Sync + 'static,
+{
+    let gate = Arc::new(Semaphore::new(CONCURRENT_ADDS));
+    let on_result = Arc::new(on_result);
+    let mut tasks = tokio::task::JoinSet::new();
+    for url in urls {
+        if known.contains(&url) {
+            continue;
+        }
+        let (gate, cancel, pool, on_result) = (
+            gate.clone(),
+            cancel.clone(),
+            pool.clone(),
+            on_result.clone(),
+        );
+        tasks.spawn(async move {
+            let Ok(_permit) = gate.acquire_owned().await else {
+                return None;
+            };
+            if cancel.load(Ordering::SeqCst) {
+                return None;
+            }
+            let name = Some(name_from_link(&url));
+            let attempt = tokio::time::timeout(ADD_TIMEOUT, async {
+                let (playlist, channels) = import_m3u_url(&url, name, allow_lan).await?;
+                db::import_playlist(&pool, &playlist, &channels).await
+            })
+            .await;
+            let outcome = match attempt {
+                Ok(Ok(playlist_id)) => AddOutcome::Added { playlist_id },
+                Ok(Err(error)) => AddOutcome::Failed {
+                    reason: String::from(error),
+                },
+                Err(_) => AddOutcome::Failed {
+                    reason: "took too long to answer".into(),
+                },
+            };
+            let result = AddResult { url, outcome };
+            on_result(result.clone());
+            Some(result)
+        });
+    }
+    let mut results = Vec::new();
+    while let Some(done) = tasks.join_next().await {
+        if let Ok(Some(result)) = done {
+            results.push(result);
+        }
+    }
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +494,91 @@ mod tests {
         })
         .await;
         assert_eq!(none, 0);
+    }
+
+    async fn test_pool() -> sqlx::Pool<sqlx::Sqlite> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn adding_is_concurrent_skips_known_links_and_reports_each_result() {
+        let server = fixture().await;
+        let pool = test_pool().await;
+        let good = format!("{}/good.m3u", server.base);
+        let missing = format!("{}/missing.m3u", server.base);
+        let already_known = format!("{}/page.m3u", server.base);
+        let urls = vec![good.clone(), missing.clone(), already_known.clone()];
+        let known: HashSet<String> = [already_known].into_iter().collect();
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let results = add_links(
+            &pool,
+            urls,
+            true,
+            &known,
+            Arc::new(AtomicBool::new(false)),
+            move |result| sink.lock().unwrap().push(result),
+        )
+        .await;
+
+        assert_eq!(
+            results.len(),
+            2,
+            "the already-known link is skipped before anything starts, not reported as failed"
+        );
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            2,
+            "every result returned was also reported live via on_result"
+        );
+
+        let added = results
+            .iter()
+            .find(|r| r.url == good)
+            .expect("good.m3u result");
+        match &added.outcome {
+            AddOutcome::Added { playlist_id } => assert!(*playlist_id > 0),
+            other => panic!("expected Added, got {other:?}"),
+        }
+        let failed = results
+            .iter()
+            .find(|r| r.url == missing)
+            .expect("missing.m3u result");
+        match &failed.outcome {
+            AddOutcome::Failed { reason } => assert!(reason.contains("404"), "{reason}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+
+        let playlists = db::list_playlists(&pool).await.unwrap();
+        assert_eq!(
+            playlists.len(),
+            1,
+            "only the one successfully-imported link actually landed in the database"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_before_it_starts_adds_nothing() {
+        let server = fixture().await;
+        let pool = test_pool().await;
+        let urls = vec![format!("{}/good.m3u", server.base)];
+        let results = add_links(
+            &pool,
+            urls,
+            true,
+            &HashSet::new(),
+            Arc::new(AtomicBool::new(true)),
+            |_| panic!("a cancelled run must not report any result"),
+        )
+        .await;
+        assert!(results.is_empty());
+        assert!(db::list_playlists(&pool).await.unwrap().is_empty());
     }
 }

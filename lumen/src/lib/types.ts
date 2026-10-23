@@ -419,3 +419,11 @@ export interface BulkAdded {
   added: { url: string; playlist_id: number }[];
   failed: { url: string; reason: string }[];
 }
+
+/** What adding one link found, sent live as a `bulk://add-result` event while a batch runs. */
+export type AddOutcome = { kind: "added"; playlistId: number } | { kind: "failed"; reason: string };
+
+export interface AddResult {
+  url: string;
+  outcome: AddOutcome;
+}
