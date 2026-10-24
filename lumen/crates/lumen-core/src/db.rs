@@ -219,7 +219,7 @@ pub async fn backfill_channel_languages(pool: &Pool<Sqlite>) -> Result<()> {
 /// and counts toward "new since your last visit" from the moment it is imported, rather than
 /// only for channels that already existed the one time the backfill itself ran.
 #[allow(clippy::too_many_arguments)]
-async fn upsert_title_and_source(
+pub(crate) async fn upsert_title_and_source(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     channel_id: i64,
     name: &str,
@@ -481,7 +481,9 @@ pub async fn import_playlist(
 /// Upserts `titles`/`title_sources` for every channel just inserted under `playlist_id`, within
 /// the same transaction as the insert. A freshly imported channel has no TMDB enrichment yet
 /// (that runs later, separately), so its only metadata is whatever its own row already carries.
-async fn backfill_titles_for_playlist(
+/// Safe to re-run against a playlist whose channels already have entries (a refresh does exactly
+/// that): every write here is an upsert, keyed by the channel's own (possibly re-derived) key.
+pub(crate) async fn backfill_titles_for_playlist(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     playlist_id: i64,
 ) -> Result<()> {
@@ -535,40 +537,60 @@ pub async fn import_playlist_if_nonempty(
     import_playlist(pool, playlist, channels).await.map(Some)
 }
 
-pub async fn delete_playlist(pool: &Pool<Sqlite>, playlist_id: i64) -> Result<()> {
-    let now = Utc::now().timestamp_millis();
-    let mut tx = pool
-        .begin()
+/// Tombstones any active favorite whose only remaining channel row is one of `removed` (as
+/// `(channel_id, url)` pairs about to disappear), using the favorite's own already-stored
+/// content_key — never re-derived, since by the time this runs the channel row (and its
+/// tvg_id/TMDB match) may already be gone, and re-deriving would silently fall back to a
+/// different key, missing the original synced record entirely. Shared by a whole-playlist
+/// delete and by a playlist refresh that drops only the channels no longer in the upstream list.
+pub(crate) async fn tombstone_favorites_for_removed_channels(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    pool: &Pool<Sqlite>,
+    removed: &[(i64, String)],
+    now: i64,
+) -> Result<()> {
+    if removed.is_empty() {
+        return Ok(());
+    }
+
+    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+        "SELECT f.profile_id, f.channel_url, f.content_key FROM favorites f \
+         WHERE f.active = 1 AND f.channel_url IN (",
+    );
+    {
+        let mut separated = qb.separated(", ");
+        for (_, url) in removed {
+            separated.push_bind(url.clone());
+        }
+    }
+    qb.push(
+        ") AND NOT EXISTS (SELECT 1 FROM channels c WHERE c.url = f.channel_url AND c.id NOT IN (",
+    );
+    {
+        let mut separated = qb.separated(", ");
+        for (id, _) in removed {
+            separated.push_bind(*id);
+        }
+    }
+    qb.push("))");
+
+    let rows = qb
+        .build()
+        .fetch_all(&mut **tx)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
-
-    // Favorites are keyed by URL and outlive channel rows. A favorite whose stream only this
-    // playlist carried can no longer be reached, so it is tombstoned and the removal syncs.
-    let orphaned: Vec<(i64, String, Option<String>)> = sqlx::query_as(
-        "SELECT f.profile_id, f.channel_url, f.content_key FROM favorites f
-         WHERE f.active = 1
-           AND f.channel_url IN (SELECT url FROM channels WHERE playlist_id = ?)
-           AND NOT EXISTS (
-             SELECT 1 FROM channels c WHERE c.url = f.channel_url AND c.playlist_id <> ?
-           )",
-    )
-    .bind(playlist_id)
-    .bind(playlist_id)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(|e| PlayerError::Sql(e.to_string()))?;
-
-    sqlx::query("DELETE FROM playlists WHERE id = ?")
-        .bind(playlist_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let orphaned: Vec<(i64, String, Option<String>)> = rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("profile_id"),
+                row.get("channel_url"),
+                row.get("content_key"),
+            )
+        })
+        .collect();
 
     for (profile_id, url, stored_content_key) in orphaned {
-        // Use the content_key already stored on the favorite, the same one `sync::queue_favorite`
-        // used when the favorite was created: the channel row (and its tvg_id/TMDB match) is
-        // already gone at this point, so re-deriving it would silently fall back to a different
-        // key and the tombstone would miss the original synced record entirely.
         let content_key = match stored_content_key {
             Some(key) => key,
             None => resolve_content_key(pool, None, &url).await,
@@ -579,11 +601,37 @@ pub async fn delete_playlist(pool: &Pool<Sqlite>, playlist_id: i64) -> Result<()
         .bind(now)
         .bind(profile_id)
         .bind(&url)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        sync::queue_favorite(tx, profile_id, &content_key, &url, false, now).await?;
+    }
+    Ok(())
+}
+
+pub async fn delete_playlist(pool: &Pool<Sqlite>, playlist_id: i64) -> Result<()> {
+    let now = Utc::now().timestamp_millis();
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    // Favorites are keyed by URL and outlive channel rows. A favorite whose stream only this
+    // playlist carried can no longer be reached, so it is tombstoned and the removal syncs.
+    let removed: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, url FROM channels WHERE playlist_id = ?")
+            .bind(playlist_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    tombstone_favorites_for_removed_channels(&mut tx, pool, &removed, now).await?;
+
+    sqlx::query("DELETE FROM playlists WHERE id = ?")
+        .bind(playlist_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
-        sync::queue_favorite(&mut tx, profile_id, &content_key, &url, false, now).await?;
-    }
 
     tx.commit()
         .await
@@ -591,7 +639,28 @@ pub async fn delete_playlist(pool: &Pool<Sqlite>, playlist_id: i64) -> Result<()
     Ok(())
 }
 
-async fn insert_channel_rows(
+/// A single playlist by id, or `None` if it no longer exists (e.g. deleted from another device
+/// and not yet reflected in the UI that is about to refresh it).
+pub async fn get_playlist(pool: &Pool<Sqlite>, playlist_id: i64) -> Result<Option<Playlist>> {
+    let row = sqlx::query(
+        "SELECT id, name, source, origin, created_at, updated_at FROM playlists WHERE id = ?",
+    )
+    .bind(playlist_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    Ok(row.map(|row| Playlist {
+        id: Some(row.get("id")),
+        name: row.get("name"),
+        source: row.get("source"),
+        origin: row.get("origin"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }))
+}
+
+pub(crate) async fn insert_channel_rows(
     conn: &mut SqliteConnection,
     playlist_id: i64,
     channels: &[Channel],

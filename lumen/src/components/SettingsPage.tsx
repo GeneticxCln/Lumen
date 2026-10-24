@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import type { CSSProperties } from "react";
 import { getSettings, setSetting, setTmdbApiKey, tmdbStatus, enrichTmdb, clearTmdbEnrichment, clearLocalThumbnailCache, localPosterCandidates, extractorStatus, updateExtractor, errorMessage } from "../lib/tauri";
-import type { Channel, ExtractorStatus, Playlist, PosterCandidate, Profile, TmdbStatus } from "../lib/types";
+import type { Channel, ExtractorStatus, Playlist, PosterCandidate, Profile, RefreshStats, TmdbStatus } from "../lib/types";
 import { defaultPreferences, themes, applyTheme } from "../lib/discovery";
 import type { Preferences } from "../lib/discovery";
 import { POSTER_FRAME_OPTIONS } from "../lib/local";
@@ -29,6 +29,7 @@ interface SettingsPageProps {
   myList: Channel[];
   onAddSource: () => void;
   onDeleteSource: (id: number) => Promise<void>;
+  onRefreshSource: (id: number) => Promise<RefreshStats>;
   onRefresh: () => void;
   onPlayChannel: (channel: Channel) => void;
   onDetails: (channel: Channel) => void;
@@ -73,6 +74,7 @@ export function SettingsPage({
   myList,
   onAddSource,
   onDeleteSource,
+  onRefreshSource,
   onRefresh,
   onPlayChannel,
   onDetails,
@@ -97,6 +99,7 @@ export function SettingsPage({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<number | null>(null);
+  const [refreshingId, setRefreshingId] = useState<number | null>(null);
   const [loadRevision, setLoadRevision] = useState(0);
   const [engineError, setEngineError] = useState<string | null>(null);
   const [savedEngine, setSavedEngine] = useState({ hwdec: "auto-safe", cache: "yes", extraArgs: "" });
@@ -269,6 +272,21 @@ export function SettingsPage({
   const update = <K extends keyof Preferences>(key: K, value: Preferences[K]) => {
     setDraft((previous) => ({ ...previous, [key]: value }));
     setNotice(null);
+  };
+
+  // The shared library hook (useChannels) already reloads its own playlists/channels and
+  // surfaces the "added/updated/removed" result as the app's global notice toast on success —
+  // this only needs to track its own per-row busy state and the error case, which isn't.
+  const refreshSource = async (id: number) => {
+    setRefreshingId(id);
+    setError(null);
+    try {
+      await onRefreshSource(id);
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setRefreshingId(null);
+    }
   };
 
   const save = async () => {
@@ -450,9 +468,20 @@ export function SettingsPage({
                       </button>
                     </>
                   ) : (
-                    <button className="danger-button" onClick={() => setConfirmId(source.id)}>
-                      {t("settings.sources.remove")}
-                    </button>
+                    <>
+                      {source.source === "url" && (
+                        <button
+                          className="secondary-button"
+                          disabled={refreshingId === source.id}
+                          onClick={() => void refreshSource(source.id)}
+                        >
+                          {refreshingId === source.id ? t("settings.sources.refreshing") : t("settings.sources.refresh")}
+                        </button>
+                      )}
+                      <button className="danger-button" onClick={() => setConfirmId(source.id)}>
+                        {t("settings.sources.remove")}
+                      </button>
+                    </>
                   )}
                 </div>
               </div>

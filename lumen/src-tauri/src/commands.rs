@@ -615,6 +615,20 @@ pub async fn delete_playlist_cmd(playlist_id: i64, app: AppHandle) -> Result<()>
     Ok(())
 }
 
+/// Re-fetches a URL-imported playlist's source and merges the result into its existing
+/// channels in place (see `playlist::refresh`), instead of duplicating it under a new id.
+#[tauri::command]
+pub async fn refresh_playlist_cmd(
+    playlist_id: i64,
+    app: AppHandle,
+) -> Result<crate::playlist::refresh::RefreshStats> {
+    let pool = ensure_db(&app).await?;
+    let allow_lan = allow_lan_sources(pool).await;
+    let stats = crate::playlist::refresh::refresh_playlist(pool, playlist_id, allow_lan).await?;
+    crate::sync::schedule(pool);
+    Ok(stats)
+}
+
 #[derive(Serialize)]
 pub struct FallbackSource {
     pub url: String,
