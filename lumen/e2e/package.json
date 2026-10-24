@@ -1,0 +1,14 @@
+{
+  "name": "lumen-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A handful of end-to-end smoke tests for the real Lumen app, driven via tauri-driver under Xvfb.",
+  "type": "module",
+  "scripts": {
+    "test:e2e": "node smoke.import-playlist.mjs && node smoke.play-channel.mjs && node smoke.favorite.mjs && node smoke.settings-toggle.mjs"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "selenium-webdriver": "^4.51.0"
+  }
+}
