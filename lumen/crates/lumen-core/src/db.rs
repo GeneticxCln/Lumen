@@ -3736,4 +3736,118 @@ mod tests {
             .expect_err("merging a profile into itself makes no sense");
         assert!(String::from(error).contains("itself"));
     }
+
+    // --- Large-library scale check (AUDIT.md: "all library rows are held in memory; search
+    // stops at 5,000 rows") -------------------------------------------------------------------
+
+    fn synthetic_channels(n: usize) -> Vec<Channel> {
+        const GROUPS: [&str; 10] = [
+            "News",
+            "Sports",
+            "Movies",
+            "Documentary",
+            "Kids",
+            "Music",
+            "Science",
+            "Comedy",
+            "Drama",
+            "Action",
+        ];
+        (0..n)
+            .map(|i| {
+                let group = GROUPS[i % GROUPS.len()];
+                Channel {
+                    id: None,
+                    playlist_id: 0,
+                    name: format!("Channel {i:06} {group}"),
+                    url: format!("https://example.test/stream/{i}.m3u8"),
+                    group_title: Some(group.to_string()),
+                    tvg_id: (i % 3 == 0).then(|| format!("tvg-{i}")),
+                    tvg_logo: None,
+                    language: None,
+                    extra_headers: None,
+                    last_ok: None,
+                    last_error: None,
+                    is_live: Some(true),
+                }
+            })
+            .collect()
+    }
+
+    /// Not a correctness test — a timed, human-read report against a synthetic 100k-channel
+    /// library, run on demand (`cargo test -p lumen-core -- --ignored --nocapture
+    /// large_library_scale_check`). Confirms the two known limitations AUDIT.md already
+    /// documents are real and measures how they actually behave at the scale asked for: does
+    /// import/list time out or hang, and what exactly does a broad search silently drop.
+    #[tokio::test]
+    #[ignore = "a deliberately slow scale check, not part of the normal suite; run with --ignored"]
+    async fn large_library_scale_check() {
+        const N: usize = 100_000;
+        let pool = test_pool().await;
+        let channels = synthetic_channels(N);
+
+        let playlist = Playlist {
+            id: None,
+            name: "Scale check".into(),
+            source: "url".into(),
+            origin: Some("https://example.test/huge.m3u".into()),
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        let import_start = std::time::Instant::now();
+        let playlist_id = import_playlist(&pool, &playlist, &channels).await.unwrap();
+        let import_elapsed = import_start.elapsed();
+        println!("import_playlist({N} channels): {import_elapsed:?}");
+
+        let list_start = std::time::Instant::now();
+        let all = list_channels(&pool, playlist_id, None, None).await.unwrap();
+        let list_elapsed = list_start.elapsed();
+        println!("list_channels (whole playlist, {N} rows): {list_elapsed:?}");
+        assert_eq!(
+            all.len(),
+            N,
+            "every imported row is returned, none silently dropped"
+        );
+
+        // Mirrors commands.rs's search_engine query exactly: LIKE across name/group_title/tvg_id,
+        // ORDER BY name LIMIT 5000. "Channel" matches every single row in this library.
+        let search_start = std::time::Instant::now();
+        let term = contains_pattern("Channel");
+        let rows = sqlx::query(
+            "SELECT name FROM channels WHERE name LIKE ? ESCAPE '\\' OR group_title LIKE ? ESCAPE '\\' OR tvg_id LIKE ? ESCAPE '\\' \
+             ORDER BY name LIMIT 5000",
+        )
+        .bind(&term)
+        .bind(&term)
+        .bind(&term)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let search_elapsed = search_start.elapsed();
+        let names: Vec<String> = rows.iter().map(|r| r.get("name")).collect();
+        println!(
+            "search_engine's SQL query (term matching all {N} rows): {search_elapsed:?}, returned {}",
+            names.len()
+        );
+        assert_eq!(
+            names.len(),
+            5000,
+            "the query matches all 100,000 rows but is capped at 5,000"
+        );
+
+        // The bug this is meant to surface: capping is alphabetical-by-name, not relevance- or
+        // recency-ranked, and nothing downstream knows truncation happened. A channel whose name
+        // sorts after the 5,000th match (here: roughly "Channel 050000" onward) cannot be found
+        // by this search no matter how exactly it matches, and the UI has no "N more results"
+        // signal to tell the user that's what happened.
+        let last_returned = names.last().unwrap();
+        println!("alphabetically-last name actually returned: {last_returned:?}");
+        let missed = "Channel 099999 Action"; // the real last channel by insertion order
+        assert!(
+            !names.contains(&missed.to_string()),
+            "a channel from well past the alphabetical cutoff is invisible to search, \
+             even though its name matches exactly: {missed:?}"
+        );
+    }
 }
