@@ -15,7 +15,8 @@ import { Icon } from "./Icon";
 interface ProfileSettingsProps {
   profiles: Profile[];
   activeProfileId: number | null;
-  onProfilesChanged: () => void | Promise<void>;
+  /** Told which profile a PIN (or the lack of one) was just verified for, when a switch did so. */
+  onProfilesChanged: (verifiedProfileId?: number) => void | Promise<void>;
 }
 
 /** Which inline form a row currently has open, if any. */
@@ -54,15 +55,17 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
     setCurrentPin("");
   };
 
-  /** Run one profile mutation, then let the caller reload profiles, active profile and library. */
-  const run = async (task: () => Promise<unknown>, after?: () => void) => {
+  /** Run one profile mutation, then let the caller reload profiles, active profile and library.
+   * `verifiedProfileId` is set only when `task` itself just checked a PIN (or confirmed none is
+   * needed) to switch to that profile, so the caller can treat it as already unlocked. */
+  const run = async (task: () => Promise<unknown>, after?: () => void, verifiedProfileId?: number) => {
     if (busy) return;
     setBusy(true);
     setError(null);
     try {
       await task();
       after?.();
-      await onProfilesChanged();
+      await onProfilesChanged(verifiedProfileId);
     } catch (failure) {
       fail(failure);
     } finally {
@@ -89,7 +92,7 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
     }
 
     // Switching to a profile that has a PIN unlocks it, so the PIN travels with the switch.
-    void run(() => activateProfile(profile.id, value), closeAction);
+    void run(() => activateProfile(profile.id, value), closeAction, profile.id);
   };
 
   const switchTo = (profile: Profile) => {
@@ -97,7 +100,7 @@ export function ProfileSettings({ profiles, activeProfileId, onProfilesChanged }
       openAction(profile, "switch");
       return;
     }
-    void run(() => activateProfile(profile.id), closeAction);
+    void run(() => activateProfile(profile.id), closeAction, profile.id);
   };
 
   const setPin = (profile: Profile) => {

@@ -6,7 +6,8 @@ import { t } from "../i18n/index.ts";
 interface ProfileGateProps {
   profiles: Profile[];
   initialProfileId: number | null;
-  onUnlocked: () => void | Promise<void>;
+  /** Told which profile a PIN (or the lack of one) was just verified for. */
+  onUnlocked: (profileId: number) => void | Promise<void>;
 }
 
 export function ProfileGate({ profiles, initialProfileId, onUnlocked }: ProfileGateProps) {
@@ -28,7 +29,7 @@ export function ProfileGate({ profiles, initialProfileId, onUnlocked }: ProfileG
     try {
       await activateProfile(profile.id, value);
       setPin("");
-      await onUnlocked();
+      await onUnlocked(profile.id);
     } catch (failure) {
       // A rejected unlock stays locked: clear the field, report it, and keep the user here.
       setPin("");

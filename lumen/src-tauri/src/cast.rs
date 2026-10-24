@@ -93,7 +93,12 @@ pub async fn cast_start_cmd(
         });
         previous
     };
-    if let Some(previous) = previous {
+    // Only stop the previous session if it was a *different* device: re-casting a new item to
+    // the device already playing must not have its own freshly-sent Play immediately followed by
+    // a Stop meant for what it just replaced.
+    if let Some(previous) = previous
+        && previous.session.renderer.id != renderer.id
+    {
         let _ = previous.session.renderer.stop().await;
     }
     let state = CastState {

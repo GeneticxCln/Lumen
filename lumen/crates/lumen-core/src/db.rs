@@ -199,6 +199,110 @@ pub async fn backfill_channel_languages(pool: &Pool<Sqlite>) -> Result<()> {
     Ok(())
 }
 
+/// Upserts one channel's row into `titles`/`title_sources` and backfills its `content_key` into
+/// any matching `favorites`/`history` rows that don't have one yet. Shared by the one-time
+/// startup backfill and by importing a new playlist, so a title gets automatic source-fallback
+/// and counts toward "new since your last visit" from the moment it is imported, rather than
+/// only for channels that already existed the one time the backfill itself ran.
+#[allow(clippy::too_many_arguments)]
+async fn upsert_title_and_source(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    channel_id: i64,
+    name: &str,
+    url: &str,
+    tvg_id: Option<&str>,
+    tmdb_id: Option<i64>,
+    tmdb_type: Option<&str>,
+    poster_path: Option<&str>,
+    backdrop_path: Option<&str>,
+    overview: Option<&str>,
+    release_year: Option<i64>,
+    genre_names: Option<&str>,
+    extra_headers: Option<&str>,
+    is_live: Option<i64>,
+    now: i64,
+) -> Result<()> {
+    let content_key = ContentKey::derive(tmdb_id, tmdb_type, name, tvg_id, url).into_string();
+
+    let (kind, season, ep) = if let Some(t) = tmdb_type {
+        if t == "tv" || t == "series" {
+            let (s, e) = parse_season_episode(name).unwrap_or((1, 1));
+            ("series", Some(s), Some(e))
+        } else {
+            ("movie", None, None)
+        }
+    } else if is_live == Some(1) {
+        ("channel", None, None)
+    } else {
+        ("movie", None, None)
+    };
+
+    sqlx::query(
+        "INSERT INTO titles (content_key, kind, title, tmdb_id, tmdb_type, season, episode, release_year, poster_path, backdrop_path, overview, genres, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT (content_key) DO UPDATE SET \
+           title = excluded.title, \
+           poster_path = COALESCE(titles.poster_path, excluded.poster_path), \
+           backdrop_path = COALESCE(titles.backdrop_path, excluded.backdrop_path), \
+           overview = COALESCE(titles.overview, excluded.overview), \
+           updated_at = excluded.updated_at",
+    )
+    .bind(&content_key)
+    .bind(kind)
+    .bind(name)
+    .bind(tmdb_id)
+    .bind(tmdb_type)
+    .bind(season)
+    .bind(ep)
+    .bind(release_year)
+    .bind(poster_path)
+    .bind(backdrop_path)
+    .bind(overview)
+    .bind(genre_names)
+    .bind(now)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    sqlx::query(
+        "INSERT INTO title_sources (content_key, channel_id, stream_url, rank, headers, is_live, created_at) \
+         VALUES (?, ?, ?, 0, ?, ?, ?) \
+         ON CONFLICT (content_key, stream_url) DO UPDATE SET \
+           channel_id = excluded.channel_id, \
+           headers = excluded.headers, \
+           is_live = excluded.is_live",
+    )
+    .bind(&content_key)
+    .bind(channel_id)
+    .bind(url)
+    .bind(extra_headers.unwrap_or("{}"))
+    .bind(is_live)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    sqlx::query(
+        "UPDATE favorites SET content_key = ? WHERE channel_url = ? AND content_key IS NULL",
+    )
+    .bind(&content_key)
+    .bind(url)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    sqlx::query("UPDATE history SET content_key = ? WHERE (path = ? OR channel_id = ?) AND content_key IS NULL")
+        .bind(&content_key)
+        .bind(url)
+        .bind(channel_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    Ok(())
+}
+
 /// Settings key recording that titles and title_sources were backfilled.
 const TITLES_BACKFILL_SETTING: &str = "titles_backfill_v1";
 
@@ -228,103 +332,24 @@ pub async fn backfill_titles_and_sources(pool: &Pool<Sqlite>) -> Result<()> {
         let channel_id: i64 = row.get("id");
         let name: String = row.get("name");
         let url: String = row.get("url");
-        let tvg_id = row.get::<Option<String>, _>("tvg_id");
-        let tmdb_id = row.get::<Option<i64>, _>("tmdb_id");
-        let tmdb_type = row.get::<Option<String>, _>("tmdb_type");
-        let poster_path = row.get::<Option<String>, _>("poster_path");
-        let backdrop_path = row.get::<Option<String>, _>("backdrop_path");
-        let overview = row.get::<Option<String>, _>("overview");
-        let release_year = row.get::<Option<i64>, _>("release_year");
-        let genre_names = row.get::<Option<String>, _>("genre_names");
-        let extra_headers = row.get::<Option<String>, _>("extra_headers");
-        let is_live = row.get::<Option<i64>, _>("is_live");
-
-        let content_key = ContentKey::derive(
-            tmdb_id,
-            tmdb_type.as_deref(),
+        upsert_title_and_source(
+            &mut tx,
+            channel_id,
             &name,
-            tvg_id.as_deref(),
             &url,
+            row.get::<Option<String>, _>("tvg_id").as_deref(),
+            row.get::<Option<i64>, _>("tmdb_id"),
+            row.get::<Option<String>, _>("tmdb_type").as_deref(),
+            row.get::<Option<String>, _>("poster_path").as_deref(),
+            row.get::<Option<String>, _>("backdrop_path").as_deref(),
+            row.get::<Option<String>, _>("overview").as_deref(),
+            row.get::<Option<i64>, _>("release_year"),
+            row.get::<Option<String>, _>("genre_names").as_deref(),
+            row.get::<Option<String>, _>("extra_headers").as_deref(),
+            row.get::<Option<i64>, _>("is_live"),
+            now,
         )
-        .into_string();
-
-        let (kind, season, ep) = if let Some(ref t) = tmdb_type {
-            if t == "tv" || t == "series" {
-                let (s, e) = parse_season_episode(&name).unwrap_or((1, 1));
-                ("series", Some(s), Some(e))
-            } else {
-                ("movie", None, None)
-            }
-        } else if is_live == Some(1) {
-            ("channel", None, None)
-        } else {
-            ("movie", None, None)
-        };
-
-        sqlx::query(
-            "INSERT INTO titles (content_key, kind, title, tmdb_id, tmdb_type, season, episode, release_year, poster_path, backdrop_path, overview, genres, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT (content_key) DO UPDATE SET \
-               title = excluded.title, \
-               poster_path = COALESCE(titles.poster_path, excluded.poster_path), \
-               backdrop_path = COALESCE(titles.backdrop_path, excluded.backdrop_path), \
-               overview = COALESCE(titles.overview, excluded.overview), \
-               updated_at = excluded.updated_at",
-        )
-        .bind(&content_key)
-        .bind(kind)
-        .bind(&name)
-        .bind(tmdb_id)
-        .bind(&tmdb_type)
-        .bind(season)
-        .bind(ep)
-        .bind(release_year)
-        .bind(&poster_path)
-        .bind(&backdrop_path)
-        .bind(&overview)
-        .bind(&genre_names)
-        .bind(now)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| PlayerError::Sql(e.to_string()))?;
-
-        sqlx::query(
-            "INSERT INTO title_sources (content_key, channel_id, stream_url, rank, headers, is_live, created_at) \
-             VALUES (?, ?, ?, 0, ?, ?, ?) \
-             ON CONFLICT (content_key, stream_url) DO UPDATE SET \
-               channel_id = excluded.channel_id, \
-               headers = excluded.headers, \
-               is_live = excluded.is_live",
-        )
-        .bind(&content_key)
-        .bind(channel_id)
-        .bind(&url)
-        .bind(extra_headers.unwrap_or_else(|| "{}".into()))
-        .bind(is_live)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| PlayerError::Sql(e.to_string()))?;
-
-        // Backfill content_key into favorites matching this url
-        sqlx::query(
-            "UPDATE favorites SET content_key = ? WHERE channel_url = ? AND content_key IS NULL",
-        )
-        .bind(&content_key)
-        .bind(&url)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| PlayerError::Sql(e.to_string()))?;
-
-        // Backfill content_key into history matching this url or channel_id
-        sqlx::query("UPDATE history SET content_key = ? WHERE (path = ? OR channel_id = ?) AND content_key IS NULL")
-            .bind(&content_key)
-            .bind(&url)
-            .bind(channel_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        .await?;
     }
 
     // For any remaining history or favorites rows, generate a stream/file fallback content_key
@@ -430,12 +455,57 @@ pub async fn import_playlist(
 
     let playlist_id: i64 = row.get("id");
     insert_channel_rows(&mut tx, playlist_id, channels).await?;
+    backfill_titles_for_playlist(&mut tx, playlist_id).await?;
 
     tx.commit()
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
     Ok(playlist_id)
+}
+
+/// Upserts `titles`/`title_sources` for every channel just inserted under `playlist_id`, within
+/// the same transaction as the insert. A freshly imported channel has no TMDB enrichment yet
+/// (that runs later, separately), so its only metadata is whatever its own row already carries.
+async fn backfill_titles_for_playlist(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    playlist_id: i64,
+) -> Result<()> {
+    let rows = sqlx::query(
+        "SELECT id, name, url, tvg_id, extra_headers, is_live, \
+         tmdb_id, tmdb_type, poster_path, backdrop_path, overview, release_year, genre_names \
+         FROM channels WHERE playlist_id = ?",
+    )
+    .bind(playlist_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    let now = Utc::now().timestamp_millis();
+    for row in &rows {
+        let channel_id: i64 = row.get("id");
+        let name: String = row.get("name");
+        let url: String = row.get("url");
+        upsert_title_and_source(
+            tx,
+            channel_id,
+            &name,
+            &url,
+            row.get::<Option<String>, _>("tvg_id").as_deref(),
+            row.get::<Option<i64>, _>("tmdb_id"),
+            row.get::<Option<String>, _>("tmdb_type").as_deref(),
+            row.get::<Option<String>, _>("poster_path").as_deref(),
+            row.get::<Option<String>, _>("backdrop_path").as_deref(),
+            row.get::<Option<String>, _>("overview").as_deref(),
+            row.get::<Option<i64>, _>("release_year"),
+            row.get::<Option<String>, _>("genre_names").as_deref(),
+            row.get::<Option<String>, _>("extra_headers").as_deref(),
+            row.get::<Option<i64>, _>("is_live"),
+            now,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Save a discovered source only when it produced playable entries. Ordinary user imports
@@ -2026,6 +2096,45 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// Reproduces the bug: on a fresh install, `titles`/`title_sources` were only ever filled by
+    /// the one-time startup backfill, which runs once against whatever already exists — a
+    /// playlist imported afterward (every playlist, on a fresh install) never got rows there, so
+    /// automatic source fallback silently found nothing for any title, forever.
+    #[tokio::test]
+    async fn importing_a_playlist_populates_title_sources_for_fallback() {
+        let pool = test_pool().await;
+
+        import_playlist(
+            &pool,
+            &playlist("Provider A"),
+            &[Channel {
+                tvg_id: Some("news1".into()),
+                ..channel(0, "News Channel", "https://a.example/news.m3u8")
+            }],
+        )
+        .await
+        .unwrap();
+        import_playlist(
+            &pool,
+            &playlist("Provider B"),
+            &[Channel {
+                tvg_id: Some("news1".into()),
+                ..channel(0, "News Channel", "https://b.example/news.m3u8")
+            }],
+        )
+        .await
+        .unwrap();
+
+        let next = next_ranked_source_after(&pool, "https://a.example/news.m3u8")
+            .await
+            .unwrap();
+        assert_eq!(
+            next.map(|(url, _, _)| url),
+            Some("https://b.example/news.m3u8".to_string()),
+            "the second provider's stream must already be a ranked fallback right after import"
         );
     }
 

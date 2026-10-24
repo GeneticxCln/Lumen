@@ -8,7 +8,7 @@ use lumen_core::{db, secrets};
 use serde::Serialize;
 use tauri::AppHandle;
 
-use crate::commands::{allow_lan_sources, ensure_db};
+use crate::commands::{allow_lan_sources, ensure_db, stop};
 use crate::error::Result;
 
 /// Reads the real network-privacy settings and resolves the route away from `Pending` (set at
@@ -97,6 +97,10 @@ pub async fn network_privacy_set_cmd(
     }
 
     let pool = ensure_db(&app).await?;
+    let was_enabled = matches!(
+        db::get_setting(pool, privacy::ENABLED_SETTING).await,
+        Ok(Some(value)) if value == "true"
+    );
     db::set_setting(pool, privacy::UPSTREAM_SETTING, &upstream).await?;
     db::set_setting(pool, privacy::USERNAME_SETTING, &username).await?;
     db::set_setting(
@@ -109,6 +113,14 @@ pub async fn network_privacy_set_cmd(
     let allow_lan = allow_lan_sources(pool).await;
     privacy::reconcile(pool, allow_lan).await;
     crate::apply_webview_proxy(&app);
+    // mpv only picks up `--http-proxy` at its own startup, so a running mpv keeps using whatever
+    // was true when it started regardless of what was just saved. Toggling privacy on or off with
+    // a stream already playing would otherwise leave it on the wrong side of the proxy until mpv
+    // happens to restart on its own: fail closed the same way the relay itself does, by stopping
+    // playback now so the next play starts a fresh mpv under the setting that was just chosen.
+    if was_enabled != enabled {
+        let _ = stop(app.clone()).await;
+    }
     state(&app).await
 }
 

@@ -503,6 +503,9 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        // Importing a playlist backfills `titles`/`title_sources`, which reads the enrichment
+        // columns that `init_db` adds after migrating (see `db::test_pool`).
+        crate::db::migrate_tmdb_columns(&pool).await.unwrap();
         pool
     }
 
