@@ -28,6 +28,7 @@ pub mod sync_keys;
 pub mod text_encoding;
 pub mod tmdb;
 pub mod update;
+pub mod update_sig;
 
 #[cfg(test)]
 mod sync_tests;

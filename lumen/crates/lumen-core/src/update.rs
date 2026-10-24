@@ -6,9 +6,11 @@
 //! system (a `.deb`, a Flatpak) are never replaced here; they only learn that a newer version
 //! exists.
 //!
-//! The checksum catches a damaged or truncated download. It does not prove who published the file:
-//! anyone who can publish a release to the repository can publish an update, and the checksums
-//! come from the same place as the files. That is the price of having no signing key.
+//! The checksum alone catches a damaged or truncated download; it does not prove who published
+//! the file, since the checksums come from the same place as the files. `update_sig` closes that
+//! gap: `SHA256SUMS` must also carry a valid signature from the release key baked into Lumen
+//! before anything it lists is trusted, which only whoever holds the matching secret key can
+//! produce.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -31,6 +33,8 @@ const DOWNLOAD_PATH_PREFIX: &str = "/GeneticxCln/Lumen/releases/download/";
 
 /// The checksum file every release carries.
 pub const CHECKSUM_ASSET: &str = "SHA256SUMS";
+/// The signature over [`CHECKSUM_ASSET`] every release carries, by the key in `update_sig`.
+pub const CHECKSUM_SIG_ASSET: &str = "SHA256SUMS.minisig";
 
 const MAX_METADATA_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PACKAGE_BYTES: u64 = 800 * 1024 * 1024;
@@ -244,6 +248,25 @@ async fn check_using(
                 MAX_METADATA_BYTES,
             )
             .await?;
+            // The checksum alone only proves the download was not corrupted; it says nothing
+            // about who published it. A release with no signature asset, or one that does not
+            // verify, is rejected outright here rather than falling back to checksum-only trust.
+            let signature_asset = release
+                .assets
+                .iter()
+                .find(|a| a.name == CHECKSUM_SIG_ASSET)
+                .ok_or_else(|| {
+                    PlayerError::Parse("This release has no SHA256SUMS.minisig".into())
+                })?;
+            let signature = crate::subtitles::http::read_capped(
+                fetch(client, guard, &asset_url(guard, signature_asset)?).await?,
+                MAX_METADATA_BYTES,
+            )
+            .await?;
+            crate::update_sig::verify_checksums_signature(
+                &sums,
+                &String::from_utf8_lossy(&signature),
+            )?;
             let sums = parse_checksums(&String::from_utf8_lossy(&sums));
             match sums.get(&asset.name) {
                 Some(sha256) => Some(Package {
@@ -419,14 +442,54 @@ mod tests {
     }
 
     /// A release API answer for a server whose address is `__BASE__` (filled in by the server).
+    /// Includes a `SHA256SUMS.minisig` asset so tests that reach the checksum-verification
+    /// branch also need to serve a matching signature at `sig_path(tag)` — see
+    /// `a_release_with_no_signature_asset_is_refused` for the one case that deliberately omits it.
     fn release_json(tag: &str, extra: &str) -> String {
         format!(
             r#"{{"tag_name":"{tag}","html_url":"__BASE__/GeneticxCln/Lumen/releases/tag/{tag}"{extra},"assets":[
                 {{"name":"lumen_0.2.0_amd64.deb","browser_download_url":"__BASE__/GeneticxCln/Lumen/releases/download/{tag}/lumen_0.2.0_amd64.deb","size":10}},
                 {{"name":"lumen_0.2.0_amd64.AppImage","browser_download_url":"__BASE__/GeneticxCln/Lumen/releases/download/{tag}/lumen_0.2.0_amd64.AppImage","size":2048}},
+                {{"name":"SHA256SUMS","browser_download_url":"__BASE__/GeneticxCln/Lumen/releases/download/{tag}/SHA256SUMS","size":200}},
+                {{"name":"SHA256SUMS.minisig","browser_download_url":"__BASE__/GeneticxCln/Lumen/releases/download/{tag}/SHA256SUMS.minisig","size":200}}]}}"#
+        )
+    }
+
+    /// A release JSON with no `SHA256SUMS.minisig` asset at all.
+    fn release_json_without_signature_asset(tag: &str) -> String {
+        format!(
+            r#"{{"tag_name":"{tag}","html_url":"__BASE__/GeneticxCln/Lumen/releases/tag/{tag}","assets":[
+                {{"name":"lumen_0.2.0_amd64.AppImage","browser_download_url":"__BASE__/GeneticxCln/Lumen/releases/download/{tag}/lumen_0.2.0_amd64.AppImage","size":2048}},
                 {{"name":"SHA256SUMS","browser_download_url":"__BASE__/GeneticxCln/Lumen/releases/download/{tag}/SHA256SUMS","size":200}}]}}"#
         )
     }
+
+    fn sig_path(tag: &str) -> String {
+        format!("/GeneticxCln/Lumen/releases/download/{tag}/SHA256SUMS.minisig")
+    }
+
+    /// A valid signature (by the `cfg(test)` key in `update_sig`) over `lumen_0.2.0_amd64.AppImage`'s
+    /// checksum (computed from the padded `[0x7f, b'E', b'L', b'F', 1, 2, 3]` content used below)
+    /// plus a throwaway `lumen_0.2.0_amd64.deb` line of all zeros — the exact `SHA256SUMS` content
+    /// `a_newer_release_is_found_with_its_checked_package` serves.
+    const SIG_FOR_HAPPY_PATH_SUMS: &str = "untrusted comment: signature from minisign secret key
+RUSXv6TLERTKxO01YE6unRN8ngK/4EDik9CH8ijeJK6NTNeaSQK9K1Z0rj+6sxgPAWJTEmE5HJe8kELYyl1P/Ny6MES6o2goyQI=
+trusted comment: timestamp:1792861956\tfile:sums1.txt\thashed
+bRsnjgwjySp70nfziaqAhB67t/M3UolEjPRFbJqt3PbK/rXlHT3Et53wA3Cp18lNRnNmwtTxItM7t2Cl+zb8Dw==";
+
+    /// A valid signature over `a_release_without_a_checksum_for_the_file_offers_no_package`'s
+    /// `others` fixture content (`"1".repeat(64)  something-else.AppImage\n`).
+    const SIG_FOR_UNMATCHED_SUMS: &str = "untrusted comment: signature from minisign secret key
+RUSXv6TLERTKxIdxILq5+fuSfi7oDb1jYBuE8wTGYJsxiGC67C7y8teFPmP5hoWfX0/uktsaHMOXwRQgEkuF2EwEoBnRcwiT7AE=
+trusted comment: timestamp:1792861959\tfile:sums3.txt\thashed
+R24flS/937jhO5jL/vUpS3QVtehPv8PSYaTyrd4lY+l63uXCJWm91WhoojODm8s22Cz971HUEmP22pMHtuWEAA==";
+
+    /// A valid signature over `files_from_outside_the_repository_are_refused`'s fixture content
+    /// (`"1".repeat(64)  lumen_0.2.0_amd64.AppImage\n`).
+    const SIG_FOR_ESCAPED_ASSET_SUMS: &str = "untrusted comment: signature from minisign secret key
+RUSXv6TLERTKxB3tL9CSR0WsMZLvKuKzRNx/NEk3zW5A6t2DNojwLi6qxDcajQPUfHliZIU5tOv5u8xKDmgtNpy9jAuCJs1RFwE=
+trusted comment: timestamp:1792861962\tfile:sums4.txt\thashed
+ld6q8vSqr6xzIo6v/nzj3y7EvprIjNzNIQT/KLUvJepFVT6s3gPH83lBzEuNyFp+YoXjLMnNdK/Z1GKqijKiBw==";
 
     fn guard() -> Guard {
         Guard::insecure_for_tests(&["127.0.0.1"])
@@ -470,6 +533,7 @@ mod tests {
                 "/GeneticxCln/Lumen/releases/download/v0.2.0/SHA256SUMS",
                 &sums,
             ),
+            Canned::text(&sig_path("v0.2.0"), SIG_FOR_HAPPY_PATH_SUMS),
         ])
         .await;
         let found = check_local(&server.base, "0.1.0", true)
@@ -554,6 +618,7 @@ mod tests {
         let server = serve(vec![
             Canned::json("/api", &release_json("v0.2.0", "")),
             Canned::text(SUMS_PATH, &others),
+            Canned::text(&sig_path("v0.2.0"), SIG_FOR_UNMATCHED_SUMS),
         ])
         .await;
         let found = check_local(&server.base, "0.1.0", true)
@@ -576,9 +641,24 @@ mod tests {
         let server = serve(vec![
             Canned::json("/api", &json),
             Canned::text(SUMS_PATH, &sums),
+            Canned::text(&sig_path("v0.2.0"), SIG_FOR_ESCAPED_ASSET_SUMS),
         ])
         .await;
         assert!(check_local(&server.base, "0.1.0", true).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_release_with_no_signature_asset_is_refused() {
+        let sums = format!("{}  lumen_0.2.0_amd64.AppImage\n", "1".repeat(64));
+        let server = serve(vec![
+            Canned::json("/api", &release_json_without_signature_asset("v0.2.0")),
+            Canned::text(SUMS_PATH, &sums),
+        ])
+        .await;
+        assert!(
+            check_local(&server.base, "0.1.0", true).await.is_err(),
+            "checksums alone, with no signature to trust them, must not be enough"
+        );
     }
 
     fn temp_dir() -> PathBuf {
