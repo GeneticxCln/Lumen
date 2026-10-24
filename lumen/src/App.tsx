@@ -19,7 +19,7 @@ import { LocalDevicePage } from "./components/LocalDevicePage";
 import { SearchEnginePage } from "./components/SearchEnginePage";
 import { usePlayer } from "./hooks/usePlayer";
 import { useChannels } from "./hooks/useChannels";
-import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, getPlayerPrefs, listProfiles, setPlayerFullscreen, tmdbStatus, updateRestart, updateState } from "./lib/tauri";
+import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, getPlayerPrefs, listProfiles, onSyncApplied, setPlayerFullscreen, tmdbStatus, updateRestart, updateState } from "./lib/tauri";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { BrowseTitle } from "./lib/types";
 import type { CastState, Channel, HistoryEntry, PlayerPrefs, Profile, UpdateEventPayload } from "./lib/types";
@@ -130,6 +130,19 @@ function App() {
     await loadProfiles(verifiedProfileId);
     setRefresh((value) => value + 1);
   };
+
+  // A sync pulling in a change from another device would otherwise sit unseen until the next
+  // restart: nothing before this reran the same reload a manual "Refresh library" action
+  // already triggers. `refresh` alone covers channels/favorites, history and the browse shelf
+  // (each already depends on it); profiles need their own reload since they don't.
+  useEffect(() => {
+    const unlistenPromise = onSyncApplied(() => {
+      setRefresh((value) => value + 1);
+      void loadProfiles();
+    });
+    unlistenPromise.catch(() => {});
+    return () => { unlistenPromise.then((off) => off()).catch(() => {}); };
+  }, [loadProfiles]);
 
   useEffect(() => {
     let active = true;

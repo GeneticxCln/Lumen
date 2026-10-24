@@ -8,6 +8,7 @@
 //! means nothing on another device.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -43,6 +44,20 @@ const LAST_SYNC_SETTING: &str = "sync_last_synced_at";
 const SEEDED_SETTING: &str = "sync_seeded";
 const SKIPPED_SETTING: &str = "sync_skipped";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Invoked with the count of remote records actually applied after a sync lands something new —
+/// `lumen-core` has no UI of its own to refresh, so the shell registers this once at startup
+/// (see `set_applied_callback`) to re-run whatever reload its own My List/history/profiles views
+/// need, the same "core computes, shell notifies" split the architecture already uses elsewhere.
+type AppliedCallback = Arc<dyn Fn(i64) + Send + Sync>;
+static APPLIED_CALLBACK: OnceLock<AppliedCallback> = OnceLock::new();
+
+/// Registers the callback `sync_with` invokes with the applied-record count after a sync that
+/// actually applied something. Meant to be called once, at startup; a context with no UI to
+/// refresh (tests, for instance) simply never calls this, and nothing is notified.
+pub fn set_applied_callback(callback: impl Fn(i64) + Send + Sync + 'static) {
+    let _ = APPLIED_CALLBACK.set(Arc::new(callback));
+}
 
 static SYNC_LOCK: Mutex<()> = Mutex::const_new(());
 static SCHEDULED: AtomicBool = AtomicBool::new(false);
@@ -836,15 +851,18 @@ async fn pull_page(remote: &Remote, cursor: &PullCursor) -> Result<PullPage> {
     Ok(response.json::<PullPage>().await?)
 }
 
-/// Pulls and applies every record newer than the saved cursor. Returns how many records failed
-/// verification: they are not applied, and the pull carries on past them.
-async fn pull_remote(pool: &Pool<Sqlite>, remote: &Remote) -> Result<i64> {
+/// Pulls and applies every record newer than the saved cursor. Returns `(skipped, applied)`:
+/// how many records failed verification (not applied; the pull carries on past them), and how
+/// many were actually applied — the latter is what tells a caller whether anything local changed
+/// and a UI showing it needs to refresh.
+async fn pull_remote(pool: &Pool<Sqlite>, remote: &Remote) -> Result<(i64, i64)> {
     let saved: i64 = get_setting(pool, CURSOR_SETTING)
         .await?
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
     let mut newest = saved;
     let mut skipped = 0;
+    let mut applied = 0;
     let mut cursor = PullCursor {
         seq: saved,
         after: None,
@@ -856,7 +874,10 @@ async fn pull_remote(pool: &Pool<Sqlite>, remote: &Remote) -> Result<i64> {
         let mut tx = pool.begin().await.map_err(sql_err)?;
         for sealed in &page.items {
             match remote.keys.open(sealed) {
-                Ok(item) => apply_remote(&mut tx, &item).await?,
+                Ok(item) => {
+                    apply_remote(&mut tx, &item).await?;
+                    applied += 1;
+                }
                 Err(_) => skipped += 1,
             }
         }
@@ -872,7 +893,7 @@ async fn pull_remote(pool: &Pool<Sqlite>, remote: &Remote) -> Result<i64> {
     }
 
     set_setting(pool, CURSOR_SETTING, &newest.to_string()).await?;
-    Ok(skipped)
+    Ok((skipped, applied))
 }
 
 pub async fn status(pool: &Pool<Sqlite>) -> Result<SyncStatus> {
@@ -921,9 +942,14 @@ pub(crate) async fn sync_with(pool: &Pool<Sqlite>, remote: &Remote) -> Result<Sy
     }
 
     push_pending(pool, remote).await?;
-    let skipped = pull_remote(pool, remote).await?;
+    let (skipped, applied) = pull_remote(pool, remote).await?;
     set_setting(pool, SKIPPED_SETTING, &skipped.to_string()).await?;
     set_setting(pool, LAST_SYNC_SETTING, &now_ms().to_string()).await?;
+    if applied > 0
+        && let Some(callback) = APPLIED_CALLBACK.get()
+    {
+        callback(applied);
+    }
     status(pool).await
 }
 
