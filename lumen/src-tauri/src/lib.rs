@@ -75,6 +75,7 @@ pub fn run() {
                         privacy::init(&app_handle).await;
                         apply_webview_proxy(&app_handle);
                         sync::start(pool);
+                        playlist::refresh::start(pool);
                         updater::start(app_handle.clone());
                     }
                 }
@@ -135,6 +136,8 @@ pub fn run() {
             import_playlist_url,
             delete_playlist_cmd,
             refresh_playlist_cmd,
+            get_playlist_auto_refresh_cmd,
+            set_playlist_auto_refresh_cmd,
             list_playlists_cmd,
             list_channels_cmd,
             search_engine,

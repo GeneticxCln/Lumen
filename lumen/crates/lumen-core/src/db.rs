@@ -660,6 +660,35 @@ pub async fn get_playlist(pool: &Pool<Sqlite>, playlist_id: i64) -> Result<Optio
     }))
 }
 
+/// A playlist's own auto-refresh override in hours, or `None` to use the global default.
+pub async fn get_playlist_auto_refresh(
+    pool: &Pool<Sqlite>,
+    playlist_id: i64,
+) -> Result<Option<i64>> {
+    let hours: Option<Option<i64>> =
+        sqlx::query_scalar("SELECT auto_refresh_hours FROM playlists WHERE id = ?")
+            .bind(playlist_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    Ok(hours.flatten())
+}
+
+/// Sets a playlist's own auto-refresh override. `None` clears it back to the global default.
+pub async fn set_playlist_auto_refresh(
+    pool: &Pool<Sqlite>,
+    playlist_id: i64,
+    hours: Option<i64>,
+) -> Result<()> {
+    sqlx::query("UPDATE playlists SET auto_refresh_hours = ? WHERE id = ?")
+        .bind(hours)
+        .bind(playlist_id)
+        .execute(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    Ok(())
+}
+
 pub(crate) async fn insert_channel_rows(
     conn: &mut SqliteConnection,
     playlist_id: i64,

@@ -629,6 +629,29 @@ pub async fn refresh_playlist_cmd(
     Ok(stats)
 }
 
+/// This playlist's own auto-refresh interval in hours, or `None` when it follows the global
+/// default (`playlist_auto_refresh_hours` in `get_settings`/`set_setting_cmd`).
+#[tauri::command]
+pub async fn get_playlist_auto_refresh_cmd(
+    playlist_id: i64,
+    app: AppHandle,
+) -> Result<Option<i64>> {
+    let pool = ensure_db(&app).await?;
+    get_playlist_auto_refresh(pool, playlist_id).await
+}
+
+/// Sets this playlist's own auto-refresh interval in hours; `None` clears it back to the global
+/// default.
+#[tauri::command]
+pub async fn set_playlist_auto_refresh_cmd(
+    playlist_id: i64,
+    hours: Option<i64>,
+    app: AppHandle,
+) -> Result<()> {
+    let pool = ensure_db(&app).await?;
+    set_playlist_auto_refresh(pool, playlist_id, hours).await
+}
+
 #[derive(Serialize)]
 pub struct FallbackSource {
     pub url: String,
@@ -1837,6 +1860,9 @@ pub async fn get_settings(app: AppHandle) -> Result<serde_json::Value> {
         "search_preferred_language": search_language,
         "search_hide_other_languages": hide_other_languages,
         "allow_lan_sources": get_setting(pool, ALLOW_LAN_SETTING).await?.unwrap_or_default(),
+        "playlist_auto_refresh_hours": get_setting(pool, crate::playlist::refresh::DEFAULT_INTERVAL_SETTING)
+            .await?
+            .unwrap_or_else(|| "0".to_string()),
     }))
 }
 
@@ -1852,6 +1878,7 @@ const USER_SETTING_KEYS: &[&str] = &[
     POSTER_FRAME_SETTING,
     SEARCH_LANGUAGE_SETTING,
     SEARCH_HIDE_OTHER_LANGUAGES_SETTING,
+    crate::playlist::refresh::DEFAULT_INTERVAL_SETTING,
 ];
 
 fn is_user_setting(key: &str) -> bool {
