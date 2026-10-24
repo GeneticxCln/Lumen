@@ -43,6 +43,8 @@ export const app = {
   "app.error.connectTitle": "Couldn’t connect to your library",
   "app.error.connectBody": "{error}. Start the Lumen backend or desktop app, then retry.",
   "app.error.retry": "Retry",
+  "app.library.sourcesFailedToLoad.one": "One source couldn't be loaded ({names}). The rest of your library is shown below.",
+  "app.library.sourcesFailedToLoad.other": "{count} sources couldn't be loaded ({names}). The rest of your library is shown below.",
 
   "app.browse.eyebrow": "FROM YOUR OWN SOURCES",
   "app.browse.libraryStat.one": "<strong>{count}</strong> title",
