@@ -41,6 +41,8 @@ Releases are published at <https://github.com/GeneticxCln/Lumen/releases>. Lumen
 
 Build status: the `.deb` and AppImage have been built and inspected, but none of the packages has been installed on a clean machine yet, and no release has been published. See [lumen/AUDIT.md](lumen/AUDIT.md) for exactly what is and is not verified.
 
+See [lumen/FAQ.md](lumen/FAQ.md) for more, in Q&A form, including sync, casting and update questions.
+
 ## Troubleshooting
 
 - **"mpv stopped before it was ready" / "did not open its control socket" / "mpv stopped responding".** The first two happen when mpv cannot start at all; the third when it was running and then exited (a bad stream, a crash) partway through a session. All three now include the last lines mpv printed. Run `LUMEN_DEBUG_MPV=1 lumen` (or `LUMEN_DEBUG_MPV=1 ./lumen_*.AppImage`) to see everything mpv says. Check that `mpv` runs on its own (`mpv --version`). Programs Lumen starts do not inherit the AppImage's own library paths.
@@ -166,6 +168,8 @@ All interface text lives in a message catalog (`src/i18n/messages/`, one file pe
 
 ## Development
 
+See [lumen/ARCHITECTURE.md](lumen/ARCHITECTURE.md) for the shell/core split, how playback and sync work, and where the network boundaries are.
+
 Needs Node 24+, Rust (stable), the platform's Tauri/WebKitGTK build dependencies, `mpv`, and `yt-dlp` for extraction (or use *Update extractor* in Settings). On Debian/Ubuntu the libraries are `libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev`.
 
 ```bash
@@ -209,7 +213,7 @@ See [lumen/AUDIT.md](lumen/AUDIT.md) for verified behavior, security boundaries 
 
 ## Contributing
 
-Issues and pull requests are welcome. Run the checks above before opening a pull request; CI runs the same ones. New interface text goes in the message catalog (a test fails on hard-coded text). Describe in the pull request what you verified and what you could not.
+Issues and pull requests are welcome. See [lumen/CONTRIBUTING.md](lumen/CONTRIBUTING.md) for the full guide — one logical unit per pull request, the checks per area, running the E2E suite locally, and what to verify and say so in the PR description.
 
 ## License
 

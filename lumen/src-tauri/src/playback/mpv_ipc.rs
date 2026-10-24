@@ -658,7 +658,7 @@ impl MpvIpcBackend {
             connection_alive,
         };
 
-        // Observe standard mpv properties per PLAN.md §3.1
+        // Observe the mpv properties the player UI needs pushed as they change.
         for (obs_id, prop) in [
             (1_i64, "pause"),
             (2_i64, "time-pos"),
