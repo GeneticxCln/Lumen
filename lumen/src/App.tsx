@@ -90,7 +90,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement | null>(null);
-  const library = useChannels(refresh);
+  const library = useChannels(refresh, { onNotice: (message) => setNotice(message) });
   const [browseTitles, setBrowseTitles] = useState<BrowseTitle[]>([]);
   const player = usePlayer({ onNotice: (message) => setNotice(message) });
   const details = library.allChannels.find((channel) => channel.id === detailId) || null;
