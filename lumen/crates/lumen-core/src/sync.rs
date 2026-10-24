@@ -287,6 +287,32 @@ pub async fn queue_progress(
     enqueue(conn, &item).await
 }
 
+/// Queues a tombstone for a resume point — the counterpart to `queue_favorite`'s own
+/// `active = false` path, which `queue_progress` has no equivalent for. Needed so `rekey_content`
+/// can retire a watch position's old content_key on every other device when a title's TMDB match
+/// improves and its key changes, instead of leaving the old key's record to linger forever.
+pub async fn queue_progress_deleted(
+    conn: &mut SqliteConnection,
+    profile_id: i64,
+    content_key: &str,
+    now: i64,
+) -> Result<()> {
+    let Some(profile_key) = profile_sync_key(conn, profile_id).await? else {
+        return Ok(());
+    };
+    let item = SyncItem {
+        kind: KIND_PROGRESS.into(),
+        key: format!("{profile_key}:{}", hashed(content_key)),
+        payload: json!({
+            "profile": profile_key,
+            "content_key": content_key,
+        }),
+        updated_at: now,
+        deleted: true,
+    };
+    enqueue(conn, &item).await
+}
+
 /// Queues a hand-set watched mark for one episode. `watched = false` is a real answer ("I have not
 /// seen this"), so these are never tombstones.
 pub async fn queue_episode(
@@ -468,10 +494,27 @@ async fn apply_progress(conn: &mut SqliteConnection, item: &SyncItem) -> Result<
     let Some(profile_key) = item.payload.get("profile").and_then(Value::as_str) else {
         return Ok(());
     };
+    let content_key = item.payload.get("content_key").and_then(Value::as_str);
+
+    if item.deleted {
+        let Some(content_key) = content_key else {
+            return Ok(());
+        };
+        let Some(profile_id) = profile_id_for_key(conn, profile_key).await? else {
+            return Ok(());
+        };
+        sqlx::query("DELETE FROM history WHERE profile_id = ? AND content_key = ?")
+            .bind(profile_id)
+            .bind(content_key)
+            .execute(&mut *conn)
+            .await
+            .map_err(sql_err)?;
+        return Ok(());
+    }
+
     let Some(url) = item.payload.get("url").and_then(Value::as_str) else {
         return Ok(());
     };
-    let content_key = item.payload.get("content_key").and_then(Value::as_str);
     let position = item.payload.get("position").and_then(Value::as_f64);
     let duration = item.payload.get("duration").and_then(Value::as_f64);
     let played_at = item.payload.get("played_at").and_then(Value::as_i64);
@@ -488,18 +531,33 @@ async fn apply_progress(conn: &mut SqliteConnection, item: &SyncItem) -> Result<
     if position <= 0.0 {
         return Ok(());
     }
+    // Matched by content_key alone when the item carries one: it is the stable identity, and a
+    // rekey can briefly leave two different content_keys pointing at the same URL (the old one,
+    // not yet deleted, and the new one just pushed) — matching by path too would wrongly compare
+    // the incoming record's played_at against the *other* key's row, possibly skipping this
+    // apply entirely. Only an item with no content_key at all falls back to matching by path.
+    let local = match content_key {
+        Some(key) => sqlx::query(
+            "SELECT played_at, position FROM history WHERE profile_id = ? AND content_key = ? \
+             ORDER BY played_at DESC LIMIT 1",
+        )
+        .bind(profile_id)
+        .bind(key)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(sql_err)?,
+        None => sqlx::query(
+            "SELECT played_at, position FROM history WHERE profile_id = ? AND path = ? \
+             ORDER BY played_at DESC LIMIT 1",
+        )
+        .bind(profile_id)
+        .bind(url)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(sql_err)?,
+    };
     // A local row with no position is a placeholder from opening the stream, so it yields to a
     // remote resume point. Otherwise the newer play time wins.
-    let local = sqlx::query(
-        "SELECT played_at, position FROM history WHERE profile_id = ? AND (path = ? OR (content_key IS NOT NULL AND content_key = ?))
-         ORDER BY played_at DESC LIMIT 1",
-    )
-    .bind(profile_id)
-    .bind(url)
-    .bind(content_key)
-    .fetch_optional(&mut *conn)
-    .await
-    .map_err(sql_err)?;
     if let Some(local) = local {
         let local_played_at: i64 = local.get("played_at");
         let local_position: f64 = local.get("position");

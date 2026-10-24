@@ -317,6 +317,74 @@ pub(crate) async fn upsert_title_and_source(
     Ok(())
 }
 
+/// Migrates every favorite/history row under `old_key` to `new_key`, and for each one tombstones
+/// its sync record under the old key and queues a fresh one under the new key. A title's content
+/// key can change after it is first imported — a later TMDB match resolves `tmdb:...` in place of
+/// a weaker `tvg:`/`stream:` fallback, or a provider rotates a channel's `tvg_id` — and a plain
+/// local `UPDATE` alone would silently orphan the old key on every *other* device, which still
+/// has it. Deliberately does not touch `category_overrides`: migration 011's own comment already
+/// documents that a real TMDB match makes any leftover override row simply ignored by readers.
+/// No-ops when the keys are already equal.
+pub(crate) async fn rekey_content(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    old_key: &str,
+    new_key: &str,
+    now: i64,
+) -> Result<()> {
+    if old_key == new_key {
+        return Ok(());
+    }
+
+    let favorites: Vec<(i64, String, i64)> = sqlx::query_as(
+        "SELECT profile_id, channel_url, active FROM favorites WHERE content_key = ?",
+    )
+    .bind(old_key)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    let history_rows: Vec<(i64, String, f64, f64, i64)> = sqlx::query_as(
+        "SELECT profile_id, path, position, duration, played_at FROM history WHERE content_key = ?",
+    )
+    .bind(old_key)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    if favorites.is_empty() && history_rows.is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query("UPDATE favorites SET content_key = ? WHERE content_key = ?")
+        .bind(new_key)
+        .bind(old_key)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    sqlx::query("UPDATE history SET content_key = ? WHERE content_key = ?")
+        .bind(new_key)
+        .bind(old_key)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    for (profile_id, url, active) in favorites {
+        sync::queue_favorite(tx, profile_id, old_key, &url, false, now).await?;
+        sync::queue_favorite(tx, profile_id, new_key, &url, active != 0, now).await?;
+    }
+
+    for (profile_id, path, position, duration, played_at) in history_rows {
+        sync::queue_progress_deleted(tx, profile_id, old_key, now).await?;
+        sync::queue_progress(
+            tx, profile_id, new_key, &path, position, duration, played_at,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
 /// Settings key recording that titles and title_sources were backfilled.
 const TITLES_BACKFILL_SETTING: &str = "titles_backfill_v1";
 
@@ -3216,5 +3284,175 @@ mod tests {
             "the tombstone must reuse the favorite's original sync item_key"
         );
         assert_eq!(queued_after[0].1, 1, "queued as removed");
+    }
+
+    /// Reproduces the stale-`content_key` bug: a title favorited and watched under a weak
+    /// fallback key (no TMDB match yet) must have both rows carried forward when a stronger key
+    /// becomes available, and the sync queue must hold a tombstone for the old key alongside a
+    /// fresh push for the new one — not just a silent local rewrite, which would orphan the old
+    /// key's record on every other device still holding it.
+    #[tokio::test]
+    async fn rekeying_content_migrates_favorites_and_history_and_queues_both_sync_records() {
+        let pool = test_pool().await;
+        let url = "https://cdn.example/rekey-test.m3u8";
+        let playlist_id =
+            insert_test_playlist(&pool, &[test_channel("Movie Night", url, None)]).await;
+        let channel_id = list_channels(&pool, playlist_id, None, None).await.unwrap()[0]
+            .channel
+            .id
+            .unwrap();
+
+        // A profile with a sync key behaves as if sync is enabled (see the tombstone test above).
+        sqlx::query("UPDATE profiles SET sync_key = 'test-sync-key' WHERE id = ?")
+            .bind(DEFAULT_PROFILE_ID)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(
+            toggle_favorite(&pool, DEFAULT_PROFILE_ID, channel_id)
+                .await
+                .unwrap()
+        );
+        add_history(
+            &pool,
+            DEFAULT_PROFILE_ID,
+            Some(channel_id),
+            url,
+            30.0,
+            120.0,
+        )
+        .await
+        .unwrap();
+
+        let old_key: String = sqlx::query_scalar(
+            "SELECT content_key FROM favorites WHERE profile_id = ? AND channel_url = ?",
+        )
+        .bind(DEFAULT_PROFILE_ID)
+        .bind(url)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            old_key.starts_with("stream:"),
+            "no tvg_id and no TMDB match yet, so this starts on the weakest fallback key: {old_key}"
+        );
+
+        let new_key = "tmdb:movie:550";
+        let now = Utc::now().timestamp_millis();
+        let mut tx = pool.begin().await.unwrap();
+        rekey_content(&mut tx, &old_key, new_key, now)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let favorite_key: String = sqlx::query_scalar(
+            "SELECT content_key FROM favorites WHERE profile_id = ? AND channel_url = ?",
+        )
+        .bind(DEFAULT_PROFILE_ID)
+        .bind(url)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            favorite_key, new_key,
+            "the favorite must follow to the new key"
+        );
+
+        let history_key: String =
+            sqlx::query_scalar("SELECT content_key FROM history WHERE profile_id = ? AND path = ?")
+                .bind(DEFAULT_PROFILE_ID)
+                .bind(url)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            history_key, new_key,
+            "the history row must follow to the new key too"
+        );
+
+        let favorite_sync: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT item_key, deleted FROM sync_queue WHERE kind = 'favorite' ORDER BY deleted",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            favorite_sync.len(),
+            2,
+            "the original record tombstoned, plus a fresh push under the new key"
+        );
+        assert_eq!(favorite_sync[0].1, 0, "the fresh push is queued as active");
+        assert_eq!(
+            favorite_sync[1].1, 1,
+            "the original record is tombstoned, not deleted"
+        );
+        assert_ne!(
+            favorite_sync[0].0, favorite_sync[1].0,
+            "the two records key off different content_keys, so they must not collide"
+        );
+
+        let progress_sync: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT item_key, deleted FROM sync_queue WHERE kind = 'progress' ORDER BY deleted",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            progress_sync.len(),
+            2,
+            "same as favorites: a tombstone under the old key, a fresh push under the new one"
+        );
+        assert_eq!(progress_sync[0].1, 0);
+        assert_eq!(progress_sync[1].1, 1);
+
+        // category_overrides is deliberately untouched by a rekey (see migration 011's own
+        // comment: a real TMDB match makes any leftover override row simply ignored by readers).
+        let override_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM category_overrides")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(override_count, 0);
+    }
+
+    #[tokio::test]
+    async fn rekeying_content_to_the_same_key_is_a_no_op() {
+        let pool = test_pool().await;
+        let url = "https://cdn.example/no-op-rekey.m3u8";
+        let playlist_id =
+            insert_test_playlist(&pool, &[test_channel("Unmatched Channel", url, None)]).await;
+        let channel_id = list_channels(&pool, playlist_id, None, None).await.unwrap()[0]
+            .channel
+            .id
+            .unwrap();
+        sqlx::query("UPDATE profiles SET sync_key = 'test-sync-key' WHERE id = ?")
+            .bind(DEFAULT_PROFILE_ID)
+            .execute(&pool)
+            .await
+            .unwrap();
+        toggle_favorite(&pool, DEFAULT_PROFILE_ID, channel_id)
+            .await
+            .unwrap();
+
+        let queued_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_queue")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        let same_key = "stream:does-not-matter";
+        let mut tx = pool.begin().await.unwrap();
+        rekey_content(&mut tx, same_key, same_key, Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let queued_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_queue")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            queued_before, queued_after,
+            "no new sync record from a no-op rekey"
+        );
     }
 }

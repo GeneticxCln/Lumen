@@ -8,7 +8,8 @@
 //!
 //! TMDB requires attribution: <https://www.themoviedb.org/>
 
-use crate::db::{delete_setting, get_setting};
+use crate::content_key::ContentKey;
+use crate::db::{delete_setting, get_setting, rekey_content, upsert_title_and_source};
 use crate::error::{PlayerError, Result};
 use crate::secrets;
 use chrono::Utc;
@@ -425,8 +426,8 @@ pub async fn enrich(pool: &Pool<Sqlite>, limit: i64, force: bool) -> Result<Enri
 
     let http = http_client()?;
 
-    let candidates: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT id, name FROM channels WHERE (enriched_at IS NULL OR ?) ORDER BY id LIMIT ?",
+    let candidates: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, name, url, tvg_id FROM channels WHERE (enriched_at IS NULL OR ?) ORDER BY id LIMIT ?",
     )
     .bind(if force { 1_i64 } else { 0_i64 })
     .bind(limit.max(0))
@@ -440,7 +441,7 @@ pub async fn enrich(pool: &Pool<Sqlite>, limit: i64, force: bool) -> Result<Enri
     let mut skipped = 0_i64;
     let mut failures = 0_i64;
 
-    for (index, (channel_id, name)) in candidates.iter().enumerate() {
+    for (index, (channel_id, name, url, tvg_id)) in candidates.iter().enumerate() {
         if index > 0 {
             tokio::time::sleep(Duration::from_millis(REQUEST_GAP_MS)).await;
         }
@@ -463,23 +464,72 @@ pub async fn enrich(pool: &Pool<Sqlite>, limit: i64, force: bool) -> Result<Enri
             }
             Ok(None) => skipped += 1,
             Ok(Some(found)) => {
+                // Computed before the match changes anything: this is the key a favorite/history
+                // row reaching this channel is still filed under (no tmdb_id yet, by construction
+                // — `channels` only ever gets one once a match lands).
+                let old_key =
+                    ContentKey::derive(None, None, name, tvg_id.as_deref(), url).into_string();
+                let now_ms = Utc::now().timestamp_millis();
+
+                let mut tx = pool
+                    .begin()
+                    .await
+                    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
                 sqlx::query(
                     "UPDATE channels SET tmdb_id = ?, tmdb_type = ?, poster_path = ?, backdrop_path = ?, \
                      overview = ?, release_year = ?, rating = ?, genre_names = ?, enriched_at = ? WHERE id = ?",
                 )
                 .bind(found.tmdb_id)
                 .bind(found.tmdb_type)
-                .bind(found.poster_path)
-                .bind(found.backdrop_path)
-                .bind(found.overview)
+                .bind(found.poster_path.as_deref())
+                .bind(found.backdrop_path.as_deref())
+                .bind(found.overview.as_deref())
                 .bind(found.release_year)
                 .bind(found.rating)
-                .bind(found.genre_names)
+                .bind(found.genre_names.as_deref())
                 .bind(now)
                 .bind(channel_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+                // Writes `titles`/`title_sources` for the match and backfills content_key on any
+                // favorite/history row that didn't have one yet. A row that already held a
+                // weaker key (tvg:/stream:) is not touched by this — that's what rekey_content
+                // below is for.
+                upsert_title_and_source(
+                    &mut tx,
+                    *channel_id,
+                    name,
+                    url,
+                    tvg_id.as_deref(),
+                    Some(found.tmdb_id),
+                    Some(found.tmdb_type),
+                    found.poster_path.as_deref(),
+                    found.backdrop_path.as_deref(),
+                    found.overview.as_deref(),
+                    found.release_year,
+                    found.genre_names.as_deref(),
+                    None,
+                    None,
+                    now_ms,
+                )
+                .await?;
+
+                let new_key = ContentKey::derive(
+                    Some(found.tmdb_id),
+                    Some(found.tmdb_type),
+                    name,
+                    tvg_id.as_deref(),
+                    url,
+                )
+                .into_string();
+                rekey_content(&mut tx, &old_key, &new_key, now_ms).await?;
+
+                tx.commit()
+                    .await
+                    .map_err(|e| PlayerError::Sql(e.to_string()))?;
                 matched += 1;
             }
         }
