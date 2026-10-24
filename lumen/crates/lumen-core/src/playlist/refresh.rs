@@ -4,6 +4,7 @@
 //! history row that reaches it through `title_sources`/`content_key` survives a routine refresh
 //! untouched — a channel no longer listed is removed (tombstoning any favorite that depended
 //! only on it), and a channel new to the fresh list is inserted.
+use crate::content_key::ContentKey;
 use crate::db;
 use crate::error::{PlayerError, Result};
 use crate::playlist::import::{Channel, fetch_playlist_text, parse_into_channels};
@@ -14,6 +15,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
+
+/// An existing channel's own name/tvg_id/tmdb_id/tmdb_type, as they stood before a refresh
+/// touches them — enough to recompute the content_key it carried a moment ago.
+type ExistingChannelMeta = (String, Option<String>, Option<i64>, Option<String>);
 
 /// How many channels a refresh added, updated in place, or removed.
 #[derive(Debug, Default, Serialize, PartialEq, Eq)]
@@ -46,19 +51,33 @@ pub async fn refresh_playlist(
     let content = fetch_playlist_text(&origin, allow_lan).await?;
     let fresh = parse_into_channels(&content, Some(&origin), &origin, &playlist.name)?;
 
-    let existing_rows = sqlx::query("SELECT id, url FROM channels WHERE playlist_id = ?")
-        .bind(playlist_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let existing_rows = sqlx::query(
+        "SELECT id, url, name, tvg_id, tmdb_id, tmdb_type FROM channels WHERE playlist_id = ?",
+    )
+    .bind(playlist_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
     // First match wins on a duplicate URL within the existing set — rare, and no worse than
     // what importing that same playlist fresh would have produced.
     let mut existing_by_url: HashMap<String, i64> = HashMap::new();
+    // Each existing row's own name/tvg_id/tmdb_id/tmdb_type, as they were before this refresh
+    // touches them — needed to compute a matched channel's content_key as it stood a moment
+    // ago, since providers occasionally rotate a channel's tvg_id between fetches.
+    let mut existing_meta: HashMap<i64, ExistingChannelMeta> = HashMap::new();
     for row in &existing_rows {
-        existing_by_url
-            .entry(row.get("url"))
-            .or_insert_with(|| row.get("id"));
+        let id: i64 = row.get("id");
+        existing_by_url.entry(row.get("url")).or_insert_with(|| id);
+        existing_meta.insert(
+            id,
+            (
+                row.get("name"),
+                row.get("tvg_id"),
+                row.get("tmdb_id"),
+                row.get("tmdb_type"),
+            ),
+        );
     }
 
     let mut matched_ids: HashSet<i64> = HashSet::new();
@@ -105,6 +124,29 @@ pub async fn refresh_playlist(
         .execute(&mut *tx)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+        // TMDB identity (if any) is untouched by a refresh, but a provider rotating this
+        // channel's tvg_id changes what ContentKey::derive computes when there is no TMDB
+        // match yet — re-key any favorite/history row riding the old value forward.
+        if let Some((old_name, old_tvg_id, tmdb_id, tmdb_type)) = existing_meta.get(id) {
+            let old_key = ContentKey::derive(
+                *tmdb_id,
+                tmdb_type.as_deref(),
+                old_name,
+                old_tvg_id.as_deref(),
+                &channel.url,
+            )
+            .into_string();
+            let new_key = ContentKey::derive(
+                *tmdb_id,
+                tmdb_type.as_deref(),
+                &channel.name,
+                channel.tvg_id.as_deref(),
+                &channel.url,
+            )
+            .into_string();
+            db::rekey_content(&mut tx, &old_key, &new_key, now).await?;
+        }
     }
 
     db::insert_channel_rows(&mut tx, playlist_id, &inserts).await?;
@@ -502,6 +544,101 @@ mod tests {
             deleted, 1,
             "the favorite's sync record is a tombstone, not a fresh push"
         );
+    }
+
+    #[tokio::test]
+    async fn a_rotated_tvg_id_rekeys_the_favorite_instead_of_orphaning_it() {
+        let channel_url = "http://example.test/rotated.m3u8";
+        let (port, _hits) = serve(playlist_response(&format!(
+            "#EXTM3U\n#EXTINF:-1 tvg-id=\"new.id\",Rotated\n{channel_url}\n"
+        )))
+        .await;
+        let list_url = format!("http://127.0.0.1:{port}/list.m3u");
+
+        let pool = test_pool().await;
+        let playlist = crate::playlist::m3u::Playlist {
+            id: None,
+            name: "Source".into(),
+            source: "url".into(),
+            origin: Some(list_url.clone()),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let channels = vec![Channel {
+            id: None,
+            playlist_id: 0,
+            name: "Rotated".into(),
+            url: channel_url.into(),
+            group_title: None,
+            tvg_id: Some("old.id".into()),
+            tvg_logo: None,
+            language: None,
+            extra_headers: None,
+            last_ok: None,
+            last_error: None,
+            is_live: None,
+        }];
+        let playlist_id = db::import_playlist(&pool, &playlist, &channels)
+            .await
+            .unwrap();
+
+        db::create_profile(&pool, "Default", None).await.unwrap();
+        let profile_id: i64 = sqlx::query_scalar("SELECT id FROM profiles LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let before = channel_rows(&pool, playlist_id).await;
+        db::toggle_favorite(&pool, profile_id, before[0].0)
+            .await
+            .unwrap();
+
+        let old_key: String = sqlx::query_scalar(
+            "SELECT content_key FROM favorites WHERE profile_id = ? AND channel_url = ?",
+        )
+        .bind(profile_id)
+        .bind(channel_url)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(old_key, "tvg:old.id");
+
+        let stats = refresh_playlist(&pool, playlist_id, true).await.unwrap();
+        assert_eq!(
+            stats,
+            RefreshStats {
+                added: 0,
+                updated: 1,
+                removed: 0
+            },
+            "the channel is matched by URL and updated in place, not treated as a swap"
+        );
+
+        let new_key: String = sqlx::query_scalar(
+            "SELECT content_key FROM favorites WHERE profile_id = ? AND channel_url = ?",
+        )
+        .bind(profile_id)
+        .bind(channel_url)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            new_key, "tvg:new.id",
+            "the favorite must follow the provider's rotated tvg_id"
+        );
+
+        let synced: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT item_key, deleted FROM sync_queue WHERE kind = 'favorite' ORDER BY deleted",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            synced.len(),
+            2,
+            "a tombstone for tvg:old.id and a fresh push for tvg:new.id, not a silent local-only rewrite"
+        );
+        assert_eq!(synced[0].1, 0, "the fresh push is queued as active");
+        assert_eq!(synced[1].1, 1, "the old key's record is tombstoned");
     }
 
     // --- is_refresh_due ---------------------------------------------------------------------

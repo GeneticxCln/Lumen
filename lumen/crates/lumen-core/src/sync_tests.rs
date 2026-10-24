@@ -11,7 +11,7 @@ use sqlx::{Pool, Sqlite};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::db::{migrate_tmdb_columns, set_setting};
+use crate::db::{migrate_tmdb_columns, rekey_content, set_setting};
 use crate::sync::{Remote, queue_favorite, set_applied_callback, sync_with};
 use crate::sync_crypto::{SealedItem, SyncKeys, generate_root, pow_valid};
 use crate::sync_keys::{self, MemoryStore};
@@ -398,6 +398,72 @@ async fn two_devices_with_one_key_exchange_everything_and_the_server_sees_none_o
         "the removal is applied"
     );
     assert_eq!(favorites[1].1, 1);
+}
+
+/// The counterpart of the favorite-removal case above, for a history row: `rekey_content`
+/// tombstones the old key and pushes a fresh one, and both halves must actually reach the other
+/// device — a plain local rewrite with no tombstone would leave the old key's row to linger there
+/// forever once this device's own title match improves.
+#[tokio::test]
+async fn rekeying_a_history_row_deletes_the_old_key_elsewhere_and_applies_the_new_one() {
+    let (origin, _mock) = start_mock().await;
+    let root = generate_root().unwrap();
+    remote(&origin, &root).register(POW_BITS).await.unwrap();
+
+    let a = device().await;
+    sqlx::query(
+        "INSERT INTO history (profile_id, path, content_key, position, duration, played_at) \
+         VALUES (1, ?, 'stream:old-key', 42.0, 3600.0, 4000)",
+    )
+    .bind("https://cdn.example/rekey-sync-test.m3u8")
+    .execute(&a)
+    .await
+    .unwrap();
+    sync_with(&a, &remote(&origin, &root)).await.unwrap();
+
+    let b = device().await;
+    sync_with(&b, &remote(&origin, &root)).await.unwrap();
+    let before: f64 =
+        sqlx::query_scalar("SELECT position FROM history WHERE content_key = 'stream:old-key'")
+            .fetch_one(&b)
+            .await
+            .unwrap();
+    assert_eq!(before, 42.0, "device B has the row under the old key first");
+
+    // Device A's title gets a stronger match, exactly as tmdb::enrich's own match branch does.
+    let mut tx = a.begin().await.unwrap();
+    rekey_content(
+        &mut tx,
+        "stream:old-key",
+        "tmdb:movie:777",
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    sync_with(&a, &remote(&origin, &root)).await.unwrap();
+    sync_with(&b, &remote(&origin, &root)).await.unwrap();
+
+    let old_remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM history WHERE content_key = 'stream:old-key'")
+            .fetch_one(&b)
+            .await
+            .unwrap();
+    assert_eq!(
+        old_remaining, 0,
+        "the old key's row must be deleted on the other device, not left to linger"
+    );
+
+    let new_position: f64 =
+        sqlx::query_scalar("SELECT position FROM history WHERE content_key = 'tmdb:movie:777'")
+            .fetch_one(&b)
+            .await
+            .unwrap();
+    assert_eq!(
+        new_position, 42.0,
+        "the resume position carries to the new key"
+    );
 }
 
 #[tokio::test]
