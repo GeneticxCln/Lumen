@@ -155,6 +155,7 @@ async function createGroup(request: Request, env: Env): Promise<Response> {
   const cutoff = now - GROUP_IDLE_EXPIRY_MS
   await env.DB.batch([
     env.DB.prepare('DELETE FROM sync_blobs WHERE sync_id IN (SELECT sync_id FROM sync_groups WHERE last_seen_at < ?)').bind(cutoff),
+    env.DB.prepare('DELETE FROM sync_seq WHERE sync_id IN (SELECT sync_id FROM sync_groups WHERE last_seen_at < ?)').bind(cutoff),
     env.DB.prepare('DELETE FROM sync_groups WHERE last_seen_at < ?').bind(cutoff),
     env.DB.prepare('DELETE FROM group_creations WHERE day < ?').bind(day - 2),
     env.DB.prepare('INSERT INTO sync_groups (sync_id, verifier, created_at, last_seen_at) VALUES (?, ?, ?, ?)').bind(
@@ -163,6 +164,7 @@ async function createGroup(request: Request, env: Env): Promise<Response> {
       now,
       now,
     ),
+    env.DB.prepare('INSERT INTO sync_seq (sync_id, value) VALUES (?, 0) ON CONFLICT (sync_id) DO NOTHING').bind(syncId),
   ])
   return json({ created: true }, 201)
 }
@@ -172,6 +174,7 @@ async function deleteGroup(request: Request, env: Env): Promise<Response> {
   if (auth instanceof Response) return auth
   await env.DB.batch([
     env.DB.prepare('DELETE FROM sync_blobs WHERE sync_id = ?').bind(auth.syncId),
+    env.DB.prepare('DELETE FROM sync_seq WHERE sync_id = ?').bind(auth.syncId),
     env.DB.prepare('DELETE FROM sync_groups WHERE sync_id = ?').bind(auth.syncId),
   ])
   return json({ ok: true })
@@ -251,17 +254,33 @@ async function pushItems(request: Request, env: Env): Promise<Response> {
   const newRows = items.length - (await countAlreadyHeld(env, auth.syncId, items.map((item) => item.id)))
   if ((held?.n ?? 0) + newRows > intVar(env.MAX_ITEMS, 20_000)) return json({ error: 'quota_exceeded' }, 413)
 
-  // Last write wins: a stale push never replaces a newer record.
+  // A server-assigned, monotonically increasing sequence, independent of the client-supplied
+  // `updated_at`: the pull cursor pages by this instead, so a device that re-uploads its own
+  // older-timestamped data (joining a group late, or an edit made long offline) is still seen as
+  // new by every other device's cursor, which can only ever be behind it, never past it.
+  // `createGroup` seeds this row for new groups; the seed here is just a safety net for groups
+  // created before this column existed.
+  await env.DB.prepare('INSERT INTO sync_seq (sync_id, value) VALUES (?, 0) ON CONFLICT (sync_id) DO NOTHING')
+    .bind(auth.syncId)
+    .run()
+  const seqRow = await env.DB.prepare('UPDATE sync_seq SET value = value + 1 WHERE sync_id = ? RETURNING value')
+    .bind(auth.syncId)
+    .first<{ value: number }>()
+  const seq = seqRow?.value ?? Date.now()
+
+  // Last write wins: a stale push never replaces a newer record. `seq` advances on every push that
+  // lands a write, whether that write is a brand-new item or a genuinely newer update to one.
   await env.DB.batch(
     items.map((item) =>
       env.DB.prepare(
-        `INSERT INTO sync_blobs (sync_id, item_id, updated_at, deleted, blob) VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO sync_blobs (sync_id, item_id, updated_at, deleted, blob, seq) VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT (sync_id, item_id) DO UPDATE SET
            updated_at = excluded.updated_at,
            deleted = excluded.deleted,
-           blob = excluded.blob
+           blob = excluded.blob,
+           seq = excluded.seq
          WHERE excluded.updated_at > sync_blobs.updated_at`,
-      ).bind(auth.syncId, item.id, item.updated_at, item.deleted ? 1 : 0, item.blob),
+      ).bind(auth.syncId, item.id, item.updated_at, item.deleted ? 1 : 0, item.blob, seq),
     ),
   )
   return json({ ok: true, received: items.length })
@@ -271,10 +290,44 @@ async function pullItems(request: Request, env: Env): Promise<Response> {
   const auth = await authenticate(request, env)
   if (auth instanceof Response) return auth
   const params = new URL(request.url).searchParams
-  const since = Number(params.get('since') ?? '0')
-  if (!Number.isSafeInteger(since) || since < 0) return json({ error: 'invalid_request' }, 400)
   const afterId = params.get('after_id')
   if (afterId !== null && !ITEM_ID_RE.test(afterId)) return json({ error: 'invalid_request' }, 400)
+
+  // `since_seq`, present (even as "0"): a client that knows about the server-assigned sequence.
+  // Paging by `seq` instead of `updated_at` is what fixes pre-existing-data loss (see pushItems)
+  // - a record pushed with an old `updated_at` still has a `seq` newer than any cursor already
+  // past that timestamp. Absent: an old client, unaware of `since_seq`, kept on its original
+  // `updated_at`-based paging exactly as before - bug included - until it updates.
+  if (params.has('since_seq')) {
+    const sinceSeq = Number(params.get('since_seq'))
+    if (!Number.isSafeInteger(sinceSeq) || sinceSeq < 0) return json({ error: 'invalid_request' }, 400)
+    const statement =
+      afterId !== null
+        ? env.DB.prepare(
+            `SELECT item_id, updated_at, deleted, blob, seq FROM sync_blobs
+             WHERE sync_id = ? AND (seq > ? OR (seq = ? AND item_id > ?))
+             ORDER BY seq, item_id LIMIT ?`,
+          ).bind(auth.syncId, sinceSeq, sinceSeq, afterId, MAX_PULL + 1)
+        : env.DB.prepare(
+            `SELECT item_id, updated_at, deleted, blob, seq FROM sync_blobs
+             WHERE sync_id = ? AND seq > ? ORDER BY seq, item_id LIMIT ?`,
+          ).bind(auth.syncId, sinceSeq, MAX_PULL + 1)
+    const rows =
+      (await statement.all<{ item_id: string; updated_at: number; deleted: number; blob: string; seq: number }>()).results ?? []
+    return json({
+      items: rows.slice(0, MAX_PULL).map((row) => ({
+        id: row.item_id,
+        updated_at: row.updated_at,
+        deleted: row.deleted === 1,
+        blob: row.blob,
+        seq: row.seq,
+      })),
+      has_more: rows.length > MAX_PULL,
+    })
+  }
+
+  const since = Number(params.get('since') ?? '0')
+  if (!Number.isSafeInteger(since) || since < 0) return json({ error: 'invalid_request' }, 400)
 
   // Pages run in (updated_at, item_id) order. A page can end in the middle of records that share
   // a timestamp, so the next request names the last record it received and resumes after it.
@@ -316,6 +369,7 @@ const SCHEMA = [
     blob TEXT NOT NULL,
     PRIMARY KEY (sync_id, item_id)
   )`,
+  // Kept for legacy clients, which still pull in (updated_at, item_id) order - see pullItems.
   `CREATE INDEX IF NOT EXISTS sync_blobs_pull ON sync_blobs (sync_id, updated_at, item_id)`,
   `CREATE TABLE IF NOT EXISTS group_creations (
     day INTEGER NOT NULL,
@@ -323,9 +377,33 @@ const SCHEMA = [
     n INTEGER NOT NULL,
     PRIMARY KEY (day, ip_hash)
   )`,
+  // One row per group: a server-assigned write counter pushItems bumps on every push, which
+  // pullItems pages by for clients that send `since_seq` - see pushItems for why this exists.
+  `CREATE TABLE IF NOT EXISTS sync_seq (
+    sync_id TEXT PRIMARY KEY,
+    value INTEGER NOT NULL DEFAULT 0
+  )`,
 ]
 
-// Applied once per isolate; every statement is idempotent.
+/**
+ * Runs once per isolate. Every `SCHEMA` statement is idempotently safe to repeat, but
+ * `sync_blobs.seq` was added after those tables existed in production, so it needs its own
+ * guarded `ALTER TABLE` plus a one-time backfill: rows written before this column existed get
+ * `seq = 0` from the column default, which a from-scratch client pull (`since_seq=0`, i.e.
+ * `seq > 0`) would otherwise skip entirely. Backfilling them to 1 - the same value the first
+ * real push after migration also produces - puts them on equal, visible footing; ties are broken
+ * by `item_id` same as any other pull page.
+ */
+async function ensureSchema(env: Env): Promise<void> {
+  await env.DB.batch(SCHEMA.map((sql) => env.DB.prepare(sql)))
+  const columns = (await env.DB.prepare(`SELECT name FROM pragma_table_info('sync_blobs')`).all<{ name: string }>()).results ?? []
+  if (!columns.some((column) => column.name === 'seq')) {
+    await env.DB.prepare('ALTER TABLE sync_blobs ADD COLUMN seq INTEGER NOT NULL DEFAULT 0').run()
+    await env.DB.prepare('UPDATE sync_blobs SET seq = 1 WHERE seq = 0').run()
+  }
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS sync_blobs_pull_seq ON sync_blobs (sync_id, seq, item_id)').run()
+}
+
 let schemaReady: Promise<unknown> | undefined
 
 async function route(request: Request, env: Env): Promise<Response> {
@@ -351,7 +429,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
-      schemaReady ??= env.DB.batch(SCHEMA.map((sql) => env.DB.prepare(sql)))
+      schemaReady ??= ensureSchema(env)
       await schemaReady
     } catch (error) {
       schemaReady = undefined // retry on the next request instead of caching the failure

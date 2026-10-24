@@ -66,6 +66,8 @@ const register = (g, nonce = solve(g.syncId)) =>
 const push = (g, items) => call('POST', '/v1/items', { headers: g.headers, body: { items } })
 const pull = (g, since = 0, afterId) =>
   call('GET', '/v1/items', { headers: g.headers, query: `?since=${since}${afterId ? `&after_id=${afterId}` : ''}` })
+const pullSeq = (g, sinceSeq = 0, afterId) =>
+  call('GET', '/v1/items', { headers: g.headers, query: `?since_seq=${sinceSeq}${afterId ? `&after_id=${afterId}` : ''}` })
 const itemId = (n) => n.toString(16).padStart(32, '0')
 const blob = () => b64url(randomBytes(48))
 const rec = (n, updated_at, deleted = false) => ({ id: itemId(n), updated_at, deleted, blob: blob() })
@@ -140,6 +142,39 @@ check('items come back in (updated_at, id) order with their blobs', pulled.json.
   check('since returns only newer records', newer.json.items.every((i) => i.updated_at > 1000) && newer.json.items.length === 2, String(newer.json.items.length))
 }
 
+// 4b. The bug this change fixes: a device joining late re-uploads pre-existing data under an old
+// `updated_at`. A cursor that already advanced past that timestamp (the legacy `since` path)
+// never sees it; a `since_seq` cursor does, because `seq` is assigned at push time, not carried
+// in from the client.
+{
+  const c = newGroup()
+  await register(c)
+  const pushedX = await push(c, [rec(1, 5000)]) // device A's own early data
+  check('device A push is accepted', pushedX.status === 200)
+  const firstPull = await pullSeq(c)
+  check('seq comes back on a since_seq pull', typeof firstPull.json.items[0].seq === 'number', JSON.stringify(firstPull.json.items[0]))
+  const seqCursor = Math.max(...firstPull.json.items.map((i) => i.seq))
+  const sinceCursor = Math.max(...firstPull.json.items.map((i) => i.updated_at))
+
+  // Device B joins late and re-uploads its own pre-existing favorite, timestamped long before
+  // device A's cursor position above.
+  const pushedY = await push(c, [rec(2, 1000)])
+  check('device B push is accepted', pushedY.status === 200)
+
+  const legacyMissesIt = await pull(c, sinceCursor)
+  check(
+    '(demonstrates the bug) a timestamp-only cursor never sees the late join',
+    legacyMissesIt.json.items.length === 0,
+    String(legacyMissesIt.json.items.length),
+  )
+  const seqCatchesIt = await pullSeq(c, seqCursor)
+  check(
+    'a seq cursor sees the late join that the timestamp cursor missed',
+    seqCatchesIt.json.items.length === 1 && seqCatchesIt.json.items[0].id === itemId(2),
+    JSON.stringify(seqCatchesIt.json.items),
+  )
+}
+
 // 5. Paging across records that share one timestamp (what a bulk import produces).
 const bulk = newGroup()
 await register(bulk)
@@ -193,6 +228,8 @@ await register(bulk)
   check('rejects a body that is not JSON', garbage.status === 400, String(garbage.status))
   check('rejects a negative since', (await pull(a, -5)).status === 400)
   check('rejects a malformed after_id', (await pull(a, 0, 'zzz')).status === 400)
+  check('rejects a negative since_seq', (await pullSeq(a, -5)).status === 400)
+  check('rejects a malformed since_seq', (await call('GET', '/v1/items', { headers: a.headers, query: '?since_seq=nope' })).status === 400)
 }
 
 // 7. Row cap per group (the server runs with MAX_ITEMS=1500; `bulk` holds 1200).
