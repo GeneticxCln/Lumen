@@ -571,6 +571,8 @@ kbd { background: var(--bg-secondary); border-color: var(--border); color: var(-
 .sync-settings .danger-button { background: #4b2225; color: #ffb4b8; border: 0; border-radius: 4px; padding: 12px 20px; font-size: 12px; font-weight: 700; }
 .sync-settings { margin-bottom: 32px; }
 .sync-settings .settings-actions { border: 0; background: none; box-shadow: none; padding: 0; margin-top: 18px; }
+.merge-profiles-row { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-tertiary); }
+.merge-profiles-row .settings-actions { margin-top: 10px; }
 
 /* Network privacy settings */
 .privacy-settings { margin-bottom: 32px; }

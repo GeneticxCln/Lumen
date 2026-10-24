@@ -1452,6 +1452,113 @@ pub async fn delete_profile(pool: &Pool<Sqlite>, profile_id: i64) -> Result<()> 
     Ok(())
 }
 
+/// Merges `from_profile_id` into `into_profile_id`: moves favorites, history and episode
+/// watched-marks across, then deletes the now-empty `from_profile_id` row (tombstoning its sync
+/// record first, if it had one). Needed because every profile gets its own random `sync_key` at
+/// creation time (see `create_profile`), so two devices that each created their own default
+/// profile before ever syncing end up with two genuinely different keys — joining the same group
+/// pulls the other device's profile in as a *second*, separate row instead of recognizing it as
+/// the same person, and this is how a user collapses that pair back into one after the fact.
+///
+/// Favorites and episode watched-marks are upserted into `into_profile_id`'s own rows
+/// (last-write-wins by `updated_at`, the same rule sync itself applies) rather than moved by a
+/// plain `UPDATE`, since both tables key on `profile_id` as part of their primary key and
+/// `into_profile_id` may already hold a conflicting row for the same channel or episode. History
+/// has no such constraint, so it moves with a plain `UPDATE`. Whatever is left under
+/// `from_profile_id` after the upserts (the losing side of a conflict) goes away with that
+/// profile's row via `ON DELETE CASCADE`.
+pub async fn merge_profiles(
+    pool: &Pool<Sqlite>,
+    into_profile_id: i64,
+    from_profile_id: i64,
+) -> Result<()> {
+    if into_profile_id == from_profile_id {
+        return Err(PlayerError::InvalidArg(
+            "A profile cannot be merged into itself".into(),
+        ));
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    let into_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM profiles WHERE id = ?)")
+            .bind(into_profile_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    if !into_exists {
+        return Err(PlayerError::NotFound(
+            "The profile to merge into no longer exists".into(),
+        ));
+    }
+
+    let sync_key: Option<String> = sqlx::query_scalar("SELECT sync_key FROM profiles WHERE id = ?")
+        .bind(from_profile_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?
+        .flatten();
+
+    sqlx::query(
+        "INSERT INTO favorites (profile_id, channel_url, content_key, active, updated_at)
+         SELECT ?, channel_url, content_key, active, updated_at FROM favorites WHERE profile_id = ?
+         ON CONFLICT (profile_id, channel_url) DO UPDATE SET
+           content_key = excluded.content_key,
+           active = excluded.active,
+           updated_at = excluded.updated_at
+         WHERE excluded.updated_at > favorites.updated_at",
+    )
+    .bind(into_profile_id)
+    .bind(from_profile_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    sqlx::query(
+        "INSERT INTO episode_state (profile_id, series_key, season, episode, watched, updated_at)
+         SELECT ?, series_key, season, episode, watched, updated_at FROM episode_state WHERE profile_id = ?
+         ON CONFLICT (profile_id, series_key, season, episode) DO UPDATE SET
+           watched = excluded.watched,
+           updated_at = excluded.updated_at
+         WHERE excluded.updated_at > episode_state.updated_at",
+    )
+    .bind(into_profile_id)
+    .bind(from_profile_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    sqlx::query("UPDATE history SET profile_id = ? WHERE profile_id = ?")
+        .bind(into_profile_id)
+        .bind(from_profile_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    let result = sqlx::query("DELETE FROM profiles WHERE id = ?")
+        .bind(from_profile_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    if result.rows_affected() == 0 {
+        return Err(PlayerError::NotFound(
+            "The profile to merge from no longer exists".into(),
+        ));
+    }
+
+    if let Some(sync_key) = sync_key {
+        sync::queue_profile_deleted(&mut tx, &sync_key, Utc::now().timestamp_millis()).await?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    Ok(())
+}
+
 /// Set (`Some`) or clear (`None`) a profile's PIN.
 pub async fn set_profile_pin(
     pool: &Pool<Sqlite>,
@@ -3454,5 +3561,179 @@ mod tests {
             queued_before, queued_after,
             "no new sync record from a no-op rekey"
         );
+    }
+
+    /// Reproduces the duplicate-default-profile scenario `merge_profiles` exists for: two
+    /// profiles each hold their own favorite, history row and watched mark, and after merging,
+    /// all three must belong to the surviving profile while the merged-away one is gone entirely.
+    #[tokio::test]
+    async fn merging_a_profile_moves_its_data_and_removes_the_source() {
+        let pool = test_pool().await;
+        let playlist_id = insert_test_playlist(
+            &pool,
+            &[
+                test_channel("Kept Channel", "https://cdn.example/merge-into.m3u8", None),
+                test_channel("Moved Channel", "https://cdn.example/merge-from.m3u8", None),
+            ],
+        )
+        .await;
+        let channels = list_channels(&pool, playlist_id, None, None).await.unwrap();
+        let into_channel_id = channels
+            .iter()
+            .find(|row| row.channel.url == "https://cdn.example/merge-into.m3u8")
+            .unwrap()
+            .channel
+            .id
+            .unwrap();
+        let from_channel_id = channels
+            .iter()
+            .find(|row| row.channel.url == "https://cdn.example/merge-from.m3u8")
+            .unwrap()
+            .channel
+            .id
+            .unwrap();
+
+        let into_id = DEFAULT_PROFILE_ID;
+        let from = create_profile(&pool, "Second Device", None).await.unwrap();
+        let from_id = from.id;
+
+        toggle_favorite(&pool, into_id, into_channel_id)
+            .await
+            .unwrap();
+        toggle_favorite(&pool, from_id, from_channel_id)
+            .await
+            .unwrap();
+        add_history(
+            &pool,
+            from_id,
+            Some(from_channel_id),
+            "https://cdn.example/merge-from.m3u8",
+            10.0,
+            100.0,
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO episode_state (profile_id, series_key, season, episode, watched, updated_at) \
+             VALUES (?, 'tmdb:tv:1', 1, 1, 1, ?)",
+        )
+        .bind(from_id)
+        .bind(Utc::now().timestamp_millis())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        merge_profiles(&pool, into_id, from_id).await.unwrap();
+
+        assert!(
+            !profile_exists(&pool, from_id).await.unwrap(),
+            "the merged-away profile is gone"
+        );
+
+        let favorites: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT profile_id, channel_url FROM favorites WHERE active = 1 ORDER BY channel_url",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            favorites,
+            vec![
+                (into_id, "https://cdn.example/merge-from.m3u8".to_string()),
+                (into_id, "https://cdn.example/merge-into.m3u8".to_string()),
+            ],
+            "both favorites now belong to the surviving profile"
+        );
+
+        let history_profile: i64 =
+            sqlx::query_scalar("SELECT profile_id FROM history WHERE path = ?")
+                .bind("https://cdn.example/merge-from.m3u8")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(history_profile, into_id);
+
+        let episode_profile: i64 = sqlx::query_scalar(
+            "SELECT profile_id FROM episode_state WHERE series_key = 'tmdb:tv:1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(episode_profile, into_id);
+    }
+
+    /// When both profiles already hold conflicting state for the same channel/episode, the
+    /// merge must resolve it the same way sync itself would — the newer `updated_at` wins —
+    /// rather than erroring on the primary-key collision or silently keeping whichever side
+    /// happened to be inserted first.
+    #[tokio::test]
+    async fn merging_resolves_a_favorite_conflict_by_last_write_wins() {
+        let pool = test_pool().await;
+        let url = "https://cdn.example/merge-conflict.m3u8";
+        let playlist_id = insert_test_playlist(&pool, &[test_channel("Shared", url, None)]).await;
+        let channel_id = list_channels(&pool, playlist_id, None, None).await.unwrap()[0]
+            .channel
+            .id
+            .unwrap();
+
+        let into_id = DEFAULT_PROFILE_ID;
+        let from = create_profile(&pool, "Second Device", None).await.unwrap();
+        let from_id = from.id;
+
+        // `into` favorited it first and is still active; `from` later un-favorited the same
+        // channel — the later timestamp must win, leaving it inactive after the merge.
+        toggle_favorite(&pool, into_id, channel_id).await.unwrap();
+        toggle_favorite(&pool, from_id, channel_id).await.unwrap();
+        toggle_favorite(&pool, from_id, channel_id).await.unwrap();
+
+        merge_profiles(&pool, into_id, from_id).await.unwrap();
+
+        let rows: Vec<(i64, i64)> =
+            sqlx::query_as("SELECT profile_id, active FROM favorites WHERE channel_url = ?")
+                .bind(url)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![(into_id, 0)],
+            "exactly one row survives, carrying from's later (inactive) state"
+        );
+    }
+
+    #[tokio::test]
+    async fn merging_an_already_synced_profile_queues_a_tombstone_for_it() {
+        let pool = test_pool().await;
+        let into_id = DEFAULT_PROFILE_ID;
+        let from = create_profile(&pool, "Second Device", None).await.unwrap();
+        let from_sync_key: String =
+            sqlx::query_scalar("SELECT sync_key FROM profiles WHERE id = ?")
+                .bind(from.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        merge_profiles(&pool, into_id, from.id).await.unwrap();
+
+        let tombstone: (i64,) = sqlx::query_as(
+            "SELECT deleted FROM sync_queue WHERE kind = 'profile' AND item_key = ?",
+        )
+        .bind(&from_sync_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            tombstone.0, 1,
+            "the merged-away profile's own sync record is tombstoned, not left dangling"
+        );
+    }
+
+    #[tokio::test]
+    async fn merging_a_profile_into_itself_is_rejected() {
+        let pool = test_pool().await;
+        let error = merge_profiles(&pool, DEFAULT_PROFILE_ID, DEFAULT_PROFILE_ID)
+            .await
+            .expect_err("merging a profile into itself makes no sense");
+        assert!(String::from(error).contains("itself"));
     }
 }

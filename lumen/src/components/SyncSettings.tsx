@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   errorMessage,
+  listProfiles,
   syncDisable,
   syncEnable,
   syncJoin,
@@ -12,6 +13,8 @@ import {
 } from "../lib/tauri";
 import { t } from "../i18n/index.ts";
 import { describeSync, skippedWarning } from "../lib/sync";
+import { MergeProfilesDialog } from "./MergeProfilesDialog";
+import type { MergeCandidate } from "./MergeProfilesDialog";
 import type { SyncState, SyncStatus } from "../lib/types";
 
 type Mode = "idle" | "join" | "confirm-off" | "confirm-delete";
@@ -32,6 +35,7 @@ export function SyncSettings() {
   const [serverText, setServerText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [mergeCandidates, setMergeCandidates] = useState<MergeCandidate[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -76,10 +80,27 @@ export function SyncSettings() {
   });
 
   const join = () => run(async () => {
+    // Snapshotted before joining: every profile gets its own random sync key at creation (see
+    // `db::create_profile`), so a profile that already existed on this device and one that just
+    // arrived from the group never share a key even when they're the same person — the only way
+    // to tell "arrived just now" from "was already here" is to compare profile ids across the
+    // join, not anything the profiles' own data carries.
+    const before = await listProfiles();
     setState(await syncJoin(joinText));
     setJoinText("");
     setMode("idle");
     await syncAfterEnable();
+
+    const after = await listProfiles();
+    const beforeIds = new Set(before.map((profile) => profile.id));
+    const afterIds = new Set(after.map((profile) => profile.id));
+    const stillLocal = before.filter((profile) => afterIds.has(profile.id));
+    const arrived = after.filter((profile) => !beforeIds.has(profile.id));
+    if (stillLocal.length > 0 && arrived.length > 0) {
+      setMergeCandidates(
+        stillLocal.flatMap((local) => arrived.map((remote) => ({ local, remote }))),
+      );
+    }
   });
 
   const showKey = () => run(async () => {
@@ -246,6 +267,14 @@ export function SyncSettings() {
             </>
           )}
         </div>
+      )}
+
+      {mergeCandidates.length > 0 && (
+        <MergeProfilesDialog
+          candidates={mergeCandidates}
+          onClose={() => setMergeCandidates([])}
+          onMerged={() => {}}
+        />
       )}
     </div>
   );

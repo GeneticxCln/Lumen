@@ -168,6 +168,7 @@ pub fn run() {
             create_profile_cmd,
             rename_profile_cmd,
             delete_profile_cmd,
+            merge_profiles_cmd,
             set_profile_pin_cmd,
             activate_profile_cmd,
             list_local_dir,

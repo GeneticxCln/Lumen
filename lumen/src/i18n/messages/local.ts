@@ -114,6 +114,17 @@ export const local = {
   "profiles.pinNote":
     "<strong>A PIN locks one profile on this device.</strong> Changing or removing it asks for the current PIN. It is not encryption, and it is not synced to your other devices: the library, the database and the media files are still readable by anyone with access to this machine.",
 
+  // Shown once after joining a sync group, when a profile from before joining and one that just
+  // arrived from the group are both still separate rows.
+  "profiles.merge.title": "Merge profiles?",
+  "profiles.merge.intro":
+    "This device already had its own profile before joining. If it's the same person as one that just arrived, you can merge them into one — otherwise leave them separate.",
+  "profiles.merge.pair": "Merge “{remote}” into “{local}”?",
+  "profiles.merge.mergeButton": "Merge",
+  "profiles.merge.merging": "Merging…",
+  "profiles.merge.notSamePerson": "Not the same person",
+  "profiles.merge.done": "Done",
+
   // Search engine page.
   "searchEngine.language.en": "English",
   "searchEngine.language.fr": "French",

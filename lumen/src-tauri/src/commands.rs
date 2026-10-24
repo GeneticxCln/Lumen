@@ -1251,6 +1251,25 @@ pub async fn delete_profile_cmd(
     list_profiles(pool).await
 }
 
+/// Collapses a profile that arrived from a sync group into the one already on this device —
+/// each independently creates its own profile with its own random `sync_key`, so joining the
+/// same group leaves them as two separate rows instead of one recognized identity. Requires
+/// `from_profile_id`'s own PIN, the same bar `delete_profile_cmd` sets for removing a profile
+/// (which this also does, after moving its data across).
+#[tauri::command]
+pub async fn merge_profiles_cmd(
+    into_profile_id: i64,
+    from_profile_id: i64,
+    current_pin: Option<String>,
+    app: AppHandle,
+) -> Result<Vec<Profile>> {
+    let pool = ensure_db(&app).await?;
+    authorize_profile(pool, from_profile_id, current_pin.as_deref()).await?;
+    merge_profiles(pool, into_profile_id, from_profile_id).await?;
+    crate::sync::schedule(pool);
+    list_profiles(pool).await
+}
+
 #[tauri::command]
 pub async fn set_profile_pin_cmd(
     profile_id: i64,
