@@ -179,6 +179,9 @@ export interface Settings {
   allow_lan_sources: string;
   /** "true" plays video inside the window instead of a separate mpv window (X11 only). */
   embed_player?: string;
+  /** Default hours between auto-refreshes of a URL-imported playlist ("0" = off); a playlist's
+   * own setting (see `getPlaylistAutoRefresh`) overrides this. */
+  playlist_auto_refresh_hours: string;
 }
 
 export interface ExtractResponse {

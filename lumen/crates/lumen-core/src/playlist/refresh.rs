@@ -11,6 +11,9 @@ use chrono::Utc;
 use serde::Serialize;
 use sqlx::{Pool, QueryBuilder, Row, Sqlite};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Semaphore;
 
 /// How many channels a refresh added, updated in place, or removed.
 #[derive(Debug, Default, Serialize, PartialEq, Eq)]
@@ -148,6 +151,119 @@ pub async fn refresh_playlist(
     // same way delete_playlist_cmd and every other write-path command already does — this
     // library function stays Tauri/AppHandle-agnostic, same as the rest of lumen-core's db layer.
     Ok(stats)
+}
+
+// --- Auto-refresh scheduler -------------------------------------------------------------------
+
+/// Global setting key for the default auto-refresh interval in hours (`"0"` = off), overridable
+/// per playlist by that playlist's own `auto_refresh_hours` column (`NULL` = use this default).
+pub const DEFAULT_INTERVAL_SETTING: &str = "playlist_auto_refresh_hours";
+
+/// How often the scheduler checks which playlists are due. Independent of any one playlist's own
+/// refresh interval — this just has to be frequent enough that an hours-scale interval isn't
+/// missed by much.
+const CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// This runs unattended in the background, unlike a user-triggered "Refresh now" or bulk-add —
+/// deliberately lower than `bulk.rs`'s own concurrency caps.
+const CONCURRENT_REFRESHES: usize = 2;
+/// Fetch, parse and merge together get the same budget `bulk.rs`'s own per-link import timeout
+/// gives that same combination of work.
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(35);
+
+/// Whether a playlist carrying this per-playlist override (`None` = use `default_hours`), this
+/// global default, and this `last_refreshed_at` should be refreshed at `now_ms`. An interval of
+/// zero or less — the override or the default, whichever applies — means auto-refresh is off.
+/// A playlist never yet refreshed is always due, so it gets picked up on its first scheduler
+/// pass rather than waiting a full interval after being imported.
+fn is_refresh_due(
+    auto_refresh_hours: Option<i64>,
+    default_hours: i64,
+    last_refreshed_at: Option<i64>,
+    now_ms: i64,
+) -> bool {
+    let hours = auto_refresh_hours.unwrap_or(default_hours);
+    if hours <= 0 {
+        return false;
+    }
+    match last_refreshed_at {
+        None => true,
+        // A clock that moved backwards must not hold refreshing off until it catches up —
+        // same reasoning sync.rs's own progress_sync_due applies to its interval check.
+        Some(last) => now_ms < last || now_ms - last >= hours.saturating_mul(3_600_000),
+    }
+}
+
+/// Refreshes every due, URL-imported playlist, bounded at `CONCURRENT_REFRESHES` at a time. One
+/// playlist failing (a dead link, a timeout) is logged and skipped — it does not stop the others
+/// or fail the whole pass.
+async fn run_due_refreshes(pool: &Pool<Sqlite>) -> Result<()> {
+    let default_hours: i64 = db::get_setting(pool, DEFAULT_INTERVAL_SETTING)
+        .await?
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    // Mirrors the allow_lan_sources setting read the Tauri command layer does for every other
+    // network-reaching playlist operation; duplicated here (rather than imported) because that
+    // helper lives in the Tauri shell, which this scheduler — like the rest of lumen-core's
+    // db layer — does not depend on.
+    let allow_lan = db::get_setting(pool, "allow_lan_sources").await?.as_deref() == Some("true");
+
+    let rows = sqlx::query(
+        "SELECT id, auto_refresh_hours, last_refreshed_at FROM playlists WHERE source = 'url'",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    let now = Utc::now().timestamp_millis();
+    let due: Vec<i64> = rows
+        .into_iter()
+        .filter_map(|row| {
+            let id: i64 = row.get("id");
+            let auto_refresh_hours: Option<i64> = row.get("auto_refresh_hours");
+            let last_refreshed_at: Option<i64> = row.get("last_refreshed_at");
+            is_refresh_due(auto_refresh_hours, default_hours, last_refreshed_at, now).then_some(id)
+        })
+        .collect();
+    if due.is_empty() {
+        return Ok(());
+    }
+
+    let gate = Arc::new(Semaphore::new(CONCURRENT_REFRESHES));
+    let mut tasks = tokio::task::JoinSet::new();
+    for playlist_id in due {
+        let (gate, pool) = (gate.clone(), pool.clone());
+        tasks.spawn(async move {
+            let Ok(_permit) = gate.acquire_owned().await else {
+                return;
+            };
+            match tokio::time::timeout(REFRESH_TIMEOUT, refresh_playlist(&pool, playlist_id, allow_lan)).await {
+                Ok(Ok(_stats)) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(playlist_id, error = %String::from(error), "scheduled playlist refresh failed");
+                }
+                Err(_) => {
+                    tracing::warn!(playlist_id, "scheduled playlist refresh timed out");
+                }
+            }
+        });
+    }
+    while tasks.join_next().await.is_some() {}
+    Ok(())
+}
+
+/// Checks every URL-imported playlist for a due auto-refresh every `CHECK_INTERVAL`, starting
+/// right away. A playlist (or the global default) with no interval configured is simply never
+/// due — this runs unconditionally; `is_refresh_due` is what makes it a no-op until something
+/// turns auto-refresh on.
+pub fn start(pool: &'static Pool<Sqlite>) {
+    tokio::spawn(async move {
+        loop {
+            if let Err(error) = run_due_refreshes(pool).await {
+                tracing::warn!(error = %String::from(error), "playlist auto-refresh check failed");
+            }
+            tokio::time::sleep(CHECK_INTERVAL).await;
+        }
+    });
 }
 
 #[cfg(test)]
@@ -385,6 +501,188 @@ mod tests {
         assert_eq!(
             deleted, 1,
             "the favorite's sync record is a tombstone, not a fresh push"
+        );
+    }
+
+    // --- is_refresh_due ---------------------------------------------------------------------
+
+    const HOUR_MS: i64 = 3_600_000;
+
+    #[test]
+    fn an_interval_of_zero_or_less_is_off_regardless_of_how_stale() {
+        assert!(!is_refresh_due(None, 0, None, 0), "no default configured");
+        assert!(
+            !is_refresh_due(Some(0), 24, None, 0),
+            "override turns it off"
+        );
+        assert!(
+            !is_refresh_due(Some(-1), 24, Some(0), 1_000_000_000),
+            "a negative override is off too"
+        );
+    }
+
+    #[test]
+    fn a_playlist_never_refreshed_is_due_as_soon_as_its_interval_is_on() {
+        assert!(is_refresh_due(None, 6, None, 0));
+        assert!(
+            is_refresh_due(Some(24), 0, None, 0),
+            "a per-playlist override still applies with no global default"
+        );
+    }
+
+    #[test]
+    fn the_per_playlist_override_takes_precedence_over_the_global_default() {
+        // The default alone would call this due (6h since refresh, default also 6h); the
+        // playlist's own 24h override says otherwise.
+        assert!(!is_refresh_due(Some(24), 6, Some(0), 6 * HOUR_MS));
+        assert!(is_refresh_due(Some(24), 6, Some(0), 24 * HOUR_MS));
+    }
+
+    #[test]
+    fn due_exactly_at_the_interval_boundary_not_a_moment_before() {
+        assert!(!is_refresh_due(None, 6, Some(0), 6 * HOUR_MS - 1));
+        assert!(is_refresh_due(None, 6, Some(0), 6 * HOUR_MS));
+    }
+
+    #[test]
+    fn a_clock_that_moved_backwards_does_not_hold_refreshing_off() {
+        assert!(is_refresh_due(None, 6, Some(10 * HOUR_MS), 0));
+    }
+
+    // --- run_due_refreshes -------------------------------------------------------------------
+
+    /// Like `serve`, but each request is held open for `hold` before answering, and `inflight`/
+    /// `peak` track how many requests to this one server are open at once.
+    async fn serve_tracked(
+        body: String,
+        hold: std::time::Duration,
+        inflight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    ) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let body = body.clone();
+                let inflight = inflight.clone();
+                let peak = peak.clone();
+                tokio::spawn(async move {
+                    let now = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(hold).await;
+                    let mut buffer = [0u8; 2048];
+                    let _ = stream.read(&mut buffer).await;
+                    let _ = stream.write_all(body.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                    inflight.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        port
+    }
+
+    /// A playlist row ready to be picked up by the scheduler: `source = 'url'`, never refreshed.
+    async fn url_playlist(pool: &Pool<Sqlite>, name: &str, origin: &str) -> i64 {
+        let playlist = crate::playlist::m3u::Playlist {
+            id: None,
+            name: name.into(),
+            source: "url".into(),
+            origin: Some(origin.into()),
+            created_at: 0,
+            updated_at: 0,
+        };
+        db::import_playlist(pool, &playlist, &[]).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn one_failing_playlist_does_not_stop_the_others_and_concurrency_is_capped() {
+        let pool = test_pool().await;
+        db::set_setting(&pool, "allow_lan_sources", "true")
+            .await
+            .unwrap();
+        db::set_setting(&pool, DEFAULT_INTERVAL_SETTING, "1")
+            .await
+            .unwrap();
+
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let hold = std::time::Duration::from_millis(80);
+        let body = playlist_response("#EXTM3U\n#EXTINF:-1,One\nhttps://example.test/one.m3u8\n");
+
+        let port_a = serve_tracked(body.clone(), hold, inflight.clone(), peak.clone()).await;
+        let port_b = serve_tracked(body.clone(), hold, inflight.clone(), peak.clone()).await;
+        let port_c = serve_tracked(body, hold, inflight.clone(), peak.clone()).await;
+
+        let good_a = url_playlist(&pool, "A", &format!("http://127.0.0.1:{port_a}/list.m3u")).await;
+        let good_b = url_playlist(&pool, "B", &format!("http://127.0.0.1:{port_b}/list.m3u")).await;
+        let good_c = url_playlist(&pool, "C", &format!("http://127.0.0.1:{port_c}/list.m3u")).await;
+
+        // A real ephemeral port, bound and then immediately dropped so nothing is listening on
+        // it any more — the plain, fast "connection refused" this needs, no fake server at all.
+        let dead_port = {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let bad = url_playlist(
+            &pool,
+            "Dead",
+            &format!("http://127.0.0.1:{dead_port}/list.m3u"),
+        )
+        .await;
+
+        run_due_refreshes(&pool).await.unwrap();
+
+        assert!(
+            peak.load(Ordering::SeqCst) <= CONCURRENT_REFRESHES,
+            "no more than {CONCURRENT_REFRESHES} refreshes should ever be in flight at once, saw {}",
+            peak.load(Ordering::SeqCst)
+        );
+
+        for id in [good_a, good_b, good_c] {
+            let last_refreshed_at: Option<i64> =
+                sqlx::query_scalar("SELECT last_refreshed_at FROM playlists WHERE id = ?")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(
+                last_refreshed_at.is_some(),
+                "playlist {id} should have been refreshed despite the dead one failing"
+            );
+        }
+        let bad_last_refreshed_at: Option<i64> =
+            sqlx::query_scalar("SELECT last_refreshed_at FROM playlists WHERE id = ?")
+                .bind(bad)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            bad_last_refreshed_at.is_none(),
+            "the dead playlist's own failure must not be recorded as a successful refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_is_refreshed_when_no_playlist_is_due() {
+        let pool = test_pool().await;
+        db::set_setting(&pool, "allow_lan_sources", "true")
+            .await
+            .unwrap();
+        // The global default is left at "0" (off) and no playlist sets its own override, so
+        // nothing should be due — if this reached out to the network at all, there would be
+        // nothing listening to answer it.
+        let (port, hits) = serve(playlist_response(
+            "#EXTM3U\n#EXTINF:-1,One\nhttps://example.test/one.m3u8\n",
+        ))
+        .await;
+        url_playlist(&pool, "Idle", &format!("http://127.0.0.1:{port}/list.m3u")).await;
+
+        run_due_refreshes(&pool).await.unwrap();
+
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "a playlist with no interval configured is never due"
         );
     }
 }

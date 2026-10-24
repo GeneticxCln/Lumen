@@ -23,6 +23,13 @@ export const base = {
   "lan.description":
     "Lets Lumen import playlists from this computer or your home network (for example a NAS or a media server). Leave this off unless you host a playlist yourself.",
 
+  "autoRefresh.label": "Auto-refresh playlists",
+  "autoRefresh.description":
+    "How often a playlist imported from a URL re-fetches itself in the background. A playlist can use its own interval instead of this default (see its \"Refresh now\" button).",
+  "autoRefresh.off": "Off",
+  "autoRefresh.everyHours": "Every {hours}h",
+  "autoRefresh.useDefault": "Use default",
+
   "embed.label": "Play video inside the Lumen window (experimental)",
   "embed.description":
     "Shows the video above the controls in this window instead of opening a separate mpv window. Takes effect the next time playback starts.",

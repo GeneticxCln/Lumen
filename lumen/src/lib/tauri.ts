@@ -259,6 +259,18 @@ export async function refreshPlaylist(playlistId: number) {
   return callBackend<RefreshStats>("refresh_playlist_cmd", { playlistId });
 }
 
+/** This playlist's own auto-refresh interval in hours, or null when it follows the global
+ * default (Settings' `playlist_auto_refresh_hours`). */
+export async function getPlaylistAutoRefresh(playlistId: number) {
+  return callBackend<number | null>("get_playlist_auto_refresh_cmd", { playlistId });
+}
+
+/** Sets this playlist's own auto-refresh interval in hours; null clears it back to the global
+ * default. */
+export async function setPlaylistAutoRefresh(playlistId: number, hours: number | null) {
+  return callBackend("set_playlist_auto_refresh_cmd", { playlistId, hours });
+}
+
 export async function listPlaylists() {
   return callBackend<Playlist[]>("list_playlists_cmd");
 }
