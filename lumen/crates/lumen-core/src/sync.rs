@@ -31,14 +31,14 @@ const KIND_EPISODE: &str = "episode";
 /// of payload seal to well under the server's 6,144-character blob limit.
 const MAX_PAYLOAD_BYTES: usize = 4000;
 const PUSH_BATCH: i64 = 500;
-/// Pulls start this far before the saved cursor. A device with a slow clock can push a record
-/// whose `updated_at` is older than another device's cursor; the overlap catches it. Applying
-/// is idempotent, so re-reading a few minutes is harmless.
-const PULL_OVERLAP_MS: i64 = 5 * 60 * 1000;
 const DEBOUNCE: Duration = Duration::from_secs(3);
 const PERIODIC: Duration = Duration::from_secs(5 * 60);
 
-const CURSOR_SETTING: &str = "sync_pull_cursor";
+/// A changed value forces every existing install to resync from scratch exactly once: the old
+/// key is orphaned (never read again) and the new one is absent everywhere, falling back to 0.
+/// Needed because the cursor's meaning changed from a client timestamp to a server-assigned
+/// sequence (see `PullCursor`) - the two are not comparable.
+const CURSOR_SETTING: &str = "sync_pull_cursor_seq";
 const LAST_SYNC_SETTING: &str = "sync_last_synced_at";
 const SEEDED_SETTING: &str = "sync_seeded";
 const SKIPPED_SETTING: &str = "sync_skipped";
@@ -798,24 +798,29 @@ async fn push_pending(pool: &Pool<Sqlite>, remote: &Remote) -> Result<()> {
     }
 }
 
-/// Where the next pull page starts. The server pages in `(updated_at, id)` order, so the last
-/// row received names the boundary exactly. Using the timestamp alone would skip every row that
-/// shares the boundary's `updated_at`, and a bulk migration gives many rows one timestamp.
+/// Where the next pull page starts. The server pages in `(seq, id)` order - `seq` is a
+/// server-assigned write-order counter, independent of the client-supplied `updated_at` - so the
+/// last row received names the boundary exactly. Using `seq` alone would skip every row that
+/// shares the boundary's `seq`, and one push batch stamps every item it contains with the same
+/// value.
 #[derive(Debug, Clone, PartialEq)]
 struct PullCursor {
-    since: i64,
+    seq: i64,
     after: Option<String>,
 }
 
 /// The cursor after `items`, or an error if a page claims more rows but carries none (the pull
-/// would never advance). Taken from the sealed rows, so a row that fails verification still
-/// moves the cursor past itself.
+/// would never advance), or a row is missing `seq` (the server did not honor `since_seq`).
+/// Taken from the sealed rows, so a row that fails verification still moves the cursor past itself.
 fn next_cursor(items: &[SealedItem]) -> Result<PullCursor> {
     let last = items
         .last()
         .ok_or_else(|| PlayerError::Io("Sync page reported more rows but returned none".into()))?;
+    let seq = last
+        .seq
+        .ok_or_else(|| PlayerError::Parse("Sync page did not include a seq".into()))?;
     Ok(PullCursor {
-        since: last.updated_at,
+        seq,
         after: Some(last.id.clone()),
     })
 }
@@ -823,7 +828,7 @@ fn next_cursor(items: &[SealedItem]) -> Result<PullCursor> {
 async fn pull_page(remote: &Remote, cursor: &PullCursor) -> Result<PullPage> {
     let mut request = remote
         .request(reqwest::Method::GET, "/v1/items")
-        .query(&[("since", cursor.since)]);
+        .query(&[("since_seq", cursor.seq)]);
     if let Some(id) = &cursor.after {
         request = request.query(&[("after_id", id.as_str())]);
     }
@@ -840,9 +845,8 @@ async fn pull_remote(pool: &Pool<Sqlite>, remote: &Remote) -> Result<i64> {
         .unwrap_or(0);
     let mut newest = saved;
     let mut skipped = 0;
-    // Never below zero: the server rejects a negative `since`, which a first sync would otherwise send.
     let mut cursor = PullCursor {
-        since: saved.saturating_sub(PULL_OVERLAP_MS).max(0),
+        seq: saved,
         after: None,
     };
 
@@ -858,7 +862,7 @@ async fn pull_remote(pool: &Pool<Sqlite>, remote: &Remote) -> Result<i64> {
         }
         tx.commit().await.map_err(sql_err)?;
 
-        if let Some(value) = page.items.iter().map(|item| item.updated_at).max() {
+        if let Some(value) = page.items.iter().filter_map(|item| item.seq).max() {
             newest = newest.max(value);
         }
         if !page.has_more {
@@ -999,22 +1003,31 @@ pub async fn forget(pool: &Pool<Sqlite>) -> Result<()> {
 mod cursor_tests {
     use super::*;
 
-    fn item(id: &str, updated_at: i64) -> SealedItem {
+    fn item(id: &str, seq: i64) -> SealedItem {
         SealedItem {
             id: id.into(),
-            updated_at,
+            updated_at: 0,
             deleted: false,
             blob: String::new(),
+            seq: Some(seq),
         }
     }
 
     #[test]
-    fn the_cursor_names_the_last_row_not_just_its_timestamp() {
-        // Every row shares one timestamp: a timestamp-only cursor could not tell them apart.
+    fn the_cursor_names_the_last_row_not_just_its_seq() {
+        // One push batch stamps every item it contains with the same seq: a seq-only cursor
+        // could not tell these rows apart without also naming the last id.
         let page = vec![item("a", 7), item("b", 7), item("c", 7)];
         let cursor = next_cursor(&page).unwrap();
-        assert_eq!(cursor.since, 7);
+        assert_eq!(cursor.seq, 7);
         assert_eq!(cursor.after, Some("c".to_string()));
+    }
+
+    #[test]
+    fn a_row_missing_seq_is_an_error_not_a_silent_stall() {
+        let mut row = item("a", 7);
+        row.seq = None;
+        assert!(next_cursor(&[row]).is_err());
     }
 
     #[test]

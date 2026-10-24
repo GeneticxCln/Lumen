@@ -21,8 +21,11 @@ const PAGE: usize = 2;
 
 struct Group {
     verifier: String,
-    /// item id -> (updated_at, deleted, blob)
-    items: BTreeMap<String, (i64, bool, String)>,
+    /// item id -> (updated_at, deleted, blob, seq)
+    items: BTreeMap<String, (i64, bool, String, i64)>,
+    /// Mirrors the Worker's own `sync_seq` counter: bumped once per push that lands at least one
+    /// write, independent of the client-supplied `updated_at` - see `worker.ts`'s `pushItems`.
+    next_seq: i64,
 }
 
 #[derive(Default)]
@@ -76,6 +79,7 @@ fn handle_request(
             Group {
                 verifier,
                 items: BTreeMap::new(),
+                next_seq: 0,
             },
         );
         return reply(201, json!({ "created": true }));
@@ -101,20 +105,59 @@ fn handle_request(
         }
         ("POST", "/v1/items") => {
             let items = json_body["items"].as_array().cloned().unwrap_or_default();
+            if !items.is_empty() {
+                group.next_seq += 1;
+            }
+            let seq = group.next_seq;
             for item in &items {
                 let id = item["id"].as_str().unwrap().to_string();
                 let updated_at = item["updated_at"].as_i64().unwrap();
                 let deleted = item["deleted"].as_bool().unwrap();
                 let blob = item["blob"].as_str().unwrap().to_string();
-                // Last write wins, as in the Worker.
+                // Last write wins, as in the Worker; `seq` advances whenever a write actually
+                // lands, whether that's a brand-new item or a genuinely newer update to one.
                 if group.items.get(&id).is_none_or(|held| updated_at > held.0) {
-                    group.items.insert(id, (updated_at, deleted, blob));
+                    group.items.insert(id, (updated_at, deleted, blob, seq));
                 }
             }
             reply(200, json!({ "ok": true, "received": items.len() }))
         }
         ("GET", "/v1/items") => {
             let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+            let after = query.get("after_id");
+            // `since_seq`: the real client's current, server-assigned-sequence cursor (see
+            // `worker.ts`'s `pullItems`). A bare `since`: the legacy, `updated_at`-based path,
+            // kept here only so a test could still exercise it; nothing in this test file sends
+            // it on purpose anymore.
+            if let Some(since_seq) = query
+                .get("since_seq")
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|v| *v >= 0)
+            {
+                let mut rows: Vec<_> = group
+                    .items
+                    .iter()
+                    .filter(|(id, (_, _, _, seq))| match after {
+                        Some(after) => {
+                            *seq > since_seq || (*seq == since_seq && id.as_str() > after.as_str())
+                        }
+                        None => *seq > since_seq,
+                    })
+                    .map(|(id, (at, deleted, blob, seq))| {
+                        (*seq, id.clone(), *at, *deleted, blob.clone())
+                    })
+                    .collect();
+                rows.sort();
+                let has_more = rows.len() > PAGE;
+                let items: Vec<_> = rows
+                    .into_iter()
+                    .take(PAGE)
+                    .map(|(seq, id, at, deleted, blob)| {
+                        json!({ "id": id, "updated_at": at, "deleted": deleted, "blob": blob, "seq": seq })
+                    })
+                    .collect();
+                return reply(200, json!({ "items": items, "has_more": has_more }));
+            }
             // The Worker refuses a missing, non-numeric or negative cursor; so does this stand-in.
             let Some(since) = query
                 .get("since")
@@ -123,15 +166,14 @@ fn handle_request(
             else {
                 return reply(400, json!({ "error": "invalid_request" }));
             };
-            let after = query.get("after_id");
             let mut rows: Vec<_> = group
                 .items
                 .iter()
-                .filter(|(id, (at, _, _))| match after {
+                .filter(|(id, (at, _, _, _))| match after {
                     Some(after) => *at > since || (*at == since && id.as_str() > after.as_str()),
                     None => *at > since,
                 })
-                .map(|(id, (at, deleted, blob))| (*at, id.clone(), *deleted, blob.clone()))
+                .map(|(id, (at, deleted, blob, _))| (*at, id.clone(), *deleted, blob.clone()))
                 .collect();
             rows.sort();
             let has_more = rows.len() > PAGE;
@@ -417,12 +459,13 @@ async fn a_record_the_server_altered_is_skipped_and_counted_not_applied() {
         let target = group
             .items
             .iter()
-            .find(|(id, (updated_at, deleted, blob))| {
+            .find(|(id, (updated_at, deleted, blob, _))| {
                 let sealed = SealedItem {
                     id: (*id).clone(),
                     updated_at: *updated_at,
                     deleted: *deleted,
                     blob: blob.clone(),
+                    seq: None,
                 };
                 keys.open(&sealed).is_ok_and(|item| item.kind == "favorite")
             })
@@ -447,6 +490,49 @@ async fn a_record_the_server_altered_is_skipped_and_counted_not_applied() {
     // The count is kept so the UI can warn about it.
     let status = crate::sync::status(&b).await.unwrap();
     assert_eq!(status.skipped, 1);
+}
+
+/// The bug this file's `seq` handling exists to fix: a device joining a group late re-uploads
+/// its own pre-existing data (first-sync seeding, via `queue_all`) under that data's real, old
+/// `updated_at`. A cursor that had already advanced past that timestamp - exactly what device
+/// A's has done below, from its own earlier, newer sync - must still see it.
+#[tokio::test]
+async fn a_device_joining_late_is_not_invisible_to_a_cursor_already_past_its_old_data() {
+    let (origin, _mock) = start_mock().await;
+    let root = generate_root().unwrap();
+    remote(&origin, &root).register(POW_BITS).await.unwrap();
+
+    // Device A syncs first. Its pull cursor now sits at the seq this push landed at.
+    let a = device().await;
+    add_favorites(&a, 9_000_000).await;
+    sync_with(&a, &remote(&origin, &root)).await.unwrap();
+
+    // Device B joins the same group later, but its own favorite predates when A's cursor already
+    // advanced - exactly what a device holds if it starred something long before ever turning
+    // sync on. Its first-ever sync seeds and pushes it under that old timestamp.
+    let b = device().await;
+    sqlx::query(
+        "INSERT INTO favorites (profile_id, channel_url, content_key, active, updated_at) VALUES (1, ?, ?, 1, ?)",
+    )
+    .bind("https://cdn.example/old-favorite/index.m3u8")
+    .bind("tmdb:movie:999")
+    .bind(1_000) // long before device A's cursor position above
+    .execute(&b)
+    .await
+    .unwrap();
+    sync_with(&b, &remote(&origin, &root)).await.unwrap();
+
+    // Device A syncs again. A timestamp-only cursor would never see this record (1_000 predates
+    // everything A's cursor already passed); a seq cursor does, because seq only ever moves
+    // forward with each push, independent of what `updated_at` says.
+    sync_with(&a, &remote(&origin, &root)).await.unwrap();
+    let favorites = favorite_rows(&a).await;
+    assert!(
+        favorites
+            .iter()
+            .any(|(url, _)| url == "https://cdn.example/old-favorite/index.m3u8"),
+        "device A should receive device B's pre-existing, old-timestamped favorite: {favorites:?}"
+    );
 }
 
 #[tokio::test]

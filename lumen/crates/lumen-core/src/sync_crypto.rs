@@ -57,6 +57,11 @@ pub struct SealedItem {
     pub updated_at: i64,
     pub deleted: bool,
     pub blob: String,
+    /// The server's write-order position for this record (see the Worker's `sync_seq`). Absent
+    /// on a push (the client never assigns this) and on a legacy `since`-based pull; present on
+    /// a `since_seq`-based pull, which is what the client now always uses to page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<i64>,
 }
 
 /// What is encrypted: the real kind and key, which the server must not see.
@@ -164,6 +169,7 @@ impl SyncKeys {
             updated_at: item.updated_at,
             deleted: item.deleted,
             blob: b64(&blob),
+            seq: None,
         })
     }
 
