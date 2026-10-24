@@ -9,11 +9,17 @@ use url::Url;
 
 use crate::netguard;
 
-const VIDEO_EXT: [&str; 11] = [
+/// The canonical list of extensions this app treats as a playable video, matching what
+/// `tauri.conf.json`'s `fileAssociations` registers Lumen to open. Shared with `commands.rs`'s
+/// Local Device folder browser and poster-generation gate, which used to keep their own,
+/// shorter copies that quietly drifted out of sync with this one and with each other - a file
+/// the OS would open with Lumen (and this module would then recognize) could be invisible when
+/// just browsing its folder in the app.
+pub const VIDEO_EXT: [&str; 11] = [
     "mp4", "m4v", "mkv", "avi", "mov", "webm", "ts", "m2ts", "mpg", "mpeg", "ogv",
 ];
-const AUDIO_EXT: [&str; 7] = ["mp3", "flac", "wav", "ogg", "opus", "m4a", "aac"];
-const PLAYLIST_EXT: [&str; 2] = ["m3u", "m3u8"];
+pub const AUDIO_EXT: [&str; 7] = ["mp3", "flac", "wav", "ogg", "opus", "m4a", "aac"];
+pub const PLAYLIST_EXT: [&str; 2] = ["m3u", "m3u8"];
 const SUBTITLE_EXT: [&str; 5] = ["srt", "ass", "ssa", "vtt", "sub"];
 
 /// More than this at once is not a person opening things; the rest is ignored.

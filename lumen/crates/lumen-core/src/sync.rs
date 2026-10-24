@@ -927,6 +927,24 @@ pub(crate) async fn sync_with(pool: &Pool<Sqlite>, remote: &Remote) -> Result<Sy
     status(pool).await
 }
 
+/// Whether the debounce loop in `schedule` should run another cycle. Called only once a cycle's
+/// own `SYNC_AGAIN` check has already come back empty, so its job is narrower: a `schedule()`
+/// call that lands in the instant between clearing `SCHEDULED` and this recheck would otherwise
+/// see `SCHEDULED` still true, trust the (about-to-exit) loop to pick it up, and be silently
+/// dropped — the request's own `SYNC_AGAIN.store(true)` happens, but nothing ever looks at it
+/// again. Clearing `SCHEDULED` first and then checking `SYNC_AGAIN` once more closes that gap:
+/// if something did land there, the gate is reclaimed and the loop keeps going instead of
+/// stopping with a request still pending.
+fn end_cycle_or_continue(scheduled: &AtomicBool, sync_again: &AtomicBool) -> bool {
+    scheduled.store(false, Ordering::SeqCst);
+    if !sync_again.swap(false, Ordering::SeqCst) {
+        return false;
+    }
+    // Reclaim the gate so this loop runs again. If another `schedule()` call already grabbed it
+    // first (having seen it clear), that call's own fresh spawn will handle the request instead.
+    !scheduled.swap(true, Ordering::SeqCst)
+}
+
 /// Runs a sync shortly after a local change. A burst of saves becomes one sync, and a sync
 /// already waiting absorbs later changes.
 pub fn schedule(pool: &'static Pool<Sqlite>) {
@@ -943,11 +961,11 @@ pub fn schedule(pool: &'static Pool<Sqlite>) {
             if let Err(error) = sync_now(pool).await {
                 eprintln!("lumen: sync failed: {}", String::from(error));
             }
-            if !SYNC_AGAIN.load(Ordering::SeqCst) {
+            if !SYNC_AGAIN.load(Ordering::SeqCst) && !end_cycle_or_continue(&SCHEDULED, &SYNC_AGAIN)
+            {
                 break;
             }
         }
-        SCHEDULED.store(false, Ordering::SeqCst);
     });
 }
 

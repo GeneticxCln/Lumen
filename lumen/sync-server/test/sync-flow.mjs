@@ -99,6 +99,29 @@ const a = newGroup()
   check('claiming an existing group id with another token is refused', stolen.status === 409, String(stolen.status))
 }
 
+// 2b. Two requests racing to create the same brand-new group (the same client retrying) must
+// not have the loser see a raw constraint error instead of the same graceful response as a
+// normal repeat registration.
+{
+  const racer = newGroup()
+  const nonce = solve(racer.syncId)
+  const results = await Promise.all(Array.from({ length: 8 }, () => register(racer, nonce)))
+  // Whichever one actually wins (local dev's event loop may still serialize these enough that
+  // the existing pre-check catches the second one first, rather than both reaching the insert
+  // together - either outcome is fine), neither may ever see a raw constraint error.
+  check(
+    'both sides of a concurrent create-group race succeed, with no constraint error',
+    results.every((r) => r.status === 200 || r.status === 201),
+    JSON.stringify(results.map((r) => [r.status, r.json])),
+  )
+  check(
+    'and at least one of them reports having created it',
+    results.some((r) => r.json?.created === true),
+    JSON.stringify(results.map((r) => r.json)),
+  )
+  check('the group only actually exists once', (await pull(racer)).status === 200)
+}
+
 // 3. Authentication.
 {
   const none = await call('GET', '/v1/items')

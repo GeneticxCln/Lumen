@@ -206,13 +206,19 @@ pub async fn update_restart_cmd(app: AppHandle) -> Result<()> {
     let target = appimage_path()
         .ok_or_else(|| PlayerError::InvalidArg("There is no installed update to start".into()))?;
     // The new copy starts after this one has gone, or the single-instance guard would hand it
-    // over to this one and exit.
+    // over to this one and exit. A fixed sleep here is a guess at how long this process takes to
+    // shut down, which varies with the WebView engine, open connections and system load; poll
+    // this process's own pid instead, so the new copy starts the instant it actually exits
+    // rather than racing a guess that can come in too short. Capped at 10s so a stuck shutdown
+    // still gets a restart attempt rather than waiting forever.
+    let pid = std::process::id().to_string();
     let mut starter = std::process::Command::new("sh");
     lumen_core::child_env::scrub(&mut starter);
     starter
         .arg("-c")
-        .arg("sleep 1; exec \"$0\"")
+        .arg(r#"i=0; while kill -0 "$1" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i + 1)); done; exec "$0""#)
         .arg(target)
+        .arg(pid)
         .spawn()
         .map_err(|e| PlayerError::Io(e.to_string()))?;
     app.exit(0);

@@ -53,6 +53,22 @@ impl AttemptLimiter {
     pub fn record_success(&mut self, profile_id: i64) {
         self.entries.remove(&profile_id);
     }
+
+    /// Checks the lockout and, if the caller may proceed, immediately charges this call as a
+    /// failure before it does anything async. Without this, a caller checking the lockout, then
+    /// awaiting the (comparatively slow) PIN verification, then recording the result, leaves a
+    /// window open the whole time the check and the record are two separate steps: a burst of
+    /// concurrent guesses fired at once can all pass the check before any of them records a
+    /// failure, trying far more PINs than `FREE_ATTEMPTS` before the limiter notices any of
+    /// them. Charging the attempt up front, inside the one lock acquisition that also does the
+    /// check, bounds a concurrent burst the same way a sequential one already is. A correct
+    /// guess un-charges it via `record_success`, so getting it right on, say, the third try
+    /// still only ever costs what three sequential guesses would have.
+    pub fn begin_attempt(&mut self, profile_id: i64, now: Instant) -> Result<(), Duration> {
+        self.check(profile_id, now)?;
+        self.record_failure(profile_id, now);
+        Ok(())
+    }
 }
 
 static LIMITER: LazyLock<Mutex<AttemptLimiter>> = LazyLock::new(Default::default);
@@ -79,9 +95,48 @@ pub fn record_success(profile_id: i64) {
     limiter.record_success(profile_id);
 }
 
+/// `Err(remaining)` while locked out; otherwise this guess is already charged against the limit
+/// (see `AttemptLimiter::begin_attempt`) before the caller does anything async.
+pub fn begin_attempt(profile_id: i64) -> Result<(), Duration> {
+    let mut limiter = LIMITER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    limiter.begin_attempt(profile_id, Instant::now())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Proves the fix for the parallel-guess race: a check-then-record pattern across an
+    /// await point (as `authorize_profile` used to use) lets any number of concurrent guesses
+    /// through before the first one's result is recorded, since none of them observes any of
+    /// the others' failures until after the fact. `begin_attempt` charges the attempt in the
+    /// same lock acquisition as the check, so a burst can never get more tries than a
+    /// sequential run of guesses would.
+    #[test]
+    fn concurrent_guesses_cannot_outrun_the_limit() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let limiter = Arc::new(Mutex::new(AttemptLimiter::default()));
+        let now = Instant::now();
+        let handles: Vec<_> = (0..50)
+            .map(|_| {
+                let limiter = limiter.clone();
+                thread::spawn(move || limiter.lock().unwrap().begin_attempt(1, now).is_ok())
+            })
+            .collect();
+        let allowed = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(
+            allowed as u32, FREE_ATTEMPTS,
+            "a burst of concurrent guesses must not get more tries than a sequential one would"
+        );
+    }
 
     #[test]
     fn first_guesses_are_free_then_the_profile_locks() {
