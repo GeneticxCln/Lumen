@@ -99,6 +99,13 @@ export interface Playlist {
   updated_at: number;
 }
 
+/** How many channels a playlist refresh added, updated in place, or removed. */
+export interface RefreshStats {
+  added: number;
+  updated: number;
+  removed: number;
+}
+
 export interface LocalFile {
   name: string;
   path: string;

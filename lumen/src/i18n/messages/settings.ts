@@ -53,6 +53,8 @@ export const settings = {
   "settings.sources.removeNote": "Remove its channels and saved favorites? Original files stay untouched.",
   "settings.sources.confirmRemoval": "Confirm removal",
   "settings.sources.remove": "Remove",
+  "settings.sources.refresh": "Refresh now",
+  "settings.sources.refreshing": "Refreshing…",
 
   // --- My List ---
   "settings.mylist.intro": "Everything you saved with the + button, in one place.",
@@ -213,6 +215,7 @@ export const settings = {
   // --- Channel list ---
   "channels.playlistCount": "Playlist ({count})",
   "channels.deletePlaylist": "Delete selected playlist",
+  "channels.refreshDone": "Refreshed: {added} added, {updated} updated, {removed} removed.",
   "channels.noPlaylists": "No playlists imported",
   "channels.playlistOption": "{name} ({source})",
   "channels.search": "Search channels...",

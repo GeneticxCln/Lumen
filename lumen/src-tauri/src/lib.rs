@@ -134,6 +134,7 @@ pub fn run() {
             import_playlist_file,
             import_playlist_url,
             delete_playlist_cmd,
+            refresh_playlist_cmd,
             list_playlists_cmd,
             list_channels_cmd,
             search_engine,

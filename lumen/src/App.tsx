@@ -595,6 +595,7 @@ function App() {
         myList={myList}
         onAddSource={() => setShowSource(true)}
         onDeleteSource={library.handleDeletePlaylist}
+        onRefreshSource={library.handleRefreshPlaylist}
         onRefresh={() => { setRefresh((value) => value + 1); library.loadChannels(); }}
         onPlayChannel={(channel) => void play(channel)}
         onDetails={setDetails}

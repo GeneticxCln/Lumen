@@ -23,7 +23,7 @@ fn file_base_url(path: &Path) -> Option<String> {
 /// single entry pointing at the manifest itself. mpv resolves master/media playlists and
 /// their relative variant URIs natively; importing the manifest as channels would instead
 /// create bogus "channels" out of its segment URIs.
-fn parse_into_channels(
+pub(crate) fn parse_into_channels(
     content: &str,
     base_url: Option<&str>,
     origin: &str,

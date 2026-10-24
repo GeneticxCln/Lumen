@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { listPlaylists, listChannels, probeUrls, toggleFavorite, setCategoryOverride, listFavorites, deletePlaylist, errorMessage } from "../lib/tauri";
+import { listPlaylists, listChannels, probeUrls, toggleFavorite, setCategoryOverride, listFavorites, deletePlaylist, refreshPlaylist, errorMessage } from "../lib/tauri";
 import type { Channel, Playlist } from "../lib/types";
 import { filterChannels, type ContentKind } from "../lib/discovery";
-import { tn } from "../i18n/index.ts";
+import { t, tn } from "../i18n/index.ts";
 
 interface ChannelsOptions {
   /** Told when some (not all) sources failed to load, so the library still shows what did. */
@@ -21,6 +21,7 @@ export function useChannels(refreshTrigger = 0, options: ChannelsOptions = {}) {
   const [favoriteIds, setFavoriteIds] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
   const [probing, setProbing] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const reload = useCallback(() => setRevision((value) => value + 1), []);
@@ -132,7 +133,24 @@ export function useChannels(refreshTrigger = 0, options: ChannelsOptions = {}) {
     }
   }, [reload]);
 
+  const handleRefreshPlaylist = useCallback(async (id: number) => {
+    setRefreshing(true);
+    setError(null);
+    try {
+      const stats = await refreshPlaylist(id);
+      reload();
+      onNoticeRef.current?.(t("channels.refreshDone", stats));
+      return stats;
+    } catch (failure) {
+      setError(errorMessage(failure));
+      throw failure;
+    } finally {
+      setRefreshing(false);
+    }
+  }, [reload]);
+
   return { playlists, selectedPlaylistId, selectPlaylist, allChannels, channels, groups, selectedGroup, setSelectedGroup,
-    searchQuery, setSearchQuery, favoritesOnly, setFavoritesOnly, favoriteIds, loading, probing, error,
-    loadPlaylists: reload, loadChannels: reload, handleProbeVisible, handleToggleFavorite, handleSetCategoryOverride, handleDeletePlaylist };
+    searchQuery, setSearchQuery, favoritesOnly, setFavoritesOnly, favoriteIds, loading, probing, refreshing, error,
+    loadPlaylists: reload, loadChannels: reload, handleProbeVisible, handleToggleFavorite, handleSetCategoryOverride,
+    handleDeletePlaylist, handleRefreshPlaylist };
 }

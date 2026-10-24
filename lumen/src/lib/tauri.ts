@@ -37,6 +37,7 @@ import type {
   AddResult,
   UpdateMode,
   UpdateState,
+  RefreshStats,
 } from "./types";
 import type { PosterCandidate } from "./types";
 import type { ContentKind } from "./discovery";
@@ -250,6 +251,12 @@ export async function importPlaylistUrl(url: string, name?: string) {
 
 export async function deletePlaylist(playlistId: number) {
   return callBackend("delete_playlist_cmd", { playlistId });
+}
+
+/** Re-fetches a URL-imported playlist's source and merges the result into its existing
+ * channels in place. Refused for a playlist that was not imported from a URL. */
+export async function refreshPlaylist(playlistId: number) {
+  return callBackend<RefreshStats>("refresh_playlist_cmd", { playlistId });
 }
 
 export async function listPlaylists() {
