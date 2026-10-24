@@ -23,6 +23,7 @@ import { DEFAULT_PLAYER_STATE } from "../lib/types";
 import { clampScale, SUB_DELAY_STEP, SUB_SCALE_STEP } from "../lib/languages";
 import { t } from "../i18n/index.ts";
 import type { PlayerTrackKind } from "../lib/types";
+import { backoffDelayMs, isTransientPlaybackError, MAX_RETRIES } from "../lib/backoff.ts";
 
 interface PlayerOptions {
   /** Told when playback moves to another source by itself, so the user is not left guessing. */
@@ -46,6 +47,10 @@ export function usePlayer(options: PlayerOptions = {}) {
   const headersRef = useRef<Record<string, string> | undefined>(undefined);
   // The stream URL whose failure already triggered a fallback, so one failure moves on once.
   const fallbackFromRef = useRef<string | null>(null);
+  // How many same-source retries the current URL has already used, so the backoff schedule
+  // advances across repeated failures instead of restarting at attempt 1 every time.
+  const retryStateRef = useRef<{ url: string; attempt: number } | null>(null);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Bumped by anything that supersedes whatever is currently loading or playing (Stop, a new
   // channel, a new media item), so a slower-to-resolve fallback lookup started before it can tell
   // it has been overtaken and must not apply its result.
@@ -53,6 +58,20 @@ export function usePlayer(options: PlayerOptions = {}) {
   const reportError = useCallback((failure: unknown) => {
     setPlayerState((previous) => ({ ...previous, error: errorMessage(failure) }));
   }, []);
+  const clearPendingRetry = useCallback(() => {
+    if (retryTimerRef.current !== null) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+    retryStateRef.current = null;
+  }, []);
+
+  // Bumped whenever the backend reports a playback error, even one with the exact same message
+  // as last time (two same-source retries can fail identically) — plain `playerState.error`
+  // wouldn't change in that case, so the retry/fallback effect below depends on this instead.
+  const [errorTick, setErrorTick] = useState(0);
+
+  useEffect(() => clearPendingRetry, [clearPendingRetry]);
 
   useEffect(() => {
     const unlistenPromise = onPlayerState((state) => {
@@ -61,6 +80,7 @@ export function usePlayer(options: PlayerOptions = {}) {
         currentTitleRef.current = state.title;
         setCurrentTitle(state.title);
       }
+      if (state.error) setErrorTick((n) => n + 1);
     });
     unlistenPromise.catch(reportError);
     return () => {
@@ -68,12 +88,50 @@ export function usePlayer(options: PlayerOptions = {}) {
     };
   }, [reportError]);
 
-  // When the current stream fails, move to the next ranked source of the same title, if any.
+  // A clean resumption of playback (buffering finished, no error) on the URL a retry was tracking
+  // resets its attempt budget, so a stream that drops again later gets a fresh set of retries
+  // rather than picking up where an earlier, unrelated failure left off.
   useEffect(() => {
-    const failedUrl = progressRef.current.currentUrl;
-    if (!playerState.error || !failedUrl || fallbackFromRef.current === failedUrl) return;
-    fallbackFromRef.current = failedUrl;
+    if (playerState.buffering || playerState.error) return;
+    if (retryStateRef.current?.url === progressRef.current.currentUrl) retryStateRef.current = null;
+  }, [playerState.buffering, playerState.error]);
+
+  // When the current stream fails, first try the same URL again a few times with backoff — mpv's
+  // own --stream-lavf-o reconnect flags (see mpv_ipc.rs) handle most drops on their own, so by the
+  // time this sees an error mpv has already given up — before moving to the next ranked source.
+  useEffect(() => {
+    const current = progressRef.current;
+    const failedUrl = current.currentUrl;
+    const message = current.playerState.error;
+    if (!message || !failedUrl || fallbackFromRef.current === failedUrl) return;
     const epoch = playEpochRef.current;
+
+    const previousRetry = retryStateRef.current;
+    const attempt = previousRetry && previousRetry.url === failedUrl ? previousRetry.attempt + 1 : 1;
+
+    if (isTransientPlaybackError(message) && attempt <= MAX_RETRIES) {
+      retryStateRef.current = { url: failedUrl, attempt };
+      const headers = headersRef.current;
+      const channelId = current.currentChannelId;
+      onNoticeRef.current?.(t("lib.notice.reconnecting", { title: currentTitleRef.current ?? t("lib.notice.thisTitle") }));
+      retryTimerRef.current = setTimeout(() => {
+        retryTimerRef.current = null;
+        // Superseded by a Stop, a new channel, or a new media item while this was pending: that
+        // action already took its own, more recent action, and must not be undone by this one.
+        if (playEpochRef.current !== epoch) return;
+        playUrl(failedUrl, headers, channelId)
+          .then(() => {
+            if (playEpochRef.current !== epoch) return;
+            setPlayerState((prev) => ({ ...prev, paused: false, time: 0, duration: 0, buffering: true, error: undefined }));
+          })
+          .catch(reportError);
+      }, backoffDelayMs(attempt));
+      return;
+    }
+
+    // Not a transient failure, or the retry budget for this URL is spent: move on, same as before.
+    fallbackFromRef.current = failedUrl;
+    retryStateRef.current = null;
     nextFallbackSource(failedUrl)
       .then(async (next) => {
         // Superseded by a Stop, a new channel, or a new media item while this was in flight: that
@@ -95,7 +153,7 @@ export function usePlayer(options: PlayerOptions = {}) {
         }));
       })
       .catch(reportError);
-  }, [playerState.error, reportError]);
+  }, [errorTick, reportError]);
 
   // Periodically persist playback progress for resumable media
   useEffect(() => {
@@ -128,6 +186,7 @@ export function usePlayer(options: PlayerOptions = {}) {
       }
     }
     fallbackFromRef.current = null;
+    clearPendingRetry();
     playEpochRef.current += 1;
     await playUrl(channel.url, parsedHeaders, channel.id, startVolume);
     applyStartVolume(startVolume);
@@ -145,11 +204,12 @@ export function usePlayer(options: PlayerOptions = {}) {
       error: undefined,
     }));
 
-  }, [applyStartVolume]);
+  }, [applyStartVolume, clearPendingRetry]);
 
   const playMedia = useCallback(
     async (url: string, title?: string, headers?: Record<string, string>, startVolume?: number, audioUrl?: string, channelId?: number) => {
       fallbackFromRef.current = null;
+      clearPendingRetry();
       playEpochRef.current += 1;
       await playUrl(url, headers, channelId, startVolume, audioUrl);
       applyStartVolume(startVolume);
@@ -169,7 +229,7 @@ export function usePlayer(options: PlayerOptions = {}) {
       }));
 
     },
-    [applyStartVolume]
+    [applyStartVolume, clearPendingRetry]
   );
 
   const togglePause = useCallback(async () => {
@@ -222,6 +282,8 @@ export function usePlayer(options: PlayerOptions = {}) {
 
   const stopPlayback = useCallback(async () => {
     playEpochRef.current += 1;
+    clearPendingRetry();
+    fallbackFromRef.current = null;
     if (currentUrl && playerState.time > 1 && playerState.duration > 0) {
       await saveProgress(
         currentUrl,
@@ -237,7 +299,7 @@ export function usePlayer(options: PlayerOptions = {}) {
     setCurrentUrl(null);
     setCurrentChannelId(undefined);
     setPlayerState(DEFAULT_PLAYER_STATE);
-  }, [currentUrl, currentChannelId, playerState.time, playerState.duration, reportError]);
+  }, [currentUrl, currentChannelId, playerState.time, playerState.duration, reportError, clearPendingRetry]);
 
   const selectTrack = useCallback(async (kind: PlayerTrackKind, id: string) => {
     await setPlayerTrackCmd(kind, id);
