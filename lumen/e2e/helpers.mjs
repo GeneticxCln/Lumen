@@ -19,7 +19,19 @@ const VITE_PORT = 1420; // must match tauri.conf.json's "devUrl"
 const DRIVER_PORT = 4545;
 const DRIVER_NATIVE_PORT = 4546;
 
-function waitForHttp(url, timeoutMs) {
+/** Captures a spawned child's stdout/stderr so a startup failure or timeout can report *why*
+ * instead of just that it didn't happen in time — piped-but-unread output is otherwise silently
+ * discarded, which is exactly what made the first real CI run of this harness unnecessarily hard
+ * to diagnose (a bare "timed out waiting for http://127.0.0.1:1420" with no clue why). */
+function captureOutput(child) {
+  const chunks = [];
+  const collect = (chunk) => chunks.push(chunk.toString());
+  child.stdout?.on("data", collect);
+  child.stderr?.on("data", collect);
+  return () => chunks.join("");
+}
+
+function waitForHttp(url, timeoutMs, describeFailure) {
   const deadline = Date.now() + timeoutMs;
   const attempt = async () => {
     try {
@@ -27,7 +39,12 @@ function waitForHttp(url, timeoutMs) {
       await res.body?.cancel();
       return;
     } catch {
-      if (Date.now() > deadline) throw new Error(`timed out waiting for ${url}`);
+      if (Date.now() > deadline) {
+        const extra = describeFailure?.();
+        throw new Error(
+          `timed out waiting for ${url}` + (extra ? `\n--- output so far ---\n${extra}` : ""),
+        );
+      }
       await new Promise((resolve) => setTimeout(resolve, 500));
       return attempt();
     }
@@ -55,9 +72,12 @@ export async function startEnvironment(dataDir, extraEnv = {}) {
     cwd: repoRoot,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  const viteOutput = captureOutput(vite);
   const xvfb = spawn("Xvfb", [DISPLAY, "-screen", "0", "1280x800x24"], { stdio: ["ignore", "pipe", "pipe"] });
 
-  await waitForHttp(`http://127.0.0.1:${VITE_PORT}`, 30_000);
+  // A cold CI runner right after a multi-minute cargo build is slower to get Vite's dev server
+  // listening than this harness ever saw locally; give it real headroom rather than guessing.
+  await waitForHttp(`http://127.0.0.1:${VITE_PORT}`, 90_000, viteOutput);
 
   const driver = spawn(
     "tauri-driver",
