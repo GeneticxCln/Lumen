@@ -622,3 +622,19 @@ export function onPlayerState(callback: (state: PlayerState) => void) {
     callback(event.payload);
   });
 }
+
+// Diagnostics
+/** The last few log lines, for a "copy diagnostics" affordance. */
+export async function diagnosticsTail(lines?: number) {
+  return callBackend<string>("diagnostics_tail_cmd", { lines });
+}
+
+/** Where the log files live, so the UI can offer to reveal them in a file manager. */
+export async function diagnosticsLogPath() {
+  return callBackend<string>("diagnostics_log_path_cmd");
+}
+
+/** Reports an uncaught frontend error so it lands in the same log as backend crashes. */
+export async function frontendCrashLog(message: string, stack?: string) {
+  return callBackend<void>("frontend_crash_log_cmd", { message, stack });
+}

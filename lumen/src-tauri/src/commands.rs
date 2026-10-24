@@ -1970,6 +1970,39 @@ pub async fn tmdb_clear_enrichment(app: AppHandle) -> Result<serde_json::Value> 
     Ok(serde_json::json!({ "cleared": cleared }))
 }
 
+/// The last few log lines, for a "copy diagnostics" affordance in Settings/About.
+#[tauri::command]
+pub async fn diagnostics_tail_cmd(lines: Option<usize>, app: AppHandle) -> Result<String> {
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| PlayerError::Io(e.to_string()))?;
+    lumen_core::diagnostics::tail(&app_dir, lines.unwrap_or(200)).await
+}
+
+/// The log directory's path, so the UI can offer to reveal it in a file manager.
+#[tauri::command]
+pub fn diagnostics_log_path_cmd(app: AppHandle) -> Result<String> {
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| PlayerError::Io(e.to_string()))?;
+    Ok(lumen_core::diagnostics::log_dir(&app_dir)
+        .to_string_lossy()
+        .into_owned())
+}
+
+/// Logs an uncaught frontend error (React error boundary, `window.onerror`, or an unhandled
+/// promise rejection) through the same pipe as backend logs, so a crash with a blank window
+/// still leaves a record.
+#[tauri::command]
+pub fn frontend_crash_log_cmd(message: String, stack: Option<String>) {
+    match stack {
+        Some(stack) => tracing::error!(target: "frontend", %stack, "{message}"),
+        None => tracing::error!(target: "frontend", "{message}"),
+    }
+}
+
 #[cfg(test)]
 mod local_path_tests {
     use super::{
