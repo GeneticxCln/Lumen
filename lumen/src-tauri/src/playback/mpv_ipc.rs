@@ -287,14 +287,12 @@ impl MpvIpcBackend {
         Ok(socket_path)
     }
 
-    pub async fn new(
-        app: Option<AppHandle>,
-        hwdec: &str,
-        cache: &str,
-        extra_args: &str,
-    ) -> Result<Self> {
-        let socket_path = Self::new_socket_path()?;
-
+    /// Builds the mpv `Command` (arguments only — no stdio/env/spawn, so this is testable without
+    /// a real mpv binary). `--network-timeout` and `--stream-lavf-o`'s reconnect options are
+    /// libavformat HTTP/HLS settings: a harmless no-op for local files, and placed before
+    /// `extra_args` so a user's own arguments can still override them (mpv's own parsing takes
+    /// the last occurrence of an option).
+    fn build_command(socket_path: &str, hwdec: &str, cache: &str, extra_args: &str) -> Command {
         let hwdec_arg = format!(
             "--hwdec={}",
             if hwdec.is_empty() { "auto-safe" } else { hwdec }
@@ -317,6 +315,8 @@ impl MpvIpcBackend {
             "--sub-file-paths=subs:Subs:subtitles:Subtitles",
             // Warnings and errors only, kept (see `MpvLog`) to explain a start that fails.
             "--msg-level=all=warn",
+            "--network-timeout=10",
+            "--stream-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_delay_max=7,reconnect_at_eof=1",
         ]);
 
         if !extra_args.trim().is_empty() {
@@ -324,6 +324,17 @@ impl MpvIpcBackend {
                 mpv_cmd.arg(arg);
             }
         }
+        mpv_cmd
+    }
+
+    pub async fn new(
+        app: Option<AppHandle>,
+        hwdec: &str,
+        cache: &str,
+        extra_args: &str,
+    ) -> Result<Self> {
+        let socket_path = Self::new_socket_path()?;
+        let mut mpv_cmd = Self::build_command(&socket_path, hwdec, cache, extra_args);
 
         // Inside an AppImage, mpv must not load the AppImage's copies of system libraries.
         lumen_core::child_env::scrub(mpv_cmd.as_std_mut());
@@ -1014,6 +1025,51 @@ impl Drop for MpvIpcBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn args_of(cmd: &Command) -> Vec<String> {
+        cmd.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn reconnect_flags_are_present_and_come_before_the_users_own_arguments() {
+        let cmd =
+            MpvIpcBackend::build_command("/tmp/lumen-test.sock", "", "", "--no-audio --vid=2");
+        let args = args_of(&cmd);
+
+        let network_timeout = args.iter().position(|a| a == "--network-timeout=10");
+        let reconnect = args.iter().position(|a| {
+            a == "--stream-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_delay_max=7,reconnect_at_eof=1"
+        });
+        let first_user_arg = args.iter().position(|a| a == "--no-audio");
+
+        assert!(
+            network_timeout.is_some(),
+            "expected --network-timeout, got {args:?}"
+        );
+        assert!(
+            reconnect.is_some(),
+            "expected the reconnect stream-lavf-o flag, got {args:?}"
+        );
+        assert!(
+            network_timeout.unwrap() < first_user_arg.unwrap()
+                && reconnect.unwrap() < first_user_arg.unwrap(),
+            "reconnect flags must come before extra_args, so a user can still override them: {args:?}"
+        );
+    }
+
+    #[test]
+    fn reconnect_flags_are_present_even_with_no_extra_args() {
+        let cmd = MpvIpcBackend::build_command("/tmp/lumen-test.sock", "auto-safe", "yes", "");
+        let args = args_of(&cmd);
+        assert!(args.contains(&"--network-timeout=10".to_string()));
+        assert!(
+            args.iter()
+                .any(|a| a.starts_with("--stream-lavf-o=reconnect=1"))
+        );
+    }
 
     #[tokio::test]
     async fn a_player_that_exits_at_once_is_reported_with_what_it_printed() {
