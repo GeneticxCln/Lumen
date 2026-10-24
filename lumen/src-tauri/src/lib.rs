@@ -58,11 +58,19 @@ pub fn run() {
             #[cfg(target_os = "linux")]
             mpris::start(app.handle().clone());
             let app_handle = app.handle().clone();
+            if let Ok(app_dir) = app_handle.path().app_data_dir() {
+                match lumen_core::diagnostics::init(&app_dir) {
+                    Ok(guard) => {
+                        app.manage(guard);
+                    }
+                    Err(e) => eprintln!("Failed to init diagnostics logging: {}", e),
+                }
+            }
             tauri::async_runtime::spawn(async move {
                 if let Ok(app_dir) = app_handle.path().app_data_dir() {
                     let _ = std::fs::create_dir_all(&app_dir);
                     if let Err(e) = init_db(&app_dir).await {
-                        eprintln!("Failed to init database: {}", e);
+                        tracing::error!(error = %e, "failed to init database");
                     } else if let Ok(pool) = ensure_db(&app_handle).await {
                         privacy::init(&app_handle).await;
                         apply_webview_proxy(&app_handle);
@@ -166,6 +174,9 @@ pub fn run() {
             tmdb_enrich,
             tmdb_browse,
             tmdb_clear_enrichment,
+            diagnostics_tail_cmd,
+            diagnostics_log_path_cmd,
+            frontend_crash_log_cmd,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

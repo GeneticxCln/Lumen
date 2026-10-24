@@ -5,6 +5,7 @@ pub mod cast;
 pub mod child_env;
 pub mod content_key;
 pub mod db;
+pub mod diagnostics;
 pub mod error;
 pub mod extract;
 pub mod harvest;

@@ -12,6 +12,10 @@ export const base = {
   "common.off": "Off",
   "common.playerDefault": "Player default",
 
+  "errorBoundary.title": "Something went wrong",
+  "errorBoundary.body": "Lumen hit an unexpected error and this screen couldn't continue. The details were written to the log file.",
+  "errorBoundary.reload": "Reload Lumen",
+
   "modal.eyebrow": "LUMEN / YOUR SPACE",
   "modal.close": "Close {title}",
 
