@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::LazyLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
@@ -455,6 +455,14 @@ pub fn run_capped_with_timeout(
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
+    // Set the moment the cap is hit, so the wait loop below can kill the child right away
+    // instead of only noticing once its own, much longer time limit expires. Once this thread
+    // stops reading, the child's next write to a (small, OS-buffered) stdout pipe blocks
+    // forever with nobody draining it - without this flag, that leaves it alive and unkillable
+    // in practice until the full timeout, however fast it actually produced too much output.
+    let overflowed = Arc::new(AtomicBool::new(false));
+    let overflowed_writer = overflowed.clone();
+
     let stdout_handle = thread::spawn(move || -> std::result::Result<Vec<u8>, String> {
         let mut buf = Vec::new();
         if let Some(mut pipe) = stdout_pipe {
@@ -464,6 +472,7 @@ pub fn run_capped_with_timeout(
                     Ok(0) => break,
                     Ok(n) => {
                         if buf.len() + n > max_stdout_bytes {
+                            overflowed_writer.store(true, Ordering::SeqCst);
                             return Err(format!(
                                 "Output exceeded the {max_stdout_bytes} byte limit"
                             ));
@@ -490,7 +499,8 @@ pub fn run_capped_with_timeout(
     let status = loop {
         match child.try_wait()? {
             Some(status) => break status,
-            None if Instant::now() >= deadline => {
+            None if overflowed.load(Ordering::SeqCst) || Instant::now() >= deadline => {
+                let hit_cap = overflowed.load(Ordering::SeqCst);
                 #[cfg(unix)]
                 let _ = nix::sys::signal::killpg(
                     nix::unistd::Pid::from_raw(child.id() as i32),
@@ -499,10 +509,14 @@ pub fn run_capped_with_timeout(
                 let _ = child.kill();
                 let _ = child.wait();
                 drop((stdout_handle, stderr_handle));
-                return Err(PlayerError::Io(format!(
-                    "{program} did not finish within {} seconds and was stopped",
-                    limit.as_secs()
-                )));
+                return Err(if hit_cap {
+                    PlayerError::Parse(format!("Output exceeded the {max_stdout_bytes} byte limit"))
+                } else {
+                    PlayerError::Io(format!(
+                        "{program} did not finish within {} seconds and was stopped",
+                        limit.as_secs()
+                    ))
+                });
             }
             None => thread::sleep(Duration::from_millis(20)),
         }
@@ -777,6 +791,30 @@ mod tests {
         );
         assert_eq!(args[proxy_flag + 1], "http://lumen:tok@127.0.0.1:12345");
         assert_eq!(args.last().unwrap(), "https://example.com/watch");
+    }
+
+    /// A process that blows through the output cap almost immediately must be killed right
+    /// away, not left running (blocked writing to a pipe nobody drains any more) until the
+    /// unrelated, much longer time limit finally notices. Regression test for the race where
+    /// only the timeout branch ever actually killed the child.
+    #[test]
+    fn a_process_that_exceeds_the_output_cap_is_killed_promptly_not_after_the_full_timeout() {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("while true; do echo 0123456789; done");
+        let started = Instant::now();
+        let result = run_capped_with_timeout(command, Duration::from_secs(20), 100);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "should be killed as soon as the cap is hit, not wait anywhere near the 20s timeout: took {elapsed:?}"
+        );
+        let error = String::from(result.unwrap_err());
+        assert!(
+            error.contains("exceeded") && error.contains("100 byte"),
+            "{error}"
+        );
     }
 
     #[test]

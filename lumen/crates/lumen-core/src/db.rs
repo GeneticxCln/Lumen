@@ -48,6 +48,14 @@ pub async fn init_db(app_dir: &Path) -> Result<Pool<Sqlite>> {
     // instead. `busy_timeout` makes a write wait for a few seconds when another connection is
     // mid-transaction rather than failing at once with "database is locked", which otherwise a
     // user can hit from two ordinary actions (e.g. favoriting a channel while sync is writing).
+    // `journal_mode` is actually stored in the database file itself and so only needs setting
+    // once, but it is cheap to repeat and keeps this pool self-sufficient regardless of whatever
+    // mode an existing file happens to already be in. WAL lets readers run concurrently with a
+    // writer instead of a writer blocking every reader for the length of its transaction — the
+    // default rollback-journal mode's behavior, which `busy_timeout` only ever papers over with
+    // a wait-and-retry, not real concurrency. `synchronous = NORMAL` is WAL's standard pairing:
+    // still durable against an application crash, and only loses the last few commits (never
+    // corrupts the database) in the OS/power-loss case WAL is not already safe against.
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .after_connect(|conn, _meta| {
@@ -56,6 +64,12 @@ pub async fn init_db(app_dir: &Path) -> Result<Pool<Sqlite>> {
                     .execute(&mut *conn)
                     .await?;
                 sqlx::query("PRAGMA busy_timeout = 5000;")
+                    .execute(&mut *conn)
+                    .await?;
+                sqlx::query("PRAGMA journal_mode = WAL;")
+                    .execute(&mut *conn)
+                    .await?;
+                sqlx::query("PRAGMA synchronous = NORMAL;")
                     .execute(&mut *conn)
                     .await?;
                 Ok(())
@@ -1320,7 +1334,11 @@ pub async fn authorize_profile(
     profile_id: i64,
     pin: Option<&str>,
 ) -> Result<()> {
-    if let Some(wait) = pin_guard::locked_out_for(profile_id) {
+    // Checking the lockout and charging this attempt happen together, before the (comparatively
+    // slow, async) PIN verification below: a caller that checked first and only recorded the
+    // result afterward would leave a window where a burst of concurrent guesses can all pass
+    // the check before any of them is recorded, trying far more PINs than the limit intends.
+    if let Err(wait) = pin_guard::begin_attempt(profile_id) {
         return Err(PlayerError::InvalidArg(format!(
             "Too many wrong PINs. Try again in {} seconds.",
             wait.as_secs().max(1)
@@ -1330,7 +1348,6 @@ pub async fn authorize_profile(
         pin_guard::record_success(profile_id);
         Ok(())
     } else {
-        pin_guard::record_failure(profile_id);
         Err(PlayerError::InvalidArg(
             "That PIN is not correct".to_string(),
         ))

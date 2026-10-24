@@ -158,14 +158,24 @@ async function createGroup(request: Request, env: Env): Promise<Response> {
     env.DB.prepare('DELETE FROM sync_seq WHERE sync_id IN (SELECT sync_id FROM sync_groups WHERE last_seen_at < ?)').bind(cutoff),
     env.DB.prepare('DELETE FROM sync_groups WHERE last_seen_at < ?').bind(cutoff),
     env.DB.prepare('DELETE FROM group_creations WHERE day < ?').bind(day - 2),
-    env.DB.prepare('INSERT INTO sync_groups (sync_id, verifier, created_at, last_seen_at) VALUES (?, ?, ?, ?)').bind(
-      syncId,
-      verifier,
-      now,
-      now,
-    ),
+    // `ON CONFLICT ... DO NOTHING`, not a bare INSERT: the `existing` check above ran before
+    // this write, so two requests racing to create the same new group (the same client's own
+    // retry arriving twice, in practice) can both reach here. A bare INSERT would have the
+    // loser throw a UNIQUE-constraint error instead of the graceful "already registered"
+    // response this endpoint is otherwise designed to give on a repeat registration.
+    env.DB.prepare(
+      'INSERT INTO sync_groups (sync_id, verifier, created_at, last_seen_at) VALUES (?, ?, ?, ?) ON CONFLICT (sync_id) DO NOTHING',
+    ).bind(syncId, verifier, now, now),
     env.DB.prepare('INSERT INTO sync_seq (sync_id, value) VALUES (?, 0) ON CONFLICT (sync_id) DO NOTHING').bind(syncId),
   ])
+  // Whichever request actually won the race, settle on what is in the table now: the same
+  // verifier means this registration (ours or a concurrent twin's) succeeded; a different one
+  // means we lost a genuine id collision to someone else, the same outcome the pre-check above
+  // already gives a non-racing conflict.
+  const settled = await env.DB.prepare('SELECT verifier FROM sync_groups WHERE sync_id = ?')
+    .bind(syncId)
+    .first<{ verifier: string }>()
+  if (!settled || !constantTimeEqual(settled.verifier, verifier)) return json({ error: 'conflict' }, 409)
   return json({ created: true }, 201)
 }
 

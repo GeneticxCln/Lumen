@@ -1443,15 +1443,21 @@ fn poster_frame_seconds_from(stored: Option<String>) -> u32 {
         .unwrap_or(DEFAULT_POSTER_FRAME_SECONDS)
 }
 
-const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "webm", "ts", "m2ts"];
-
 fn is_video_path(path: &Path) -> bool {
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("")
         .to_lowercase();
-    VIDEO_EXTENSIONS.contains(&extension.as_str())
+    lumen_core::launch::VIDEO_EXT.contains(&extension.as_str())
+}
+
+/// What the Local Device folder browser lists, in step with what `launch.rs`'s "Open with
+/// Lumen" classifier (and so the OS file associations) recognize.
+fn is_browsable_media(ext: &str) -> bool {
+    lumen_core::launch::VIDEO_EXT.contains(&ext)
+        || lumen_core::launch::AUDIO_EXT.contains(&ext)
+        || lumen_core::launch::PLAYLIST_EXT.contains(&ext)
 }
 
 /// The frame chosen for one file, or None when it follows the global setting.
@@ -1758,24 +1764,7 @@ pub async fn list_local_dir(path: String, _app: AppHandle) -> Result<Vec<LocalFi
         if entry_path.is_file() {
             if let Some(ext) = entry_path.extension().and_then(|s| s.to_str()) {
                 let ext = ext.to_lowercase();
-                if matches!(
-                    ext.as_str(),
-                    "mp4"
-                        | "mkv"
-                        | "avi"
-                        | "mov"
-                        | "webm"
-                        | "ts"
-                        | "m2ts"
-                        | "mp3"
-                        | "flac"
-                        | "wav"
-                        | "ogg"
-                        | "opus"
-                        | "m4a"
-                        | "m3u"
-                        | "m3u8"
-                ) {
+                if is_browsable_media(&ext) {
                     files.push(LocalFile {
                         name: file_name,
                         path: entry_path.to_string_lossy().to_string(),
@@ -1986,13 +1975,37 @@ mod local_path_tests {
     use super::{
         FFMPEG_SLOTS, POSTER_FRAME_CHOICES, POSTER_FRAME_SETTING, expand_home,
         generate_local_filmstrip, generate_local_thumbnail, get_file_poster_frame, home_dir,
-        parse_poster_frame_seconds, poster_frame_seconds_from, render_poster_candidates,
-        resolve_poster_frame, save_file_poster_frame, set_poster_frame_seconds,
+        is_browsable_media, is_video_path, parse_poster_frame_seconds, poster_frame_seconds_from,
+        render_poster_candidates, resolve_poster_frame, save_file_poster_frame,
+        set_poster_frame_seconds,
     };
     use crate::db::{get_setting, set_setting};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
     use std::{fs, thread};
+
+    /// Every extension the Local Device folder browser and the poster-generation gate
+    /// recognize must agree with `launch.rs`'s "Open with Lumen" classifier (and so with what
+    /// the OS itself will hand Lumen via `tauri.conf.json`'s `fileAssociations`), not drift
+    /// into their own, shorter copies.
+    #[test]
+    fn the_folder_browser_and_poster_gate_recognize_everything_open_with_does() {
+        for ext in lumen_core::launch::VIDEO_EXT {
+            assert!(is_browsable_media(ext), "folder browser should list .{ext}");
+            assert!(
+                is_video_path(Path::new(&format!("clip.{ext}"))),
+                ".{ext} should be a video"
+            );
+        }
+        for ext in lumen_core::launch::AUDIO_EXT {
+            assert!(is_browsable_media(ext), "folder browser should list .{ext}");
+        }
+        for ext in lumen_core::launch::PLAYLIST_EXT {
+            assert!(is_browsable_media(ext), "folder browser should list .{ext}");
+        }
+        assert!(!is_browsable_media("txt"));
+        assert!(!is_video_path(Path::new("notes.txt")));
+    }
 
     #[test]
     fn expands_tilde_home_paths_without_rewriting_other_paths() {

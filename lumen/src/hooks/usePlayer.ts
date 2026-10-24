@@ -173,8 +173,14 @@ export function usePlayer(options: PlayerOptions = {}) {
   );
 
   const togglePause = useCallback(async () => {
+    // The target is decided now, from the state at the moment of the click, not from `prev`
+    // inside the updater below: a real `player://state` push (mpv emits one on every property
+    // change) can land while `pauseCmd` is still in flight and already apply the new paused
+    // value, so toggling `prev.paused` after the await could flip it straight back to the wrong
+    // state. Setting the decided target instead makes that push a harmless no-op either way.
+    const target = !progressRef.current.playerState.paused;
     await pauseCmd();
-    setPlayerState((prev) => ({ ...prev, paused: !prev.paused }));
+    setPlayerState((prev) => ({ ...prev, paused: target }));
   }, []);
 
   const seekTo = useCallback(async (seconds: number) => {

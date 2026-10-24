@@ -69,9 +69,14 @@ pub fn parse_upstream(raw: &str) -> Result<Upstream> {
             )));
         }
     };
+    // `Url::host_str()` keeps an IPv6 literal's brackets (`"[::1]"`), which is correct inside a
+    // URL authority but not a bare address: `TcpStream::connect` doesn't understand bracket
+    // notation on its own and would try to resolve the literal text "[::1]" as a hostname.
     let host = url
         .host_str()
         .ok_or_else(|| PlayerError::InvalidArg("The proxy address needs a host".into()))?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
         .to_string();
     let port = url.port().ok_or_else(|| {
         PlayerError::InvalidArg("Include the port, for example socks5://127.0.0.1:9050".to_string())
@@ -280,6 +285,21 @@ mod tests {
             socks,
             "surrounding whitespace is trimmed"
         );
+    }
+
+    #[test]
+    fn single_label_hosts_and_ipv6_literals_parse() {
+        let bare = parse_upstream("socks5://myproxy:1080").unwrap();
+        assert_eq!(
+            bare.host, "myproxy",
+            "a dotless LAN hostname is a valid host"
+        );
+
+        let v6 = parse_upstream("socks5://[::1]:9050").unwrap();
+        assert_eq!(v6.host, "::1", "an IPv6 literal must come back unbracketed");
+
+        let v6_full = parse_upstream("http://[2001:db8::1]:3128").unwrap();
+        assert_eq!(v6_full.host, "2001:db8::1");
     }
 
     #[test]
