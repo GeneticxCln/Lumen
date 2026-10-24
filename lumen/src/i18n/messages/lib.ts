@@ -47,6 +47,7 @@ export const lib = {
   "lib.aired.daysAgo": "{code} aired {days} days ago",
 
   "lib.notice.sourceFailed": "{title} failed to play from that source, so Lumen switched to another one.",
+  "lib.notice.reconnecting": "{title} dropped its connection, reconnecting…",
   "lib.notice.thisTitle": "This title",
 
   "lib.units.bytes": "{value} B",
