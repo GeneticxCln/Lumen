@@ -120,7 +120,7 @@ Once it is on, Lumen's own metadata requests, mpv's playback, yt-dlp's extractio
 
 ## Sync
 
-Sync is optional and there are no accounts. The library, files, and playback all work without it.
+Sync is optional and there are no accounts. The library, files, and playback all work without it. Official builds use a sync server we run by default, so there's nothing to deploy to try it; self-host your own instead if you'd rather not rely on it (see below).
 
 Turn it on in **Settings → Profiles & sync**. Lumen makes a random secret key on that device and shows it once (14 groups of four characters, with a checksum so a typo is caught). On another device choose **Add this device** and type the key. Nothing else is exchanged: no email, no sign-in page, no code that can expire.
 
@@ -156,7 +156,7 @@ A server can also refuse to answer, drop records, or serve an older valid copy o
 
 ### Running your own sync server
 
-The server is a small Cloudflare Worker with a D1 database in `sync-server/`. Deploy it with `npx wrangler d1 create lumen-sync`, put the database id in `sync-server/wrangler.jsonc`, and run `npx wrangler deploy`. Enter its address in **Settings → Profiles & sync → Sync server**, or build Lumen with `LUMEN_SYNC_URL=https://your-server` to make it the default.
+Official builds default to a sync server we run — the same encrypted-blind design described above applies to it, so it learns nothing a self-hosted one wouldn't also learn. If you'd rather not rely on it, you can run your own instead: the server is a small Cloudflare Worker with a D1 database in `sync-server/`. Deploy it with `npx wrangler d1 create lumen-sync`, put the database id in `sync-server/wrangler.jsonc`, and run `npx wrangler deploy`. Enter its address in **Settings → Profiles & sync → Sync server** to use it instead of the default, on any device you want to use it from — it replaces the default there, nothing more.
 
 ## Translating Lumen
 
@@ -185,7 +185,7 @@ Layout:
 | `lumen/packaging` | Flatpak manifest, Arch `PKGBUILD`, desktop file and app data. |
 | `.github/workflows` | CI, packaging and release workflows. |
 
-`npx tauri build --bundles deb,appimage` (from `lumen/`) produces a `.deb` and an AppImage in `target/release/bundle/`. Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds both and attaches them, with a `SHA256SUMS` file, to a published GitHub release (a tag with a suffix such as `v0.2.0-rc.1` becomes a pre-release, which the updater ignores). Lumen updates itself from the latest published release, so a tag is a release: check the version in `tauri.conf.json` and `Cargo.toml` matches it first. Set the repository variable `LUMEN_SYNC_URL` to bake in a default sync server.
+`npx tauri build --bundles deb,appimage` (from `lumen/`) produces a `.deb` and an AppImage in `target/release/bundle/`. Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds both and attaches them, with a `SHA256SUMS` file, to a published GitHub release (a tag with a suffix such as `v0.2.0-rc.1` becomes a pre-release, which the updater ignores). Lumen updates itself from the latest published release, so a tag is a release: check the version in `tauri.conf.json` and `Cargo.toml` matches it first. The repository variable `LUMEN_SYNC_URL` bakes in a default sync server for builds `release.yml` produces (GitHub Settings → Secrets and variables → Actions → Variables; it's a plain URL, not a secret) — a local dev build or a fork without it set has no default, and sync asks for a server address before it can turn on.
 
 ## Checks
 
