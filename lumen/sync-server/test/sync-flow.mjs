@@ -268,6 +268,48 @@ await register(bulk)
   check('a push that only re-syncs already-held items is accepted at a full group', resync.status === 200, String(resync.status))
 }
 
+// 7b. The atomic-quota fix: several concurrent pushes to a group with exactly enough headroom
+// for one of them must never let the group end up over the cap between them, and neither side
+// of the race may see anything but a clean 200 or 413 - never a raw constraint error from two
+// writers racing the same check.
+{
+  const race = newGroup()
+  await register(race)
+  const headroom = 10
+  const seedCount = MAX_ITEMS - headroom
+  for (let start = 0; start < seedCount; start += 500) {
+    await push(race, Array.from({ length: Math.min(500, seedCount - start) }, (_, n) => rec(start + n + 1, 6_000_000)))
+  }
+
+  // Each racer's ids are brand new and distinct from every other racer's, so every one of them
+  // asks for exactly `headroom` new rows - only one can fit.
+  const racers = 5
+  const results = await Promise.all(
+    Array.from({ length: racers }, (_, k) =>
+      push(race, Array.from({ length: headroom }, (_, n) => rec(90_000 + k * 100 + n, 6_000_001 + k))),
+    ),
+  )
+  check(
+    'every racer gets a clean response, never a raw error',
+    results.every((r) => r.status === 200 || r.status === 413),
+    JSON.stringify(results.map((r) => [r.status, r.json])),
+  )
+  const winners = results.filter((r) => r.status === 200)
+  check('exactly one racer fits in the remaining headroom', winners.length === 1, String(winners.length))
+
+  const seen = new Set()
+  let cursor = { since: 0, after: undefined }
+  for (let pages = 0; pages < 10; pages++) {
+    const page = await pull(race, cursor.since, cursor.after)
+    page.json.items.forEach((i) => seen.add(i.id))
+    if (!page.json.has_more) break
+    const last = page.json.items.at(-1)
+    cursor = { since: last.updated_at, after: last.id }
+  }
+  check('the group never ends up holding more than the cap', seen.size <= MAX_ITEMS, String(seen.size))
+  check('the group ends up holding exactly the cap after the race', seen.size === MAX_ITEMS, String(seen.size))
+}
+
 // 8. Creating many groups from one address is limited (the server runs with GROUP_CREATE_LIMIT=4).
 {
   const ip = randomIp()

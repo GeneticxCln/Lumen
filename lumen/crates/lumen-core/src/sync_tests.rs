@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::db::{migrate_tmdb_columns, set_setting};
-use crate::sync::{Remote, queue_favorite, sync_with};
+use crate::sync::{Remote, queue_favorite, set_applied_callback, sync_with};
 use crate::sync_crypto::{SealedItem, SyncKeys, generate_root, pow_valid};
 use crate::sync_keys::{self, MemoryStore};
 
@@ -490,6 +490,55 @@ async fn a_record_the_server_altered_is_skipped_and_counted_not_applied() {
     // The count is kept so the UI can warn about it.
     let status = crate::sync::status(&b).await.unwrap();
     assert_eq!(status.skipped, 1);
+}
+
+/// `sync_with` reports how many remote records it actually applied, by invoking the callback
+/// `set_applied_callback` registers — the seam the Tauri shell uses to re-run a UI reload after
+/// a pull lands something new, since `lumen-core` itself has no UI to refresh. The callback is
+/// a single, process-wide registration (there is no UI-less equivalent of "per sync" here), so
+/// this uses a count no other test in this file produces, to tell its own invocation apart from
+/// whatever else happens to be syncing concurrently on the same registration.
+#[tokio::test]
+async fn an_applied_pull_notifies_the_registered_callback_with_its_count() {
+    let log: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured = log.clone();
+    set_applied_callback(move |count| captured.lock().unwrap().push(count));
+
+    let (origin, _mock) = start_mock().await;
+    let root = generate_root().unwrap();
+    remote(&origin, &root).register(POW_BITS).await.unwrap();
+    let a = device().await;
+
+    const FAVORITES: i64 = 37;
+    // `queue_all`'s first-sync seed also queues this device's own profile record (its name and
+    // color), so the round trip below applies 38 records, not just the 37 favorites inserted
+    // here - the +1 is that profile, pushed and immediately pulled back the same as everything
+    // else queue_all seeded.
+    const DISTINCTIVE_COUNT: i64 = FAVORITES + 1;
+    for n in 0..FAVORITES {
+        sqlx::query(
+            "INSERT INTO favorites (profile_id, channel_url, content_key, active, updated_at) VALUES (1, ?, ?, 1, ?)",
+        )
+        .bind(format!("https://cdn.example/callback-test/{n}.m3u8"))
+        .bind(format!("tmdb:movie:{}", 9000 + n))
+        .bind(1_234)
+        .execute(&a)
+        .await
+        .unwrap();
+    }
+
+    // This device's first-ever sync queues and pushes everything it already has (see
+    // `queue_all`), then immediately pulls it straight back — nothing else has advanced its own
+    // cursor yet. That round trip fires the callback the exact same way a genuinely remote
+    // change would.
+    sync_with(&a, &remote(&origin, &root)).await.unwrap();
+
+    let seen = log.lock().unwrap();
+    assert!(
+        seen.contains(&DISTINCTIVE_COUNT),
+        "expected a callback invocation reporting {DISTINCTIVE_COUNT} applied records, saw {:?}",
+        seen,
+    );
 }
 
 /// The bug this file's `seq` handling exists to fix: a device joining a group late re-uploads

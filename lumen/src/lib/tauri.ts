@@ -586,6 +586,14 @@ export async function syncNow() {
   return callBackend<SyncStatus>("sync_now_cmd");
 }
 
+/** Told the count of records a sync just applied from another device, whenever a push/pull
+ * round trip (scheduled, debounced, or manual) actually changes something locally. My
+ * List/history/profiles screens subscribe to re-run their own reload, the same path a manual
+ * "Refresh library" action already triggers, so a remote change shows up without a restart. */
+export function onSyncApplied(callback: (count: number) => void) {
+  return listen<number>("sync://applied", (event: Event<number>) => callback(event.payload));
+}
+
 export async function tmdbStatus() {
   return callBackend<TmdbStatus>("tmdb_status");
 }

@@ -77,7 +77,15 @@ export async function startEnvironment(dataDir, extraEnv = {}) {
 
   // A cold CI runner right after a multi-minute cargo build is slower to get Vite's dev server
   // listening than this harness ever saw locally; give it real headroom rather than guessing.
-  await waitForHttp(`http://127.0.0.1:${VITE_PORT}`, 90_000, viteOutput);
+  //
+  // Probed as "localhost" (what Vite's own ready banner prints, and what tauri.conf.json's
+  // devUrl uses), not a hard-coded "127.0.0.1": with Vite's server.host left at its default
+  // (false), which interface "localhost" actually resolves to is up to this same Node process's
+  // own DNS resolution, which can prefer the IPv6 loopback over the IPv4 one depending on the
+  // runner — real CI hit exactly that once ("ready in 189ms" per Vite's own log, yet never
+  // reachable on 127.0.0.1 for the full 90s). Querying "localhost" here goes through the
+  // identical resolution Vite's own listener used, so the two can never disagree.
+  await waitForHttp(`http://localhost:${VITE_PORT}`, 90_000, viteOutput);
 
   const driver = spawn(
     "tauri-driver",

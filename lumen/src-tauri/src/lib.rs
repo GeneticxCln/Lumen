@@ -21,7 +21,7 @@ mod updater;
 
 use crate::commands::*;
 use crate::db::*;
-use tauri::{Manager, RunEvent};
+use tauri::{Emitter, Manager, RunEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -58,6 +58,15 @@ pub fn run() {
             #[cfg(target_os = "linux")]
             mpris::start(app.handle().clone());
             let app_handle = app.handle().clone();
+            // lumen-core has no UI of its own to refresh after a pull applies something from
+            // another device; registering this is how it asks the shell to do that instead
+            // ("core computes, shell notifies" — the same split `player://state` already uses).
+            {
+                let app_handle = app_handle.clone();
+                sync::set_applied_callback(move |count| {
+                    let _ = app_handle.emit("sync://applied", count);
+                });
+            }
             if let Ok(app_dir) = app_handle.path().app_data_dir() {
                 match lumen_core::diagnostics::init(&app_dir) {
                     Ok(guard) => {

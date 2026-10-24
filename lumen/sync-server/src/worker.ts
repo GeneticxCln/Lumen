@@ -251,18 +251,36 @@ async function pushItems(request: Request, env: Env): Promise<Response> {
   if (items.length === 0) return json({ ok: true, received: 0 })
 
   // Old deletion markers go first, so the cap never traps a group that holds mostly tombstones.
-  await env.DB.prepare('DELETE FROM sync_blobs WHERE sync_id = ? AND deleted = 1 AND updated_at < ?')
+  // `row_count` is kept as an exact mirror of "how many rows this group holds in sync_blobs", so
+  // whatever this actually removes has to come back off it here, not just off sync_blobs.
+  const cleaned = await env.DB.prepare('DELETE FROM sync_blobs WHERE sync_id = ? AND deleted = 1 AND updated_at < ?')
     .bind(auth.syncId, Date.now() - TOMBSTONE_KEEP_MS)
     .run()
-  const held = await env.DB.prepare('SELECT COUNT(*) AS n FROM sync_blobs WHERE sync_id = ?')
-    .bind(auth.syncId)
-    .first<{ n: number }>()
+  if (cleaned.meta.changes > 0) {
+    await env.DB.prepare('UPDATE sync_groups SET row_count = row_count - ? WHERE sync_id = ?')
+      .bind(cleaned.meta.changes, auth.syncId)
+      .run()
+  }
+
   // The write below is an upsert, so a pushed item already held adds no new row. Only the ids
   // this group does not yet hold should count against the cap — otherwise an actively re-synced,
   // near-full group (mostly re-pushes of items it already has) gets rejected well below its real
   // row count.
   const newRows = items.length - (await countAlreadyHeld(env, auth.syncId, items.map((item) => item.id)))
-  if ((held?.n ?? 0) + newRows > intVar(env.MAX_ITEMS, 20_000)) return json({ error: 'quota_exceeded' }, 413)
+  if (newRows > 0) {
+    // One atomic conditional UPDATE, not a read-then-write: two concurrent pushes to the same
+    // near-full group each reading a count that independently passes the check (and both then
+    // writing) is exactly the race that let a group end up over quota. A single UPDATE statement
+    // is atomic in SQLite/D1 regardless of how many callers race it, so whichever of two
+    // concurrent requests' reservations actually lands, the other sees the row_count it left
+    // behind, not the stale one it started from.
+    const reserved = await env.DB.prepare(
+      'UPDATE sync_groups SET row_count = row_count + ? WHERE sync_id = ? AND row_count + ? <= ?',
+    )
+      .bind(newRows, auth.syncId, newRows, intVar(env.MAX_ITEMS, 20_000))
+      .run()
+    if (reserved.meta.changes === 0) return json({ error: 'quota_exceeded' }, 413)
+  }
 
   // A server-assigned, monotonically increasing sequence, independent of the client-supplied
   // `updated_at`: the pull cursor pages by this instead, so a device that re-uploads its own
@@ -397,21 +415,36 @@ const SCHEMA = [
 
 /**
  * Runs once per isolate. Every `SCHEMA` statement is idempotently safe to repeat, but
- * `sync_blobs.seq` was added after those tables existed in production, so it needs its own
- * guarded `ALTER TABLE` plus a one-time backfill: rows written before this column existed get
- * `seq = 0` from the column default, which a from-scratch client pull (`since_seq=0`, i.e.
- * `seq > 0`) would otherwise skip entirely. Backfilling them to 1 - the same value the first
- * real push after migration also produces - puts them on equal, visible footing; ties are broken
- * by `item_id` same as any other pull page.
+ * `sync_blobs.seq` and `sync_groups.row_count` were both added after those tables existed in
+ * production, so each needs its own guarded `ALTER TABLE` plus a one-time backfill.
+ *
+ * `seq`: rows written before this column existed get `seq = 0` from the column default, which a
+ * from-scratch client pull (`since_seq=0`, i.e. `seq > 0`) would otherwise skip entirely.
+ * Backfilling them to 1 - the same value the first real push after migration also produces - puts
+ * them on equal, visible footing; ties are broken by `item_id` same as any other pull page.
+ *
+ * `row_count`: an exact mirror of each group's own `COUNT(*)` in `sync_blobs`, kept in step by
+ * every write that adds or removes a row (see `pushItems`) so the quota check below can be one
+ * atomic `UPDATE ... WHERE row_count + ? <= ?` instead of a read-then-write race. A group that
+ * already held rows before this column existed needs that mirror backfilled from the real count,
+ * or the first push after migration would see `row_count = 0` and under-count its quota.
  */
 async function ensureSchema(env: Env): Promise<void> {
   await env.DB.batch(SCHEMA.map((sql) => env.DB.prepare(sql)))
-  const columns = (await env.DB.prepare(`SELECT name FROM pragma_table_info('sync_blobs')`).all<{ name: string }>()).results ?? []
-  if (!columns.some((column) => column.name === 'seq')) {
+  const blobColumns = (await env.DB.prepare(`SELECT name FROM pragma_table_info('sync_blobs')`).all<{ name: string }>()).results ?? []
+  if (!blobColumns.some((column) => column.name === 'seq')) {
     await env.DB.prepare('ALTER TABLE sync_blobs ADD COLUMN seq INTEGER NOT NULL DEFAULT 0').run()
     await env.DB.prepare('UPDATE sync_blobs SET seq = 1 WHERE seq = 0').run()
   }
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS sync_blobs_pull_seq ON sync_blobs (sync_id, seq, item_id)').run()
+
+  const groupColumns = (await env.DB.prepare(`SELECT name FROM pragma_table_info('sync_groups')`).all<{ name: string }>()).results ?? []
+  if (!groupColumns.some((column) => column.name === 'row_count')) {
+    await env.DB.prepare('ALTER TABLE sync_groups ADD COLUMN row_count INTEGER NOT NULL DEFAULT 0').run()
+    await env.DB.prepare(
+      `UPDATE sync_groups SET row_count = (SELECT COUNT(*) FROM sync_blobs WHERE sync_blobs.sync_id = sync_groups.sync_id)`,
+    ).run()
+  }
 }
 
 let schemaReady: Promise<unknown> | undefined
