@@ -82,7 +82,9 @@ function App() {
   const [activeProfileId, setActiveProfileId] = useState<number | null>(null);
   const [locked, setLocked] = useState(false);
   const [profileError, setProfileError] = useState<string | null>(null);
-  const lockEvaluated = useRef(false);
+  // The profile id this session has confirmed is unlocked (no PIN, or its PIN was just verified).
+  // `null` until the first load decides.
+  const unlockedProfileId = useRef<number | null>(null);
   const [detailId, setDetailId] = useState<number | null>(null);
   const [facetSelection, setFacetSelection] = useState<FacetSelection>(EMPTY_FACETS);
   const [playerOpen, setPlayerOpen] = useState(false);
@@ -97,22 +99,23 @@ function App() {
   const currentProfile = profiles.find((profile) => profile.id === activeProfileId) || null;
   const setDetails = (channel: Channel | null) => setDetailId(channel?.id ?? null);
 
-  const loadProfiles = useCallback(async () => {
+  // `verifiedProfileId` is set only when the caller just checked a PIN (or confirmed none is
+  // needed) for that exact profile, so a profile switch that did not go through that check (for
+  // example the active profile's own deletion silently falling back to another one) is never
+  // mistaken for an already-unlocked screen.
+  const loadProfiles = useCallback(async (verifiedProfileId?: number) => {
     try {
       const [list, active] = await Promise.all([listProfiles(), activeProfile()]);
       setProfiles(list);
       setActiveProfileId(active.id);
       setProfileError(null);
-      // Lock once per session, on the first read: refreshing the list must not re-lock a
-      // screen the user has already unlocked.
-      if (!lockEvaluated.current) {
-        lockEvaluated.current = true;
-        setLocked(active.has_pin && list.length > 0);
-      }
+      if (verifiedProfileId !== undefined) unlockedProfileId.current = verifiedProfileId;
+      const needsUnlock = active.has_pin && list.length > 0 && active.id !== unlockedProfileId.current;
+      if (!needsUnlock) unlockedProfileId.current = active.id;
+      setLocked(needsUnlock);
     } catch (error) {
       // The browser development bridge has no profile API. Say so and fail open rather than
       // hiding the library behind a lock that could never be satisfied.
-      lockEvaluated.current = true;
       setProfiles([]);
       setActiveProfileId(null);
       setLocked(false);
@@ -123,9 +126,8 @@ function App() {
   useEffect(() => { void loadProfiles(); }, [loadProfiles]);
 
   // A profile switch (or an unlock) changes whose history and My List are on screen.
-  const handleProfilesChanged = async () => {
-    setLocked(false);
-    await loadProfiles();
+  const handleProfilesChanged = async (verifiedProfileId?: number) => {
+    await loadProfiles(verifiedProfileId);
     setRefresh((value) => value + 1);
   };
 
