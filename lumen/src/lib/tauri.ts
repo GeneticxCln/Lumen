@@ -345,6 +345,20 @@ export async function deleteProfile(profileId: number, currentPin?: string) {
 }
 
 /**
+ * Moves `fromProfileId`'s favorites, history and watched marks into `intoProfileId`, then
+ * removes `fromProfileId`. `currentPin` is `fromProfileId`'s own PIN, required if it has one —
+ * the same bar `deleteProfile` sets, since this also deletes that profile once its data moves.
+ * Returns the profiles that remain after the merge.
+ */
+export async function mergeProfiles(intoProfileId: number, fromProfileId: number, currentPin?: string) {
+  return callBackend<Profile[]>("merge_profiles_cmd", {
+    intoProfileId,
+    fromProfileId,
+    currentPin: currentPin || null,
+  });
+}
+
+/**
  * Sets a profile's PIN, or clears it when `pin` is undefined or empty. Changing or clearing an
  * existing PIN requires that PIN as `currentPin`.
  */
