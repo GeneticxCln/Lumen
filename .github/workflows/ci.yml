@@ -102,6 +102,10 @@ jobs:
     name: E2E smoke tests
     runs-on: ubuntu-latest
     needs: [desktop, frontend]
+    # A healthy run finishes this job in well under 5 minutes end to end; with no limit of its
+    # own, a hang here (Xvfb, tauri-driver, or the app itself not responding) silently runs for
+    # up to GitHub's 360-minute default instead of failing fast.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: System libraries
