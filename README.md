@@ -3,174 +3,124 @@
 [![CI](https://github.com/GeneticxCln/Lumen/actions/workflows/ci.yml/badge.svg)](https://github.com/GeneticxCln/Lumen/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A Linux-first media library and player for **your own** sources. Lumen keeps the playlists, streams and files you point it at in one place, plays them with [mpv](https://mpv.io), remembers where you stopped, follows series, finds subtitles without an account, and can send what is playing to a TV on your network. There are no accounts, no ads and no bundled channels.
+**Logo:** [`lumen/src-tauri/icons/icon.png`](lumen/src-tauri/icons/icon.png)
+
+A Linux-first media library and player for your own sources. Lumen keeps your playlists, streams and local files in one place, plays them with mpv, remembers where you stopped, follows series, finds subtitles without an account, and can cast to a TV on your network. No accounts, no ads, no bundled channels.
 
 Built with Tauri v2, React 19, TypeScript, Rust, SQLite and native mpv.
 
 ## Contents
 
-- [Features](#features) · [Install](#install) · [Updates](#updates) · [Subtitles](#subtitles) · [Player settings](#player-settings) · [Linux integration](#linux-integration) · [Casting to a TV](#casting-to-a-tv) · [Network privacy](#network-privacy) · [Sync](#sync) · [Translating Lumen](#translating-lumen)
-- [Development](#development) · [Checks](#checks) · [Contributing](#contributing) · [License](#license)
+- [Features](#features) · [Install](#install) · [Updates](#updates) · [Subtitles](#subtitles) · [Linux integration](#linux-integration) · [Casting](#casting) · [Network privacy](#network-privacy) · [Sync](#sync) · [Development](#development) · [License](#license)
 
 ## Features
 
-- **Your sources, one library.** Add M3U/M3U8 playlists (file or address), pages to extract a stream from (through a verified `yt-dlp`), and local folders. Movies, series and live TV are sorted from names and groups; there is no catalog service behind it.
-- **Discovery that works offline.** Video thumbnails from local FFmpeg, folders, audio and playlists, resume points per file, favorites, recently watched and recommendations from your own history, a poster-frame chooser.
-- **Series state.** Watched marks per episode, the next episode, upcoming and new episodes (with an optional TMDB key), and opt-in desktop notifications when a followed series airs.
-- **Search** across your sources and files from the top bar (Ctrl/Cmd + K).
-- **Native playback with mpv.** Your own `mpv.conf` and scripts apply. Optional video inside the Lumen window, on X11 and native Wayland.
-- **Subtitles** from the file, next to the file, or found online with no account or API key.
-- **Profiles** with optional PINs, per-profile language, subtitle and playback preferences.
+- **Your sources, one library.** M3U/M3U8 playlists (file or URL), pages to extract a stream from (verified yt-dlp), and local folders. Movies, series and live TV sorted from names and groups; no catalog service behind it.
+- **Discovery that works offline.** Thumbnails from FFmpeg/folders, resume points per file, favorites, recently watched, recommendations from your own history, poster-frame chooser.
+- **Series state.** Watched marks per episode, next episode, new/upcoming episodes (optional TMDB key), opt-in desktop notifications when a followed series airs.
+- **Search** across sources and files (Ctrl/Cmd + K).
+- **Native mpv playback.** Your own mpv.conf/scripts apply. Video in a separate mpv window (X11/Wayland) or inside the Lumen window (experimental).
+- **Subtitles** from the file, next to it, or found online (no account/API key).
+- **Profiles** with optional PINs, per-profile language/subtitle/playback preferences.
 - **Encrypted sync, no accounts**, between your own devices.
-- **Casting** to UPnP/DLNA TVs and receivers.
-- **Themes** (Cinema, Midnight, Forest, Daylight, System), keyboard shortcuts, a message catalog ready for translations.
+- **Casting** to UPnP/DLNA TVs/receivers.
+- **Themes** (Cinema, Midnight, Forest, Daylight, System), keyboard shortcuts, message catalog ready for translations.
 - **Updates from GitHub releases** with one click.
 
-Not included, on purpose: a Netflix-style catalog, paid-channel access, DRM bypass, or an external recommendation service. Artwork fallbacks are original local SVGs.
+Not included on purpose: a Netflix-style catalog, paid-channel access, DRM bypass, or an external recommendation service.
 
 ## Install
 
-Releases are published at <https://github.com/GeneticxCln/Lumen/releases>. Lumen starts `mpv` from your `PATH` rather than bundling it, so install `mpv` (and `ffmpeg` for thumbnails). `yt-dlp` is downloaded and verified by Lumen itself (Settings → Metadata → Update extractor).
+Releases: <https://github.com/GeneticxCln/Lumen/releases>. Install `mpv` (and `ffmpeg` for thumbnails); Lumen starts mpv from your PATH rather than bundling it. `yt-dlp` is downloaded and verified by Lumen itself.
 
 | Package | How |
 | --- | --- |
-| **AppImage** | Download `lumen_<version>_amd64.AppImage`, `chmod +x` it and run it. This is the only package that updates itself. |
-| **.deb** | `sudo apt install ./lumen_<version>_amd64.deb` (depends on `mpv`, recommends `ffmpeg`). |
-| **Flatpak** | Built by CI from `lumen/packaging/flatpak/` as a bundle (includes mpv); not on Flathub. |
+| **AppImage** | `chmod +x lumen_<version>_amd64.AppImage` then run. Self-updating. |
+| **.deb** | `sudo apt install ./lumen_<version>_amd64.deb` (needs mpv; recommends ffmpeg). |
+| **Flatpak** | CI-built bundle from `lumen/packaging/flatpak/` (includes mpv); not on Flathub. |
 | **Arch** | `lumen/packaging/aur/PKGBUILD` builds from the tagged source. |
 
-Build status: the `.deb` and AppImage have been built and inspected, but none of the packages has been installed on a clean machine yet, and no release has been published. See [lumen/AUDIT.md](lumen/AUDIT.md) for exactly what is and is not verified.
-
-See [lumen/FAQ.md](lumen/FAQ.md) for more, in Q&A form, including sync, casting and update questions.
+Details: [lumen/FAQ.md](lumen/FAQ.md)
 
 ## Troubleshooting
 
-- **"mpv stopped before it was ready" / "did not open its control socket" / "mpv stopped responding".** The first two happen when mpv cannot start at all; the third when it was running and then exited (a bad stream, a crash) partway through a session. All three now include the last lines mpv printed. Run `LUMEN_DEBUG_MPV=1 lumen` (or `LUMEN_DEBUG_MPV=1 ./lumen_*.AppImage`) to see everything mpv says. Check that `mpv` runs on its own (`mpv --version`). Programs Lumen starts do not inherit the AppImage's own library paths.
-- **Scrolling is choppy.** Lumen asks the page engine for smooth, hardware-accelerated scrolling. If it is still slow, try `LUMEN_WEBKIT_SAFE=1 lumen` (turns off WebKitGTK's DMA-BUF renderer, which some NVIDIA and Wayland setups handle badly). The AppImage runs through XWayland on a Wayland session; `GDK_BACKEND=wayland ./lumen_*.AppImage` uses native Wayland.
-- **Stop or Pause did not respond right away.** Starting mpv for a new stream used to hold the same lock Stop and Pause wait on, so pressing either while a slow or unreachable stream was still starting could block for up to the full startup timeout. Starting a stream no longer holds that lock (0.1.4).
-
-## Adding many playlist links at once
-
-**Add source → Many links** takes a plain text file (`.txt`, `.md`, `.csv`, `.m3u`, `.html`, … up to 5 MB) or pasted text and finds every `http(s)` link in it; whatever is around the links (prose, Markdown, quotes, table cells) is ignored. Duplicates and links you already have as sources are left out (at most 500 links). **Test the links** then fetches each one, four at a time, and shows the result as it arrives: a playlist with its channel count and how many of five sample channels answer, a single stream (an HLS manifest), or a failure with the reason (not found, not a playlist, blocked address, too slow). Usable links are ticked; **Add selected** adds each as its own source. Nothing is added before you press it. Word and PDF files are not read: paste their text instead. Private and local addresses are refused unless "local network sources" is on in Settings.
+- **mpv stopped before it was ready / did not open its control socket / stopped responding.** Run `LUMEN_DEBUG_MPV=1 lumen` to see mpv's output. Check `mpv --version` works on its own.
+- **Scrolling choppy.** Try `LUMEN_WEBKIT_SAFE=1 lumen` (disables WebKitGTK DMA-BUF renderer). On Wayland, `GDK_BACKEND=wayland ./lumen_*.AppImage` uses native Wayland.
 
 ## Updates
 
-Settings → **About & updates** shows the version and has one button, **Update to the latest version**. Click it and Lumen looks up the newest published release of this repository on GitHub, and if its tag is higher than the version you are running, downloads that release, checks it and installs it. A banner then offers a restart. There is no account, no signing key and no update server: GitHub's releases are the update channel.
-
-- **AppImage**: the file for your machine is downloaded next to the running AppImage, checked against the release's `SHA256SUMS`, and swapped in with a single rename. The running copy keeps working until you restart.
-- **Anything else** (a `.deb`, a Flatpak, the Arch package, a build you made): Lumen tells you a newer version exists and where it is; the system that installed it does the updating. The button reads *Check for updates* there.
-- **Automatic checks.** At start (after about 20 seconds, then every few hours, at most once a day) Lumen looks by itself. The same page chooses what it does with a newer release: *install it automatically* (the default), *only tell me*, or *never look*.
-- **What is fetched.** Only the release's own files, from `github.com` and GitHub's file hosts. A file that does not match its checksum, is larger than announced or is not a program is deleted and nothing is replaced. Drafts and pre-releases are never offered, so a release reaches users when it is **published**, not when its tag is pushed.
-
-The checksum protects against a damaged or truncated download. It does not prove who published the file: whoever can publish a release to the repository can publish an update, because the checksums come from the same place as the files.
+Settings → **About & updates** → **Update to the latest version**. Lumen checks GitHub releases; if a newer tag exists it downloads, verifies against `SHA256SUMS`, and installs (AppImage swaps in place; other packages tell you where to get it). Automatic checks run at start and every few hours (once a day max). Drafts and pre-releases are never offered.
 
 ## Subtitles
 
-Local subtitle handling needs nothing from the internet: tracks inside the file, a `.srt`/`.ass` file next to a local video (loaded automatically), drag and drop, and a file you pick in the player. Settings → Playback sets the preferred language, size and position per profile, and the player adjusts delay and size while playing.
+Local: tracks inside the file, `.srt`/`.ass` next to a video (auto-loaded), drag and drop, or pick in the player. Settings → Playback sets preferred language/size/position per profile.
 
-**Find subtitles online** (the *Find…* button in the player's subtitle tools) needs no account and no API key. It is off until you agree, and it only searches when you press Search; picking a result saves the file on this computer and loads it automatically the next time you play that title (no network). What it uses:
-
-- **Stremio's OpenSubtitles mirror** (`opensubtitles-v3.strem.io`) for movies and series, found by IMDb id. The id comes from TMDB when you have set a TMDB token, otherwise from IMDb's public suggestion list.
-- **Gestdown** (`api.gestdown.info`, a mirror of Addic7ed) for TV episodes.
-- Subtitles a web page offers itself, for entries added from a page (through yt-dlp); they are picked by your preferred subtitle language.
-
-A search sends the title's name, year, season and episode, the language, and for a local file a fingerprint of it (the OpenSubtitles hash, never the file) to those services. Each service can be switched off in Settings → Playback. Downloads are limited to each service's own servers and 10 MB, checked to really be subtitles (an error page is refused), converted to UTF-8 and kept in a 50 MB cache. These services are run by other people and are not official interfaces for apps like Lumen, so they can change or stop working; Gestdown covers TV only. OpenSubtitles' own old API is not used: it was shut down for third-party apps.
+Online (**Find…** button): no account/API key; off until you agree. Searches Stremio's OpenSubtitles mirror (movies/series by IMDb id) and Gestdown (TV). Sends title name/year/season/episode/language and, for local files, an OpenSubtitles hash (never the file). Results are saved and loaded automatically next time. Each service can be disabled in Settings → Playback.
 
 ## Player settings
 
-Per profile, in Settings → Playback: preferred audio and subtitle language, subtitle size, position, text and outline colour, an optional background box, bold and font (these style text subtitles; styled `.ass` subtitles keep their author's look), how far the skip buttons and arrow keys jump (5 to 60 seconds), and the next-episode offer. In the player: playback speed (0.5× to 2×, back to normal for the next file) and, for series, a card in the last seconds of an episode ("Next episode in 10 s", with Play now and Cancel) that starts the next episode when this one ends. The countdown can be set to 5–30 seconds or turned off; the default is 10 seconds.
+Per profile (Settings → Playback): audio/subtitle language, subtitle size/position/colour/outline/bold/font, background box, skip/arrow jump (5–60 s), next-episode offer. In the player: playback speed (0.5×–2×) and a "Next episode in N s" card (countdown 5–30 s, default 10 s).
 
-Lumen starts the regular `mpv`, so your own `~/.config/mpv/mpv.conf` and scripts apply too; Lumen's settings are applied on top, and "Extra mpv arguments" in Settings → Playback can add more.
+Your own `~/.config/mpv/mpv.conf` and scripts apply too; Lumen's settings are applied on top.
 
 ## Linux integration
 
-- **Open with Lumen.** The `.deb` declares the common video, audio and playlist types, so Lumen appears in "Open with". Video and audio files play, `.m3u`/`.m3u8` files are added as sources, and a subtitle file is added to what is playing.
-- **One window, one instance.** Opening something while Lumen is running hands it to the running window (and brings it forward) instead of starting a second copy.
-- **Links.** `lumen://play?url=https://…` plays a public web address. Because any web page can trigger such a link, Lumen always asks before playing it, and addresses on your local network are never opened this way.
-- **Drag and drop.** Drop video, audio, playlist or subtitle files on the window.
-- **Media keys.** Lumen registers with MPRIS, so media keys, the GNOME/KDE media widget and `playerctl` can see what is playing and play, pause, seek, change the volume and stop it.
-- **Package.** The `.deb` depends on `mpv` and recommends `ffmpeg` (used for thumbnails).
-- The OS keychain (used for the sync key and API keys) is the Secret Service on Linux; a bare window-manager session needs GNOME Keyring or KWallet running.
-
-### Playing inside the window (experimental)
-
-By default video plays in a separate mpv window. **Settings → Playback → Play video inside the Lumen window** puts the video in the main window instead, above the controls. It is off by default and works in two ways:
-
-- **X11 / XWayland** (`GDK_BACKEND=x11 lumen`): mpv draws into a native area above the page.
-- **Native Wayland**: Lumen loads `libmpv` (the `libmpv2` package on Debian and Ubuntu, `mpv-libs` on Fedora, `mpv` on Arch) at run time and draws the video into an OpenGL area in the window. Nothing is needed at build time, and without `libmpv` Settings says so and the separate window is used. The same mpv settings, subtitles, media keys and controls apply; Lumen talks to the in-window player through the same control socket.
-
-Controls are shown beside the video, not drawn over it. Fullscreen in this mode makes the whole window fullscreen. `LUMEN_GL_DEBUG=1` prints the size of the picture and how much of it is lit, for diagnosing a black video.
+- **Open with Lumen.** `.deb` declares video/audio/playlist types; `.m3u`/`.m3u8` files are added as sources; subtitle files are added to what's playing.
+- **One instance.** Opening something while Lumen runs hands it to the running window.
+- **Links.** `lumen://play?url=https://…` plays a public web address (Lumen asks first; local-network addresses are never opened this way).
+- **Drag and drop** video/audio/playlist/subtitle files on the window.
+- **Media keys** via MPRIS (play/pause/seek/volume/stop from GNOME/KDE widget or `playerctl`).
+- **Package.** `.deb` depends on `mpv`, recommends `ffmpeg`.
+- **Keychain** (sync key/API keys): Secret Service on Linux; bare window-manager sessions need GNOME Keyring or KWallet.
 
 ## Casting to a TV
 
-In the player's settings, **Cast…** lists TVs, receivers and speakers on your network that accept video over UPnP / DLNA and sends what is playing to the one you pick. Lumen then stops its own player and shows a small control bar (play, pause, skip, stop) while the device plays it.
+Player → **Cast…** lists UPnP/DLNA devices on your network and sends what's playing. Lumen stops its own player and shows a small control bar while the device plays.
 
-- A web address is fetched by the device itself, so streams that need special headers or a sign-in may not play there. A title already playing in Lumen starts where it was.
-- A file on this computer is served to that one device only, under a random address, for as long as the cast lasts. Only media files are served.
-- Devices must be on the local network: anything that announces a public address is ignored, and addresses on your network are only used as sources if you turned on local-network sources in Settings.
-- Chromecast and AirPlay are different protocols and are not supported. Subtitles added in Lumen are not sent to the device.
+- A web address is fetched by the device itself (streams needing special headers/sign-in may not play).
+- A local file is served to that device only, under a random address, for the cast duration; media files only.
+- Devices must be on the local network (public addresses ignored). Chromecast/AirPlay not supported. Subtitles added in Lumen are not sent.
 
 ## Network privacy
 
-Off by default, and adds no overhead while off: images and metadata keep loading directly, exactly as before this feature existed. Turn it on in **Settings → Account → Network privacy** with a SOCKS5 or HTTP proxy address (a VPN client, Tor, Shadowsocks, or any proxy you run yourself) and, if it needs one, a username and password. **Test connection** checks it before you rely on it.
+Off by default; no overhead while off. Turn on in **Settings → Account → Network privacy** with a SOCKS5/HTTP proxy address (+ credentials if needed). **Test connection** before relying on it.
 
-Once it is on, Lumen's own metadata requests, mpv's playback, yt-dlp's extraction, and remote images (TMDB art, a playlist's channel logos) are all routed through it, via a small local relay Lumen runs for itself — the upstream proxy's address and credentials are never handed to mpv or yt-dlp directly, only Lumen's own relay speaks to it. If the relay cannot start, or the saved proxy address stops working, Lumen refuses those requests rather than ever falling back to a direct connection.
+Once on, Lumen's metadata requests, mpv playback, yt-dlp extraction, and remote images route through a small local relay Lumen runs itself — the upstream proxy's address/credentials are never handed to mpv or yt-dlp directly. If the relay can't start or the proxy stops working, Lumen refuses those requests rather than falling back to direct.
 
-- Sources on your local network always connect directly, the same as a VPN's split tunnel. Turn off "allow local network sources" in Settings if that is not what you want.
-- Device casting and the **Open on GitHub** link (Settings → About) are not covered: casting only ever talks to devices on your local network, and that link opens in your system's own browser, not inside Lumen.
-- This can make playback and browsing slower, depending on the proxy; nothing before this feature's release has changed if you leave it off.
+Local-network sources always connect directly (like a VPN split tunnel). Casting and the "Open on GitHub" link are not covered.
 
 ## Sync
 
-Sync is optional and there are no accounts. The library, files, and playback all work without it. Official builds use a sync server we run by default, so there's nothing to deploy to try it; self-host your own instead if you'd rather not rely on it (see below).
+Optional; no accounts. The library/files/playback work without it. Official builds use a sync server we run by default; self-host your own instead if preferred (see below).
 
-Turn it on in **Settings → Profiles & sync**. Lumen makes a random secret key on that device and shows it once (14 groups of four characters, with a checksum so a typo is caught). On another device choose **Add this device** and type the key. Nothing else is exchanged: no email, no sign-in page, no code that can expire.
+Turn on in **Settings → Profiles & sync**. Lumen makes a random secret key on that device (shown once, 14 groups of four chars with a checksum). On another device choose **Add this device** and type the key. Nothing else exchanged: no email, no sign-in, no expiring code.
 
-Synced devices share:
+Synced devices share: profiles (name/colour; PINs never leave the device), favorites, watch progress. Deletions sync too (last-write-wins by timestamp). Playlists, imported sources, local files and thumbnails stay on this device.
 
-- **Profiles**: name and colour. PIN codes never leave the device.
-- **Favorites**: the stream URL, its title key, and the profile it belongs to.
-- **Watch progress**: the stream URL, resume position, and duration.
+**What the server can/cannot see:** every record is encrypted on-device (XChaCha20-Poly1305) before upload. The server sees a random group id, last-used time, record count/sizes, opaque ids/timestamps, and your network address — but not stream URLs, titles, profile names, positions, record kinds, or the sync key.
 
-Deletions sync too. Conflicts resolve last-write-wins by timestamp. Playlists and imported sources are not synced and stay on this device, as do local files and their thumbnails.
-
-### What the server can and cannot see
-
-Every record is encrypted on the device (XChaCha20-Poly1305) before it is uploaded. The key is split with HKDF into separate keys for the group name, for proving you belong to the group, for encryption, and for naming records, so the server learns the first two uses at most and can never decrypt.
-
-| The server can see | The server cannot see |
-| --- | --- |
-| a random group id, and when a group was last used | stream URLs, titles, profile names, positions |
-| how many records there are and how large each is | what kind of record each one is |
-| an opaque id and a timestamp per record, and whether it is a deletion | the sync key |
-| your network address, as any web server does | |
-
-A server can also refuse to answer, drop records, or serve an older valid copy of a record. It cannot alter or move a record without the app noticing: such records fail verification, are ignored, and are reported in Settings.
-
-### Things to know
-
-- **No account means no recovery.** If you lose the key and every device that has it, the synced copy is gone. Your library on each computer is not affected.
-- Anyone who has the key can read and change the synced data. **Show key** displays it again; only type it into your own devices.
-- **Turn off** forgets the key on this device and leaves the synced copy for other devices. **Delete synced data** also erases the copy from the server for everyone.
-- The key is kept in the OS keychain, never in the settings database. The server address must start with `https://` because the app sends a bearer credential to it (plain `http://` is accepted only for a server on the same computer, for development).
-- Abuse limits replace sign-in: a proof of work to create a group, a per-network daily cap, and size limits per group. They slow abuse down; they do not stop a determined attacker.
-- Data synced by older versions through the Freebuff account is not migrated. Turn sync on, and this device uploads what is in its local library.
+**Things to know:**
+- No account = no recovery. Lose the key and every device that has it, and the synced copy is gone (your library on each computer is unaffected).
+- Anyone with the key can read/change synced data. Only type it into your own devices.
+- **Turn off** forgets the key on this device; **Delete synced data** erases the server copy for everyone.
+- Key is in the OS keychain, never the settings DB. Server address must start with `https://` (plain `http://` only for same-computer dev).
+- Abuse limits replace sign-in: proof of work to create a group, per-network daily cap, per-group size limits.
 
 ### Running your own sync server
 
-Official builds default to a sync server we run — the same encrypted-blind design described above applies to it, so it learns nothing a self-hosted one wouldn't also learn. If you'd rather not rely on it, you can run your own instead: the server is a small Cloudflare Worker with a D1 database in `sync-server/`. Deploy it with `npx wrangler d1 create lumen-sync`, put the database id in `sync-server/wrangler.jsonc`, and run `npx wrangler deploy`. Enter its address in **Settings → Profiles & sync → Sync server** to use it instead of the default, on any device you want to use it from — it replaces the default there, nothing more.
+A small Cloudflare Worker with a D1 database in `sync-server/`. Deploy: `npx wrangler d1 create lumen-sync`, put the database id in `sync-server/wrangler.jsonc`, `npx wrangler deploy`. Enter its address in **Settings → Profiles & sync → Sync server** to use it instead of the default.
 
 ## Translating Lumen
 
-All interface text lives in a message catalog (`src/i18n/messages/`, one file per area, put together in `src/i18n/en.ts`) and screens show it with `t("key")` (`tn("key", count)` for plurals, `{name}` for values, `<strong>…</strong>` markup through `<Rich>` or `tRich`). A wrong key or a missing value is a type error. To add a language, write a `Catalog` for it (the type lists every key) and register it with `addLocale("de", catalog)`. The page starts in the language chosen in Settings → Appearance (shown once a second language exists), else the system's best match (`de-AT` finds `de`), else English. Language names come from `Intl.DisplayNames`. Only English exists, so nothing has been tested against a real second language: plural rules beyond one/other, word order and text length are unverified.
+Interface text lives in a message catalog (`src/i18n/messages/`, assembled in `src/i18n/en.ts`), shown with `t("key")` / `tn("key", count)` / `{name}` / `<Rich>`. To add a language, write a `Catalog` and register it with `addLocale("de", catalog)`. Page starts in the language from Settings → Appearance, else the system's best match, else English. Only English exists so far; plural rules beyond one/other, word order and text length are unverified.
 
-`npm test` runs a gate (`src/i18n/gate.test.ts`) that fails if a component gains hard-coded text (JSX text and the `aria-label`, `title`, `placeholder`, `alt` and `label` attributes) or if a catalog message is unused. `npm run i18n:hits -- <file>` lists what a file still hard-codes. Not translated: messages that come from the backend (error text), genre and category labels derived from English words in playlist group names (`lib/discovery.ts`), and text from your own playlists and files.
+`npm test` runs a gate (`src/i18n/gate.test.ts`) that fails on hard-coded JSX text or unused catalog messages. `npm run i18n:hits -- <file>` lists what a file still hard-codes. Not translated: backend error text, genre/category labels from playlist group names, and text from your own playlists/files.
 
 ## Development
 
-See [lumen/ARCHITECTURE.md](lumen/ARCHITECTURE.md) for the shell/core split, how playback and sync work, and where the network boundaries are.
+See [lumen/ARCHITECTURE.md](lumen/ARCHITECTURE.md) for the shell/core split, playback/sync, network boundaries, and how a PR becomes a release.
 
-Needs Node 24+, Rust (stable), the platform's Tauri/WebKitGTK build dependencies, `mpv`, and `yt-dlp` for extraction (or use *Update extractor* in Settings). On Debian/Ubuntu the libraries are `libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev`.
+Needs Node 24+, Rust (stable), Tauri/WebKitGTK build deps, `mpv`, and `yt-dlp` (or *Update extractor* in Settings). On Debian/Ubuntu: `libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev`.
 
 ```bash
 cd lumen
@@ -182,14 +132,14 @@ Layout:
 
 | Path | What it is |
 | --- | --- |
-| `lumen/src` | The React interface and the message catalog (`src/i18n`). |
-| `lumen/src-tauri` | The Tauri shell: windows, mpv control, MPRIS, in-window video, commands. |
-| `lumen/crates/lumen-core` | The UI-agnostic core: playlists, SQLite, search, TMDB, extraction, subtitles, sync, casting, updates, network guard. Builds and tests without GTK. |
-| `lumen/sync-server` | The optional sync server (a Cloudflare Worker with D1). |
-| `lumen/packaging` | Flatpak manifest, Arch `PKGBUILD`, desktop file and app data. |
-| `.github/workflows` | CI, packaging and release workflows. |
+| `lumen/src` | React interface + message catalog (`src/i18n`). |
+| `lumen/src-tauri` | Tauri shell: windows, mpv control, MPRIS, in-window video, commands. |
+| `lumen/crates/lumen-core` | UI-agnostic core: playlists, SQLite, search, TMDB, extraction, subtitles, sync, casting, updates, network guard. |
+| `lumen/sync-server` | Optional sync server (Cloudflare Worker + D1). |
+| `lumen/packaging` | Flatpak manifest, Arch `PKGBUILD`, desktop file, app data. |
+| `.github/workflows` | CI, packaging, release workflows. |
 
-`npx tauri build --bundles deb,appimage` (from `lumen/`) produces a `.deb` and an AppImage in `target/release/bundle/`. Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds both and attaches them, with a `SHA256SUMS` file, to a published GitHub release (a tag with a suffix such as `v0.2.0-rc.1` becomes a pre-release, which the updater ignores). Lumen updates itself from the latest published release, so a tag is a release: check the version in `tauri.conf.json` and `Cargo.toml` matches it first. The repository variable `LUMEN_SYNC_URL` bakes in a default sync server for builds `release.yml` produces (GitHub Settings → Secrets and variables → Actions → Variables; it's a plain URL, not a secret) — a local dev build or a fork without it set has no default, and sync asks for a server address before it can turn on.
+`npx tauri build --bundles deb,appimage` (from `lumen/`) produces `.deb` + AppImage in `target/release/bundle/`. Pushing a tag `v0.1.0` runs `release.yml`, which builds both and attaches them (with `SHA256SUMS`) to a published GitHub release. A tag with a suffix (`v0.2.0-rc.1`) becomes a pre-release (ignored by the updater). Check the version in `tauri.conf.json`/`Cargo.toml` matches the tag first. The repo variable `LUMEN_SYNC_URL` bakes in a default sync server for release builds.
 
 ## Checks
 
@@ -205,15 +155,15 @@ cargo test -p lumen-core
 (cd src-tauri && cargo test --lib)
 ```
 
-`cargo test --lib` needs the Tauri build dependencies, plus `ffmpeg` for the poster tests and `mpv` for the playback tests (those skip with a message when `mpv` is missing).
+`cargo test --lib` needs Tauri build deps, plus `ffmpeg` (poster tests) and `mpv` (playback tests; skip with a message when missing).
 
-The sync server has its own checks. From `lumen/sync-server/`, `npm run typecheck` checks the types, and `npm run dev` starts it locally with small limits (in another terminal, `npm run test:sync` runs plain-HTTP checks against it: group creation and proof of work, authentication, isolation between groups, last-write-wins, paging, quotas and deletion). The Rust side is tested against an in-process server that speaks the same API (`cargo test -p lumen-core sync`).
+Sync server checks: from `lumen/sync-server/`, `npm run typecheck` checks types; `npm run dev` starts it locally; `npm run test:sync` runs plain-HTTP checks (group creation/proof of work, auth, group isolation, last-write-wins, paging, quotas, deletion). Rust side tested against an in-process server (`cargo test -p lumen-core sync`).
 
-See [lumen/AUDIT.md](lumen/AUDIT.md) for verified behavior, security boundaries and open limitations.
+See [lumen/AUDIT.md](lumen/AUDIT.md) for verified behavior, security boundaries, and open limitations.
 
 ## Contributing
 
-Issues and pull requests are welcome. See [lumen/CONTRIBUTING.md](lumen/CONTRIBUTING.md) for the full guide — one logical unit per pull request, the checks per area, running the E2E suite locally, and what to verify and say so in the PR description.
+Issues and pull requests welcome. See [lumen/CONTRIBUTING.md](lumen/CONTRIBUTING.md) — one logical unit per PR, checks per area, running the E2E suite locally, and what to verify in the PR description.
 
 ## License
 
