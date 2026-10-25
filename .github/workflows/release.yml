@@ -68,10 +68,17 @@ jobs:
           LUMEN_RELEASE_SIGNING_KEY: ${{ secrets.LUMEN_RELEASE_SIGNING_KEY }}
           LUMEN_RELEASE_SIGNING_KEY_PASSWORD: ${{ secrets.LUMEN_RELEASE_SIGNING_KEY_PASSWORD }}
         run: |
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends minisign
+          # ubuntu-22.04 has no `minisign` apt package at all (upstream ships only a GitHub
+          # release tarball and a Docker image) — download the pinned, checksummed static binary
+          # instead of relying on apt.
+          minisign_dir="$(mktemp -d)"
+          curl -sSL -o "$minisign_dir/minisign.tar.gz" https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          echo "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  $minisign_dir/minisign.tar.gz" | sha256sum -c -
+          tar -xzf "$minisign_dir/minisign.tar.gz" -C "$minisign_dir"
+          chmod +x "$minisign_dir/minisign-linux/x86_64/minisign"
           key_file="$(mktemp)"
           printf '%s' "$LUMEN_RELEASE_SIGNING_KEY" > "$key_file"
-          printf '%s' "$LUMEN_RELEASE_SIGNING_KEY_PASSWORD" | minisign -S -s "$key_file" -m target/release/bundle/SHA256SUMS
+          printf '%s' "$LUMEN_RELEASE_SIGNING_KEY_PASSWORD" | "$minisign_dir/minisign-linux/x86_64/minisign" -S -s "$key_file" -m target/release/bundle/SHA256SUMS
           shred -u "$key_file"
           cat target/release/bundle/SHA256SUMS.minisig
       - uses: softprops/action-gh-release@v2
