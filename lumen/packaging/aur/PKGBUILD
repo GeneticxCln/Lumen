@@ -3,7 +3,7 @@
 # Builds Lumen from the tagged source. After a release, set pkgver to the new version and replace
 # the checksum with the output of `makepkg -g`.
 pkgname=lumen
-pkgver=0.1.9
+pkgver=0.1.10
 pkgrel=1
 pkgdesc='Media library and player built on mpv'
 arch=('x86_64' 'aarch64')
