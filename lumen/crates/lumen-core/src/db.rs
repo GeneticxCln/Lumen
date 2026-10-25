@@ -6,7 +6,9 @@ use crate::playlist::import::{Channel, Playlist, import_m3u_file};
 use crate::sync;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sqlx::{Pool, QueryBuilder, Row, Sqlite, SqliteConnection, sqlite::SqlitePoolOptions};
+use sqlx::{
+    Pool, QueryBuilder, Row, Sqlite, SqliteConnection, sqlite::SqlitePoolOptions, sqlite::SqliteRow,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -213,11 +215,37 @@ pub async fn backfill_channel_languages(pool: &Pool<Sqlite>) -> Result<()> {
     Ok(())
 }
 
+/// The `titles.kind`/`season`/`episode` a channel's row implies, shared by the single-row
+/// upsert below and the batched one so the two can never compute it differently.
+fn title_kind_season_episode(
+    tmdb_type: Option<&str>,
+    name: &str,
+    is_live: Option<i64>,
+) -> (&'static str, Option<u32>, Option<u32>) {
+    if let Some(t) = tmdb_type {
+        if t == "tv" || t == "series" {
+            let (s, e) = parse_season_episode(name).unwrap_or((1, 1));
+            ("series", Some(s), Some(e))
+        } else {
+            ("movie", None, None)
+        }
+    } else if is_live == Some(1) {
+        ("channel", None, None)
+    } else {
+        ("movie", None, None)
+    }
+}
+
 /// Upserts one channel's row into `titles`/`title_sources` and backfills its `content_key` into
 /// any matching `favorites`/`history` rows that don't have one yet. Shared by the one-time
 /// startup backfill and by importing a new playlist, so a title gets automatic source-fallback
 /// and counts toward "new since your last visit" from the moment it is imported, rather than
 /// only for channels that already existed the one time the backfill itself ran.
+///
+/// A single-row primitive, used where channels arrive one at a time anyway (TMDB enrichment,
+/// rate-limited against a remote API). Importing or refreshing a whole playlist instead goes
+/// through `batch_upsert_titles_and_sources`, which has the identical effect across many rows
+/// at once without paying this function's four-statements-per-row cost for each one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn upsert_title_and_source(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
@@ -237,19 +265,7 @@ pub(crate) async fn upsert_title_and_source(
     now: i64,
 ) -> Result<()> {
     let content_key = ContentKey::derive(tmdb_id, tmdb_type, name, tvg_id, url).into_string();
-
-    let (kind, season, ep) = if let Some(t) = tmdb_type {
-        if t == "tv" || t == "series" {
-            let (s, e) = parse_season_episode(name).unwrap_or((1, 1));
-            ("series", Some(s), Some(e))
-        } else {
-            ("movie", None, None)
-        }
-    } else if is_live == Some(1) {
-        ("channel", None, None)
-    } else {
-        ("movie", None, None)
-    };
+    let (kind, season, ep) = title_kind_season_episode(tmdb_type, name, is_live);
 
     sqlx::query(
         "INSERT INTO titles (content_key, kind, title, tmdb_id, tmdb_type, season, episode, release_year, poster_path, backdrop_path, overview, genres, created_at, updated_at) \
@@ -313,6 +329,222 @@ pub(crate) async fn upsert_title_and_source(
         .execute(&mut **tx)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    Ok(())
+}
+
+/// One channel row's worth of `upsert_title_and_source`'s inputs, with `content_key` and
+/// `kind`/`season`/`episode` precomputed so `batch_upsert_titles_and_sources` never needs the
+/// raw row again.
+struct TitleBackfillRow {
+    channel_id: i64,
+    url: String,
+    content_key: String,
+    kind: &'static str,
+    title: String,
+    tmdb_id: Option<i64>,
+    tmdb_type: Option<String>,
+    season: Option<u32>,
+    episode: Option<u32>,
+    release_year: Option<i64>,
+    poster_path: Option<String>,
+    backdrop_path: Option<String>,
+    overview: Option<String>,
+    genre_names: Option<String>,
+    extra_headers: Option<String>,
+    is_live: Option<i64>,
+}
+
+/// Builds one `TitleBackfillRow` from a `channels` row carrying the columns both
+/// `backfill_titles_and_sources` and `backfill_titles_for_playlist` select: `id, name, url,
+/// tvg_id, extra_headers, is_live, tmdb_id, tmdb_type, poster_path, backdrop_path, overview,
+/// release_year, genre_names`.
+fn title_backfill_row_from(row: &SqliteRow) -> TitleBackfillRow {
+    let channel_id: i64 = row.get("id");
+    let title: String = row.get("name");
+    let url: String = row.get("url");
+    let tvg_id: Option<String> = row.get("tvg_id");
+    let tmdb_id: Option<i64> = row.get("tmdb_id");
+    let tmdb_type: Option<String> = row.get("tmdb_type");
+    let is_live: Option<i64> = row.get("is_live");
+    let content_key = ContentKey::derive(
+        tmdb_id,
+        tmdb_type.as_deref(),
+        &title,
+        tvg_id.as_deref(),
+        &url,
+    )
+    .into_string();
+    let (kind, season, episode) = title_kind_season_episode(tmdb_type.as_deref(), &title, is_live);
+    TitleBackfillRow {
+        channel_id,
+        url,
+        content_key,
+        kind,
+        title,
+        tmdb_id,
+        tmdb_type,
+        season,
+        episode,
+        release_year: row.get("release_year"),
+        poster_path: row.get("poster_path"),
+        backdrop_path: row.get("backdrop_path"),
+        overview: row.get("overview"),
+        genre_names: row.get("genre_names"),
+        extra_headers: row.get("extra_headers"),
+        is_live,
+    }
+}
+
+/// Has the exact same effect as calling `upsert_title_and_source` once per row, across many rows
+/// at once: one multi-row upsert into `titles`, one into `title_sources`, and one batched
+/// `CASE`/`WHEN` update each for `favorites`/`history`'s still-`NULL` `content_key` — chunked at
+/// 100 rows per statement, the same chunk size `insert_channel_rows` already uses to stay under
+/// SQLite's bind-parameter limit. This is what makes importing or refreshing a large playlist
+/// fast: the single-row version needs four statement round trips per channel (400,000 of them
+/// for 100,000 channels), which is what made that path slow enough to make bulk-adding many
+/// playlists at once feel like it had hung.
+async fn batch_upsert_titles_and_sources(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    rows: &[TitleBackfillRow],
+    now: i64,
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    for chunk in rows.chunks(100) {
+        let mut titles_qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+            "INSERT INTO titles (content_key, kind, title, tmdb_id, tmdb_type, season, episode, release_year, poster_path, backdrop_path, overview, genres, created_at, updated_at) ",
+        );
+        titles_qb.push_values(chunk, |mut b, row| {
+            b.push_bind(&row.content_key)
+                .push_bind(row.kind)
+                .push_bind(&row.title)
+                .push_bind(row.tmdb_id)
+                .push_bind(&row.tmdb_type)
+                .push_bind(row.season)
+                .push_bind(row.episode)
+                .push_bind(row.release_year)
+                .push_bind(&row.poster_path)
+                .push_bind(&row.backdrop_path)
+                .push_bind(&row.overview)
+                .push_bind(&row.genre_names)
+                .push_bind(now)
+                .push_bind(now);
+        });
+        titles_qb.push(
+            " ON CONFLICT (content_key) DO UPDATE SET \
+              title = excluded.title, \
+              poster_path = COALESCE(titles.poster_path, excluded.poster_path), \
+              backdrop_path = COALESCE(titles.backdrop_path, excluded.backdrop_path), \
+              overview = COALESCE(titles.overview, excluded.overview), \
+              updated_at = excluded.updated_at",
+        );
+        titles_qb
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+        let mut sources_qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+            "INSERT INTO title_sources (content_key, channel_id, stream_url, rank, headers, is_live, created_at) ",
+        );
+        sources_qb.push_values(chunk, |mut b, row| {
+            b.push_bind(&row.content_key)
+                .push_bind(row.channel_id)
+                .push_bind(&row.url)
+                .push_bind(0_i64)
+                .push_bind(row.extra_headers.as_deref().unwrap_or("{}"))
+                .push_bind(row.is_live)
+                .push_bind(now);
+        });
+        sources_qb.push(
+            " ON CONFLICT (content_key, stream_url) DO UPDATE SET \
+              channel_id = excluded.channel_id, \
+              headers = excluded.headers, \
+              is_live = excluded.is_live",
+        );
+        sources_qb
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+        // Two passes, not one combined CASE: the single-row version backfills on a match by
+        // either `channel_url`/`path` OR `channel_id`, and CASE only ever discriminates on one
+        // expression. Each pass only ever touches rows still `NULL`, so running both never
+        // double-applies or conflicts with the other, matching the single-row OR exactly.
+        let mut favorites_qb: QueryBuilder<Sqlite> =
+            QueryBuilder::new("UPDATE favorites SET content_key = CASE channel_url");
+        for row in chunk {
+            favorites_qb
+                .push(" WHEN ")
+                .push_bind(&row.url)
+                .push(" THEN ")
+                .push_bind(&row.content_key);
+        }
+        favorites_qb.push(" ELSE content_key END WHERE content_key IS NULL AND channel_url IN (");
+        {
+            let mut separated = favorites_qb.separated(", ");
+            for row in chunk {
+                separated.push_bind(&row.url);
+            }
+        }
+        favorites_qb.push(")");
+        favorites_qb
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+        let mut history_by_path_qb: QueryBuilder<Sqlite> =
+            QueryBuilder::new("UPDATE history SET content_key = CASE path");
+        for row in chunk {
+            history_by_path_qb
+                .push(" WHEN ")
+                .push_bind(&row.url)
+                .push(" THEN ")
+                .push_bind(&row.content_key);
+        }
+        history_by_path_qb.push(" ELSE content_key END WHERE content_key IS NULL AND path IN (");
+        {
+            let mut separated = history_by_path_qb.separated(", ");
+            for row in chunk {
+                separated.push_bind(&row.url);
+            }
+        }
+        history_by_path_qb.push(")");
+        history_by_path_qb
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+        let mut history_by_channel_qb: QueryBuilder<Sqlite> =
+            QueryBuilder::new("UPDATE history SET content_key = CASE channel_id");
+        for row in chunk {
+            history_by_channel_qb
+                .push(" WHEN ")
+                .push_bind(row.channel_id)
+                .push(" THEN ")
+                .push_bind(&row.content_key);
+        }
+        history_by_channel_qb
+            .push(" ELSE content_key END WHERE content_key IS NULL AND channel_id IN (");
+        {
+            let mut separated = history_by_channel_qb.separated(", ");
+            for row in chunk {
+                separated.push_bind(row.channel_id);
+            }
+        }
+        history_by_channel_qb.push(")");
+        history_by_channel_qb
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    }
 
     Ok(())
 }
@@ -410,29 +642,8 @@ pub async fn backfill_titles_and_sources(pool: &Pool<Sqlite>) -> Result<()> {
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    for row in &channels {
-        let channel_id: i64 = row.get("id");
-        let name: String = row.get("name");
-        let url: String = row.get("url");
-        upsert_title_and_source(
-            &mut tx,
-            channel_id,
-            &name,
-            &url,
-            row.get::<Option<String>, _>("tvg_id").as_deref(),
-            row.get::<Option<i64>, _>("tmdb_id"),
-            row.get::<Option<String>, _>("tmdb_type").as_deref(),
-            row.get::<Option<String>, _>("poster_path").as_deref(),
-            row.get::<Option<String>, _>("backdrop_path").as_deref(),
-            row.get::<Option<String>, _>("overview").as_deref(),
-            row.get::<Option<i64>, _>("release_year"),
-            row.get::<Option<String>, _>("genre_names").as_deref(),
-            row.get::<Option<String>, _>("extra_headers").as_deref(),
-            row.get::<Option<i64>, _>("is_live"),
-            now,
-        )
-        .await?;
-    }
+    let prepared: Vec<TitleBackfillRow> = channels.iter().map(title_backfill_row_from).collect();
+    batch_upsert_titles_and_sources(&mut tx, &prepared, now).await?;
 
     // For any remaining history or favorites rows, generate a stream/file fallback content_key
     // SQLite doesn't have sha256 built-in, so derive using URL prefix or rowid fallback
@@ -566,29 +777,8 @@ pub(crate) async fn backfill_titles_for_playlist(
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
     let now = Utc::now().timestamp_millis();
-    for row in &rows {
-        let channel_id: i64 = row.get("id");
-        let name: String = row.get("name");
-        let url: String = row.get("url");
-        upsert_title_and_source(
-            tx,
-            channel_id,
-            &name,
-            &url,
-            row.get::<Option<String>, _>("tvg_id").as_deref(),
-            row.get::<Option<i64>, _>("tmdb_id"),
-            row.get::<Option<String>, _>("tmdb_type").as_deref(),
-            row.get::<Option<String>, _>("poster_path").as_deref(),
-            row.get::<Option<String>, _>("backdrop_path").as_deref(),
-            row.get::<Option<String>, _>("overview").as_deref(),
-            row.get::<Option<i64>, _>("release_year"),
-            row.get::<Option<String>, _>("genre_names").as_deref(),
-            row.get::<Option<String>, _>("extra_headers").as_deref(),
-            row.get::<Option<i64>, _>("is_live"),
-            now,
-        )
-        .await?;
-    }
+    let prepared: Vec<TitleBackfillRow> = rows.iter().map(title_backfill_row_from).collect();
+    batch_upsert_titles_and_sources(tx, &prepared, now).await?;
     Ok(())
 }
 
@@ -2426,6 +2616,134 @@ mod tests {
             Some("https://b.example/news.m3u8".to_string()),
             "the second provider's stream must already be a ranked fallback right after import"
         );
+    }
+
+    /// `batch_upsert_titles_and_sources` upserts `titles`/`title_sources` for many rows in one
+    /// multi-row statement per chunk, not one row at a time — this is the case that exercises
+    /// whether two *new* rows sharing a content_key within the very same batch (not across two
+    /// separate imports, like the test above) still both land correctly, rather than one
+    /// clobbering the other or the statement erroring on the shared key.
+    #[tokio::test]
+    async fn two_channels_with_the_same_tvg_id_in_one_import_are_both_ranked_sources() {
+        let pool = test_pool().await;
+
+        import_playlist(
+            &pool,
+            &playlist("Provider A"),
+            &[
+                Channel {
+                    tvg_id: Some("news1".into()),
+                    ..channel(0, "News Channel", "https://a.example/news.m3u8")
+                },
+                Channel {
+                    tvg_id: Some("news1".into()),
+                    ..channel(0, "News Channel", "https://b.example/news.m3u8")
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+        let next = next_ranked_source_after(&pool, "https://a.example/news.m3u8")
+            .await
+            .unwrap();
+        assert_eq!(
+            next.map(|(url, _, _)| url),
+            Some("https://b.example/news.m3u8".to_string()),
+            "both rows of the same batch must be ranked sources for each other"
+        );
+    }
+
+    /// The favorites/history backfill in `batch_upsert_titles_and_sources` is a per-chunk
+    /// `CASE`/`WHEN` update now, not one `UPDATE ... WHERE content_key IS NULL` per row — this
+    /// confirms it still only touches rows that are actually `NULL`, still leaves an
+    /// already-set key alone, and still reaches a `history` row matched by `channel_id` as well
+    /// as one matched by `path`.
+    #[tokio::test]
+    async fn refreshing_backfills_null_content_keys_on_favorites_and_history_but_leaves_set_ones() {
+        let pool = test_pool().await;
+        let url = "https://a.example/backfill.m3u8";
+        let playlist_id = import_playlist(
+            &pool,
+            &playlist("Provider A"),
+            &[channel(0, "Backfill Channel", url)],
+        )
+        .await
+        .unwrap();
+        let channel_id: i64 = sqlx::query_scalar("SELECT id FROM channels WHERE url = ?")
+            .bind(url)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        // A favorite and two history rows predating this channel ever being imported: one with
+        // no content_key yet (the common case — favorited before any title match existed), and
+        // one that already carries an unrelated key, which must not be overwritten.
+        sqlx::query(
+            "INSERT INTO favorites (profile_id, channel_url, content_key, active, updated_at) VALUES (1, ?, NULL, 1, 0)",
+        )
+        .bind(url)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO history (profile_id, channel_id, path, content_key, position, duration, played_at) VALUES (1, ?, ?, NULL, 10, 100, 0)",
+        )
+        .bind(channel_id)
+        .bind(url)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO history (profile_id, channel_id, path, content_key, position, duration, played_at) VALUES (1, NULL, ?, 'tmdb:movie:999', 10, 100, 1)",
+        )
+        .bind(url)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        refresh_titles_for_playlist_for_test(&pool, playlist_id).await;
+
+        let favorite_key: Option<String> =
+            sqlx::query_scalar("SELECT content_key FROM favorites WHERE channel_url = ?")
+                .bind(url)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            favorite_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("tvg:") || key.starts_with("stream:")),
+            "the NULL favorite is backfilled: {favorite_key:?}"
+        );
+
+        let history_keys: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT content_key FROM history WHERE path = ? ORDER BY played_at")
+                .bind(url)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(history_keys.len(), 2);
+        assert_eq!(
+            history_keys[0], favorite_key,
+            "the row matched by channel_id is backfilled to the same key"
+        );
+        assert_eq!(
+            history_keys[1].as_deref(),
+            Some("tmdb:movie:999"),
+            "a row that already had a content_key is left alone, not overwritten"
+        );
+    }
+
+    /// Runs the same backfill `import_playlist`/`refresh_playlist` already run inside their own
+    /// transaction, standalone, so a test can backfill pre-existing favorites/history rows
+    /// without needing a full playlist refresh (re-fetching a URL) just to exercise it.
+    async fn refresh_titles_for_playlist_for_test(pool: &Pool<Sqlite>, playlist_id: i64) {
+        let mut tx = pool.begin().await.unwrap();
+        backfill_titles_for_playlist(&mut tx, playlist_id)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
     }
 
     fn playlist(name: &str) -> Playlist {
