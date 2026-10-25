@@ -96,9 +96,19 @@ export function BulkLinks({ onAdded, onError }: BulkLinksProps) {
     setBusy("adding");
     onError(null);
     setAddDone(0);
+    // Reloading the whole library is not free (every source's channels, re-fetched), so this
+    // doesn't fire on every single result — but it must fire well before the whole batch
+    // finishes: with hundreds of links chosen, each potentially a large playlist, "wait for
+    // every one of them" can take long enough that already-added content looks like it never
+    // arrived at all. The first success shows something immediately; every 10th keeps it current.
+    let addedSoFar = 0;
     try {
-      unlisten.current = await onBulkAddResult(() => {
+      unlisten.current = await onBulkAddResult((result) => {
         setAddDone((previous) => previous + 1);
+        if (result.outcome.kind === "added") {
+          addedSoFar += 1;
+          if (addedSoFar === 1 || addedSoFar % 10 === 0) onAdded();
+        }
       });
       const outcome = await bulkAdd([...chosen]);
       if (outcome.failed.length > 0) {
