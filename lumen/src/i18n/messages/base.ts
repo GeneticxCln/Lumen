@@ -9,6 +9,7 @@
 export const base = {
   "common.cancel": "Cancel",
   "common.loading": "Loading…",
+  "common.retry": "Retry",
   "common.off": "Off",
   "common.playerDefault": "Player default",
 
@@ -49,6 +50,8 @@ export const base = {
   "profileGate.choose": "Choose a profile",
   "profileGate.subtitle": "Watch history and My List are kept separately for each profile on this device.",
   "profileGate.none": "No profiles are available on this device.",
+  "profileGate.unavailable": "Profiles couldn’t be loaded",
+  "profileGate.unavailableBody": "Lumen could not read your profiles, so it will not open your library unlocked. {error}",
   "profileGate.tilePin": "{name} · PIN",
   "profileGate.enterPin": "Enter {name}’s PIN",
   "profileGate.unlocking": "Unlocking…",

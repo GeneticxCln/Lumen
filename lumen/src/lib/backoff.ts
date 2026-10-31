@@ -25,6 +25,11 @@ const TRANSIENT_PATTERNS = [
   "unreachable",
   "eof",
   "stopped responding",
+  // mpv's own words for a load that did not complete. A 404 also says "failed to open", so
+  // this is bounded by MAX_RETRIES and then falls through to the next ranked source.
+  "loading failed",
+  "failed to open",
+  "could not open",
 ];
 
 /** Whether `message` (an already-unwrapped error string) looks like a transient failure worth

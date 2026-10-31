@@ -410,6 +410,13 @@ impl MpvIpcBackend {
                 match reader.read_line(&mut line).await {
                     Ok(0) => {
                         connection_alive_reader.store(false, Ordering::SeqCst);
+                        // mpv closed its end of the control socket (quit, a window close, or a
+                        // crash). Emit the ended state so the page stops showing "playing".
+                        let mut st = state_reader.lock().await;
+                        st.mark_ended();
+                        if let Some(ref handle) = app_reader {
+                            let _ = handle.emit("player://state", st.clone());
+                        }
                         break;
                     }
                     Ok(_) => {
@@ -598,6 +605,11 @@ impl MpvIpcBackend {
                     }
                     Err(_) => {
                         connection_alive_reader.store(false, Ordering::SeqCst);
+                        let mut st = state_reader.lock().await;
+                        st.mark_ended();
+                        if let Some(ref handle) = app_reader {
+                            let _ = handle.emit("player://state", st.clone());
+                        }
                         break;
                     }
                 }
@@ -607,6 +619,8 @@ impl MpvIpcBackend {
         let pending_writer = pending.clone();
         let log_writer = log.clone();
         let connection_alive_writer = connection_alive.clone();
+        let state_writer = state.clone();
+        let app_writer = app.clone();
         tokio::spawn(async move {
             while let Some((req, responder)) = rx.recv().await {
                 let req_id = req.request_id;
@@ -636,6 +650,11 @@ impl MpvIpcBackend {
                         format!("mpv stopped responding (its control connection closed): {tail}")
                     };
                     connection_alive_writer.store(false, Ordering::SeqCst);
+                    let mut st = state_writer.lock().await;
+                    st.mark_ended();
+                    if let Some(ref handle) = app_writer {
+                        let _ = handle.emit("player://state", st.clone());
+                    }
                     let mut map = pending_writer.lock().await;
                     if let Some(r) = map.remove(&req_id) {
                         let _ = r.send(Err(PlayerError::Mpv(message)));
@@ -1031,6 +1050,19 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn a_closed_connection_is_reported_as_ended_and_not_playing() {
+        let mut state = crate::playback::PlayerStateEvent {
+            buffering: true,
+            paused: false,
+            ..Default::default()
+        };
+        state.mark_ended();
+        assert!(state.ended);
+        assert!(state.paused);
+        assert!(!state.buffering);
     }
 
     #[test]

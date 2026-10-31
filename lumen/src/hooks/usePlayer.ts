@@ -55,8 +55,12 @@ export function usePlayer(options: PlayerOptions = {}) {
   // channel, a new media item), so a slower-to-resolve fallback lookup started before it can tell
   // it has been overtaken and must not apply its result.
   const playEpochRef = useRef(0);
+  const [errorTick, setErrorTick] = useState(0);
   const reportError = useCallback((failure: unknown) => {
     setPlayerState((previous) => ({ ...previous, error: errorMessage(failure) }));
+    // The retry/fallback effect keys off this, not the message: two attempts can fail with the
+    // exact same text, and the initial load's rejection has no backend state event of its own.
+    setErrorTick((n) => n + 1);
   }, []);
   const clearPendingRetry = useCallback(() => {
     if (retryTimerRef.current !== null) {
@@ -65,11 +69,6 @@ export function usePlayer(options: PlayerOptions = {}) {
     }
     retryStateRef.current = null;
   }, []);
-
-  // Bumped whenever the backend reports a playback error, even one with the exact same message
-  // as last time (two same-source retries can fail identically) — plain `playerState.error`
-  // wouldn't change in that case, so the retry/fallback effect below depends on this instead.
-  const [errorTick, setErrorTick] = useState(0);
 
   useEffect(() => clearPendingRetry, [clearPendingRetry]);
 
@@ -114,11 +113,15 @@ export function usePlayer(options: PlayerOptions = {}) {
       const headers = headersRef.current;
       const channelId = current.currentChannelId;
       onNoticeRef.current?.(t("lib.notice.reconnecting", { title: currentTitleRef.current ?? t("lib.notice.thisTitle") }));
+      // A second error render (the backend error event and this effect's own rejection can both
+      // arrive) must not leave two retry timers racing the same URL.
+      if (retryTimerRef.current !== null) clearTimeout(retryTimerRef.current);
       retryTimerRef.current = setTimeout(() => {
         retryTimerRef.current = null;
         // Superseded by a Stop, a new channel, or a new media item while this was pending: that
         // action already took its own, more recent action, and must not be undone by this one.
         if (playEpochRef.current !== epoch) return;
+        setPlayerState((prev) => ({ ...prev, buffering: true, error: undefined }));
         playUrl(failedUrl, headers, channelId)
           .then(() => {
             if (playEpochRef.current !== epoch) return;
@@ -137,9 +140,8 @@ export function usePlayer(options: PlayerOptions = {}) {
         // Superseded by a Stop, a new channel, or a new media item while this was in flight: that
         // action already took its own, more recent action, and must not be undone by this one.
         if (!next || playEpochRef.current !== epoch) return;
-        await playUrl(next.url, next.headers ?? undefined, next.channel_id ?? undefined);
-        if (playEpochRef.current !== epoch) return;
-        onNoticeRef.current?.(t("lib.notice.sourceFailed", { title: currentTitleRef.current ?? t("lib.notice.thisTitle") }));
+        // Make the new source the current attempt before loading it, so if it fails too the
+        // next fallback is based on this URL rather than the one that already failed.
         headersRef.current = next.headers ?? undefined;
         setCurrentUrl(next.url);
         setCurrentChannelId(next.channel_id ?? undefined);
@@ -151,6 +153,9 @@ export function usePlayer(options: PlayerOptions = {}) {
           buffering: true,
           error: undefined,
         }));
+        await playUrl(next.url, next.headers ?? undefined, next.channel_id ?? undefined);
+        if (playEpochRef.current !== epoch) return;
+        onNoticeRef.current?.(t("lib.notice.sourceFailed", { title: currentTitleRef.current ?? t("lib.notice.thisTitle") }));
       })
       .catch(reportError);
   }, [errorTick, reportError]);
@@ -188,7 +193,9 @@ export function usePlayer(options: PlayerOptions = {}) {
     fallbackFromRef.current = null;
     clearPendingRetry();
     playEpochRef.current += 1;
-    await playUrl(channel.url, parsedHeaders, channel.id, startVolume);
+    // Record the attempt before awaiting mpv's load: the player must open with its spinner at
+    // once (a load can take up to 30s), and a failed first load has to be associated with this
+    // URL so the retry/fallback effect can act on it instead of the previous channel's URL.
     applyStartVolume(startVolume);
     headersRef.current = parsedHeaders;
     setCurrentTitle(channel.name);
@@ -203,15 +210,21 @@ export function usePlayer(options: PlayerOptions = {}) {
       title: channel.name,
       error: undefined,
     }));
-
-  }, [applyStartVolume, clearPendingRetry]);
+    try {
+      await playUrl(channel.url, parsedHeaders, channel.id, startVolume);
+    } catch (failure) {
+      reportError(failure);
+      throw failure;
+    }
+  }, [applyStartVolume, clearPendingRetry, reportError]);
 
   const playMedia = useCallback(
     async (url: string, title?: string, headers?: Record<string, string>, startVolume?: number, audioUrl?: string, channelId?: number) => {
       fallbackFromRef.current = null;
       clearPendingRetry();
       playEpochRef.current += 1;
-      await playUrl(url, headers, channelId, startVolume, audioUrl);
+      // Same ordering as `playChannel`: the spinner and the attempt's identity exist before the
+      // backend can sit in its load timeout, so a failure is attributed to this URL.
       applyStartVolume(startVolume);
       headersRef.current = headers;
       const label = title || url.split("/").pop() || url;
@@ -227,9 +240,14 @@ export function usePlayer(options: PlayerOptions = {}) {
         title: label,
         error: undefined,
       }));
-
+      try {
+        await playUrl(url, headers, channelId, startVolume, audioUrl);
+      } catch (failure) {
+        reportError(failure);
+        throw failure;
+      }
     },
-    [applyStartVolume, clearPendingRetry]
+    [applyStartVolume, clearPendingRetry, reportError]
   );
 
   const togglePause = useCallback(async () => {

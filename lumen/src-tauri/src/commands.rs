@@ -129,6 +129,23 @@ async fn play_url_inner(
 ) -> Result<()> {
     let pool = ensure_db(&app).await?;
     let profile_id = active_profile_id(pool).await?;
+    let allow_lan = allow_lan_sources(pool).await;
+    // A URL that came from a fetched playlist is untrusted: it may not open a local file, a LAN
+    // address, or a scheme Lumen never intended to hand to mpv.
+    let from_remote_playlist = match channel_id {
+        Some(id) => sqlx::query_scalar::<_, String>(
+            "SELECT p.source FROM channels c JOIN playlists p ON p.id = c.playlist_id \
+             WHERE c.id = ?",
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|source| matches!(source.as_str(), "url" | "extract" | "harvest" | "catalog")),
+        None => false,
+    };
+    crate::playback_policy::check_playback_url(&url, from_remote_playlist, allow_lan)?;
     let hwdec = get_setting(pool, "hwdec")
         .await?
         .unwrap_or_else(|| "auto-safe".to_string());
@@ -140,7 +157,12 @@ async fn play_url_inner(
         .unwrap_or_default();
     // Fails closed the same way a guarded `reqwest` client does: if network privacy is meant to
     // be on but the relay is not usable, refuse rather than ever start mpv unproxied.
-    let extra_args = with_privacy_args(&extra_args, lumen_core::privacy::child_proxy_url()?);
+    let privacy_proxy = lumen_core::privacy::child_proxy_url()?;
+    let privacy_enabled = privacy_proxy.is_some();
+    if privacy_enabled {
+        crate::playback_policy::check_privacy_route(&url)?;
+    }
+    let extra_args = with_privacy_args(&extra_args, privacy_proxy);
 
     let backend_cell = get_playback_backend().await?;
     let existing = {
@@ -228,13 +250,25 @@ async fn play_url_inner(
         Some(id) => extract_origin_for_channel(pool, id).await?,
         None => None,
     } {
-        let allow_lan = allow_lan_sources(pool).await;
         let resolved =
             extract::resolve_stream(&page, app.path().app_data_dir().ok(), allow_lan).await?;
         load_url = resolved.url;
         audio_url = resolved.audio_url;
         site_subtitles = resolved.subtitles;
         headers = Some(serde_json::to_value(resolved.headers)?);
+    }
+
+    // The stream an extractor resolved is checked the same way as a direct entry; it is the URL
+    // mpv will actually open.
+    crate::playback_policy::check_playback_url(&load_url, from_remote_playlist, allow_lan)?;
+    if let Some(audio) = audio_url.as_deref() {
+        crate::playback_policy::check_playback_url(audio, from_remote_playlist, allow_lan)?;
+    }
+    if privacy_enabled {
+        crate::playback_policy::check_privacy_route(&load_url)?;
+        if let Some(audio) = audio_url.as_deref() {
+            crate::playback_policy::check_privacy_route(audio)?;
+        }
     }
 
     let hdrs = headers.as_ref().and_then(|v| {

@@ -15,6 +15,7 @@ mod launch;
 #[cfg(target_os = "linux")]
 mod mpris;
 mod playback;
+mod playback_policy;
 mod privacy;
 mod sync;
 mod updater;

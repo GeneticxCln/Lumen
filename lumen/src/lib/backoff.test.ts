@@ -18,6 +18,9 @@ const transientMessages = [
   "HTTP error: connection reset by peer",
   "HTTP error: connection refused",
   "network is unreachable",
+  "mpv error: loading failed",
+  "mpv error: failed to open https://cdn.example/live.m3u8",
+  "mpv error: could not open stream",
 ];
 for (const message of transientMessages) {
   assert(isTransientPlaybackError(message), `"${message}" should be treated as transient`);

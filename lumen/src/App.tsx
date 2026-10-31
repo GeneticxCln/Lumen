@@ -81,6 +81,9 @@ function App() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState<number | null>(null);
   const [locked, setLocked] = useState(false);
+  // Until the profile list has actually been read, the app must not render as if it were
+  // unlocked: the lock decision needs `active_profile`, which is one of the calls that can fail.
+  const [profilesReady, setProfilesReady] = useState(false);
   const [profileError, setProfileError] = useState<string | null>(null);
   // The profile id this session has confirmed is unlocked (no PIN, or its PIN was just verified).
   // `null` until the first load decides.
@@ -109,17 +112,18 @@ function App() {
       setProfiles(list);
       setActiveProfileId(active.id);
       setProfileError(null);
+      setProfilesReady(true);
       if (verifiedProfileId !== undefined) unlockedProfileId.current = verifiedProfileId;
       const needsUnlock = active.has_pin && list.length > 0 && active.id !== unlockedProfileId.current;
       if (!needsUnlock) unlockedProfileId.current = active.id;
       setLocked(needsUnlock);
     } catch (error) {
-      // The browser development bridge has no profile API. Say so and fail open rather than
-      // hiding the library behind a lock that could never be satisfied.
-      setProfiles([]);
-      setActiveProfileId(null);
-      setLocked(false);
+      // Fail closed. An unreadable profile list is not evidence that nothing is locked; opening
+      // the library here would defeat a PIN exactly when the backend is unhealthy. Keep any
+      // profiles already known and leave the gate up, with a retry on the error screen below.
+      setLocked(true);
       setProfileError(errorMessage(error));
+      setProfilesReady(true);
     }
   }, []);
 
@@ -195,7 +199,11 @@ function App() {
   async function play(channel: Channel) {
     if (busy) return;
     setBusy(true);
-    await run(async () => { await player.playChannel(channel, preferences.defaultVolume); setPlayerOpen(true); setDetails(null); });
+    // Open the player and its buffering spinner before waiting for mpv. A slow stream can take
+    // up to its 30s load timeout, and until now nothing appeared until that finished.
+    setPlayerOpen(true);
+    setDetails(null);
+    await run(async () => { await player.playChannel(channel, preferences.defaultVolume); });
     setBusy(false);
   }
 
@@ -222,8 +230,8 @@ function App() {
 
   async function playFile(path: string, name?: string, headers?: Record<string, string>, audioUrl?: string, channelId?: number) {
     try {
-      await player.playMedia(path, name, headers, preferences.defaultVolume, audioUrl, channelId);
       setPlayerOpen(true);
+      await player.playMedia(path, name, headers, preferences.defaultVolume, audioUrl, channelId);
     } catch (error) {
       setNotice(errorMessage(error));
       throw error;
@@ -561,6 +569,22 @@ function App() {
   const searchShortcut = typeof navigator !== "undefined" && /mac|iphone|ipad/i.test(navigator.userAgent) ? t("app.search.shortcutMac") : t("app.search.shortcutOther");
 
   const detailSource = details ? library.playlists.find((source) => source.id === details.playlist_id)?.name : undefined;
+
+  if (!profilesReady) {
+    return <div className="profile-gate" role="status" aria-live="polite">
+      <div className="profile-gate-card"><p className="eyebrow">{t("common.loading")}</p></div>
+    </div>;
+  }
+  if (profileError && profiles.length === 0) {
+    return <div className="profile-gate">
+      <div className="profile-gate-card">
+        <p className="eyebrow">{t("profileGate.eyebrow")}</p>
+        <h1 className="profile-gate-title">{t("profileGate.unavailable")}</h1>
+        <p className="profile-gate-sub">{t("profileGate.unavailableBody", { error: profileError })}</p>
+        <button className="primary-button" type="button" onClick={() => void loadProfiles()}>{t("common.retry")}</button>
+      </div>
+    </div>;
+  }
 
   return <>
     <div className={`app${player.currentUrl ? " has-dock" : ""}`} inert={locked}>

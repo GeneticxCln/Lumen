@@ -144,6 +144,8 @@ export interface PlayerState extends PlayerOptions {
   buffering: boolean;
   title?: string;
   error?: string;
+  /** The player's control connection ended (mpv closed or crashed); nothing is playing. */
+  ended?: boolean;
 }
 
 export const DEFAULT_PLAYER_OPTIONS: PlayerOptions = {
@@ -161,6 +163,7 @@ export const DEFAULT_PLAYER_STATE: PlayerState = {
   time: 0,
   duration: 0,
   buffering: false,
+  ended: false,
 };
 
 // One offered poster frame. `image` is a data URL, or null when the video ends before that frame.

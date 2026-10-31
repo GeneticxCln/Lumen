@@ -20,6 +20,14 @@ and 15 need the v2 `content_key` migration, which is designed in
 [IDENTITY-MIGRATION.md](IDENTITY-MIGRATION.md) but deliberately not enabled yet: flipping the
 derivation without the migration would orphan existing My List and history rows.
 
+**The player/privacy batch (16–19, 23–25) landed on main on 2026-10-31 (unreleased).** The player
+now opens with its spinner before mpv's load, records the attempted URL so a failed first load
+falls back, and emits an ended state when the control connection closes. The retry classifier
+learned mpv's real load-failure wording. PIN loading is fail-closed. A new
+`src-tauri/src/playback_policy.rs` allowlists playback schemes, rejects local files from fetched
+playlists, applies `netguard` to LAN addresses, and refuses non-HTTP protocols while network
+privacy is on.
+
 **State of the real library after the audit's own mistake** (it ran the release binary with
 `--version`, which opened the full app for about 3 minutes): SQLite `quick_check` is `ok`; the 186
 lists and 14.76M channels are intact. Settings changed: `last_visit_1`, `update_last_check`, and
@@ -94,15 +102,20 @@ limits/warnings — not a small patch.
 ## Open — playback and updates (16–22)
 
 16. **The same-URL retry doesn't fire on load failures.** Real mpv load errors ("loading failed",
-    "failed to open") match none of `backoff.ts`'s patterns. **Open, reported** `[Ran]`.
+    "failed to open") matched none of `backoff.ts`'s patterns. **Fixed (unreleased):** those
+    patterns were added, bounded by the existing three-attempt budget; `backoff.test.ts`.
 17. **A failed first load gets no fallback**, and failing over from a playing channel can target
     the wrong (previous) channel because the current URL is only stored after a successful load.
-    **Open, reported** (`usePlayer.ts:191`).
-18. **Closing mpv or an mpv crash leaves the UI showing "playing".** The reader loop sets
-    `connection_alive=false` and breaks without emitting any event. **Open, confirmed**
-    (`mpv_ipc.rs`, reader loop).
+    **Fixed (unreleased):** `playChannel`/`playMedia` record the attempt and buffering state before
+    awaiting the backend, and a rejected `playUrl` now feeds the retry/fallback effect; a new
+    fallback URL is also current before it is loaded. No frontend unit test — this codebase's
+    frontend tests cover pure logic only.
+18. **Closing mpv or an mpv crash leaves the UI showing "playing".** **Fixed (unreleased):**
+    `PlayerStateEvent` carries `ended`, set on read EOF, a read error, and a failed write, and
+    emitted as `player://state`; test in `mpv_ipc.rs`.
 19. **Nothing shows while a stream loads** — no spinner or Stop; the action can block about 30s.
-    **Open, reported** (`App.tsx:195`).
+    **Fixed (unreleased):** the overlay opens and buffering is set before the backend load, so
+    the existing spinner and Stop button are available immediately (`App.tsx`, `usePlayer.ts`).
 20. **After one self-update, Settings only offers Restart**, because `update_installed_tag` is
     never cleared. **Open, reported** (`updater.rs:189`, `UpdateSettings.tsx:78`).
 21. **Fallback isn't ranked.** `title_sources.rank` is inserted as `0` for every row, so
@@ -116,15 +129,19 @@ limits/warnings — not a small patch.
 
 23. **Network privacy leaks for non-HTTP streams.** With privacy on, `rtsp`, `rtmp`, `tcp`, `ftp`
     and `mms` streams connected directly, because mpv only receives `--http-proxy` (which covers
-    HTTP(S)). The docs' "fail-closed throughout" does not hold for those schemes. **Open,
-    reported** `[Ran]`; the mechanism matches the code. This also means `AUDIT.md`'s
-    network-privacy paragraph overstates its coverage.
+    HTTP(S)). **Fixed (unreleased):** when privacy is on, `playback_policy` refuses any URL that
+    is not HTTP(S) or a local file, and the check runs before mpv starts; tests in
+    `src-tauri/src/playback_policy.rs`.
 24. **Playlist entries have no scheme or address check before reaching mpv.** A remote playlist
-    can aim playback at `file://` paths or LAN addresses even with local sources off. **Open,
-    reported** (`m3u.rs:189`, `commands.rs:259`).
-25. **The PIN lock fails open.** Any error loading profiles sets `locked=false` (the comment
-    defends a browser bridge that no longer exists), and the lock starts open until profiles load.
-    **Open, confirmed** (`App.tsx`, `loadProfiles`).
+    can aim playback at `file://` paths or LAN addresses even with local sources off. **Fixed
+    (unreleased):** a playback allowlist rejects unknown schemes, refuses local files from fetched
+    playlists, and runs HTTP(S) through `netguard` (so private addresses need the local-network
+    setting); tests in `src-tauri/src/playback_policy.rs`.
+25. **The PIN lock fails open.** Any error loading profiles set `locked=false` (the comment
+    defended a browser bridge that no longer exists), and the lock started open until profiles
+    load. **Fixed (unreleased):** the app renders a neutral loading gate until the profile list is
+    read, a failed read keeps/puts the gate up, and an empty profile list shows an error screen
+    with Retry instead of the library (`App.tsx`).
 26. **yt-dlp is about 9 months out of date.** The manifest pins `2026.02.04`; a yt-dlp found on
     `PATH` may run unverified. **Open, confirmed** for the pin
     (`crates/lumen-core/yt-dlp-manifest.json`); the `PATH` fallback is reported
@@ -185,6 +202,7 @@ release signature files, and the published assets.
    query, add the tag/version check.~~ Done.
 2. Identity and resume (6–15). Phase 1 (8–14) is on main; phase 2 (6, 7, 15) needs the v2 key
    migration before the derivation can change.
-3. Player state (16–19) and privacy (23–25), including an allowlist of stream schemes for mpv.
+3. ~~Player state (16–19) and privacy (23–25), including an allowlist of stream schemes for
+   mpv.~~ Done on main (unreleased).
 4. Rework library loading (5) before adding features; until then the real library stays too big to
    load, and only trimming it from the UI helps.

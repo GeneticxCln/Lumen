@@ -26,6 +26,11 @@ pub struct PlayerStateEvent {
     pub time: f64,
     pub duration: f64,
     pub buffering: bool,
+    /// Set when the control connection ends (mpv closed, crashed, or the embedded engine died),
+    /// so the page stops presenting the stream as playing. Serde-default so older payloads and
+    /// tests still deserialize.
+    #[serde(default)]
+    pub ended: bool,
     pub title: Option<String>,
     pub error: Option<String>,
     pub tracks: Vec<PlayerTrack>,
@@ -36,6 +41,16 @@ pub struct PlayerStateEvent {
     pub quality_help: String,
 }
 
+impl PlayerStateEvent {
+    /// Marks the control connection as ended, so the page stops presenting the stream as
+    /// playing even though no new frame will ever arrive.
+    pub fn mark_ended(&mut self) {
+        self.ended = true;
+        self.paused = true;
+        self.buffering = false;
+    }
+}
+
 impl Default for PlayerStateEvent {
     fn default() -> Self {
         Self {
@@ -43,6 +58,7 @@ impl Default for PlayerStateEvent {
             time: 0.0,
             duration: 0.0,
             buffering: false,
+            ended: false,
             title: None,
             error: None,
             tracks: Vec::new(),
