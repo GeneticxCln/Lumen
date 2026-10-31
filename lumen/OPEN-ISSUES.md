@@ -14,11 +14,12 @@ tests named there", not as real-world proof: this audit reproduced failures thos
 - **Open, reported** — the auditor's finding, marked `[Ran]`/`[Read]` as they did; not re-run here.
 - **Deferred** — needs a schema or sync-protocol change and a data migration.
 
-**Phase 1 of the identity/resume batch landed on main on 2026-10-31 (unreleased).** Issues 8–14
-are fixed, with six regression tests in `crates/lumen-core/src/identity_tests.rs`. Issues 6, 7
-and 15 need the v2 `content_key` migration, which is designed in
-[IDENTITY-MIGRATION.md](IDENTITY-MIGRATION.md) but deliberately not enabled yet: flipping the
-derivation without the migration would orphan existing My List and history rows.
+**The identity/resume batch is complete on main (unreleased in 0.1.13).** Issues 8–14 are fixed,
+with six regression tests in `crates/lumen-core/src/identity_tests.rs`. Issues 6 and 7 are fixed
+by the v2 derivation and the resumable migration in `content_migration.rs`; it was run against a
+copy of the real library (14,760,400 channels, 143.6s, `quick_check=ok`, version 2). Issue 15's
+paged title backfill is still open: the real snapshot had no title sources, so the migration
+correctly skipped an hours-long 14.76M-row rebuild.
 
 **The player/privacy batch (16–19, 23–25) landed on main on 2026-10-31 (unreleased).** The player
 now opens with its spinner before mpv's load, records the attempted URL so a failed first load
@@ -63,11 +64,12 @@ limits/warnings — not a small patch.
 6. **Different channels merge into one.** `ContentKey::for_stream_url` hashes the URL after
    stripping the query and fragment, so `…/play.php?id=1` and `…/?id=2` get the same key:
    favoriting one favorites both, history collapses into one row, fallback can jump between them.
-   **Open — v2 key change designed, not enabled** (`content_key.rs`, `for_stream_url`; see
-   [IDENTITY-MIGRATION.md](IDENTITY-MIGRATION.md)).
+   **Fixed (unreleased):** v2 keeps distinguishing query parameters and strips only credentials;
+   `content_key.rs` tests plus the synthetic and real-copy migration tests in
+   `content_migration_tests.rs` / [IDENTITY-MIGRATION.md](IDENTITY-MIGRATION.md).
 7. **`tvg-id="None"` merges unrelated titles.** `for_tvg` accepts any non-empty string, including
-   the literal placeholder. **Open — v2 key change designed, not enabled** (`content_key.rs`,
-   `for_tvg`; see [IDENTITY-MIGRATION.md](IDENTITY-MIGRATION.md)).
+   the literal placeholder. **Fixed (unreleased):** placeholder ids fall through to the stream
+   key; covered by the v2 key tests and the migration fixture.
 8. **Removing a favorite through another source doesn't remove it from My List.** **Fixed
    (unreleased):** toggling off now clears every active row sharing the title key;
    `identity_tests::unfavoriting_one_source_clears_the_title_everywhere`.
@@ -95,9 +97,11 @@ limits/warnings — not a small patch.
     `identity_tests::an_old_progress_tombstone_does_not_delete_newer_history`.
 15. **Fallback and "new since last visit" cannot work on an existing library.** `titles` is only
     populated by a one-time backfill gated on `titles_backfill_v1`; import now writes it, but a
-    database whose channels predate that never runs it again, so `titles` stays empty. **Open —**
-    the v2 backfill is part of [IDENTITY-MIGRATION.md](IDENTITY-MIGRATION.md); the current one-shot
-    `fetch_all` must not be run against a 14.76M-row library as-is.
+    database whose channels predate that never runs it again, so `titles` stays empty. **Still
+    open for the real library.** The v2 migration pages its own title rebuild, but with zero
+    `title_sources` it correctly skips materializing 14.76M rows; the one-shot `fetch_all`
+    backfill still must not be run against that library. This needs the paged backfill planned
+    with issue 5.
 
 ## Open — playback and updates (16–22)
 
@@ -200,8 +204,8 @@ release signature files, and the published assets.
 
 1. ~~Release v0.1.12: remove the reconnect flags, enable TLS in the Flatpak, batch the delete
    query, add the tag/version check.~~ Done.
-2. Identity and resume (6–15). Phase 1 (8–14) is on main; phase 2 (6, 7, 15) needs the v2 key
-   migration before the derivation can change.
+2. Identity and resume (6–15). Phase 1 (8–14) and the v2 key migration (6, 7) are on main. Issue
+   15's paged title backfill remains.
 3. ~~Player state (16–19) and privacy (23–25), including an allowlist of stream schemes for
    mpv.~~ Done on main (unreleased).
 4. Rework library loading (5) before adding features; until then the real library stays too big to

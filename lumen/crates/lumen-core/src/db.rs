@@ -115,6 +115,12 @@ pub async fn init_db(app_dir: &Path) -> Result<Pool<Sqlite>> {
         if let Err(e) = backfill_channel_languages(&backfill_pool).await {
             eprintln!("lumen: channel language backfill failed: {}", e);
         }
+        // Runs before the title backfill: it rebuilds titles itself and marks that backfill done.
+        // A 14.76M-channel database can take a while, so it stays off the startup path and its
+        // cursor makes it resumable across restarts.
+        if let Err(e) = crate::content_migration::migrate_content_keys_v2(&backfill_pool).await {
+            eprintln!("lumen: content-key v2 migration failed: {}", e);
+        }
         if let Err(e) = backfill_titles_and_sources(&backfill_pool).await {
             eprintln!("lumen: titles and title_sources backfill failed: {}", e);
         }
@@ -336,7 +342,7 @@ pub(crate) async fn upsert_title_and_source(
 /// One channel row's worth of `upsert_title_and_source`'s inputs, with `content_key` and
 /// `kind`/`season`/`episode` precomputed so `batch_upsert_titles_and_sources` never needs the
 /// raw row again.
-struct TitleBackfillRow {
+pub(crate) struct TitleBackfillRow {
     channel_id: i64,
     url: String,
     content_key: String,
@@ -359,7 +365,7 @@ struct TitleBackfillRow {
 /// `backfill_titles_and_sources` and `backfill_titles_for_playlist` select: `id, name, url,
 /// tvg_id, extra_headers, is_live, tmdb_id, tmdb_type, poster_path, backdrop_path, overview,
 /// release_year, genre_names`.
-fn title_backfill_row_from(row: &SqliteRow) -> TitleBackfillRow {
+pub(crate) fn title_backfill_row_from(row: &SqliteRow) -> TitleBackfillRow {
     let channel_id: i64 = row.get("id");
     let title: String = row.get("name");
     let url: String = row.get("url");
@@ -404,7 +410,7 @@ fn title_backfill_row_from(row: &SqliteRow) -> TitleBackfillRow {
 /// fast: the single-row version needs four statement round trips per channel (400,000 of them
 /// for 100,000 channels), which is what made that path slow enough to make bulk-adding many
 /// playlists at once feel like it had hung.
-async fn batch_upsert_titles_and_sources(
+pub(crate) async fn batch_upsert_titles_and_sources(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     rows: &[TitleBackfillRow],
     now: i64,
@@ -618,7 +624,7 @@ pub(crate) async fn rekey_content(
 }
 
 /// Settings key recording that titles and title_sources were backfilled.
-const TITLES_BACKFILL_SETTING: &str = "titles_backfill_v1";
+pub(crate) const TITLES_BACKFILL_SETTING: &str = "titles_backfill_v1";
 
 /// Backfills `titles` and `title_sources` from existing `channels`, and populates `content_key`
 /// on pre-existing `favorites` and `history` rows.
@@ -2909,7 +2915,7 @@ mod tests {
         assert!(
             favorite_key
                 .as_deref()
-                .is_some_and(|key| key.starts_with("tvg:") || key.starts_with("stream:")),
+                .is_some_and(|key| key.starts_with("tvg:") || key.starts_with("stream2:")),
             "the NULL favorite is backfilled: {favorite_key:?}"
         );
 
@@ -4016,7 +4022,7 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            old_key.starts_with("stream:"),
+            old_key.starts_with("stream2:"),
             "no tvg_id and no TMDB match yet, so this starts on the weakest fallback key: {old_key}"
         );
 

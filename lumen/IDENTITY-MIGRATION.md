@@ -1,10 +1,11 @@
 # Identity migration plan (content keys, v2)
 
-Status: **phase 1 landed, migration not yet run.** The resume, favorite, merge and sync fixes that
-do not change stored keys are in the tree. Issues 6 and 7 *do* change `content_key` derivation, so
-they are deliberately not switched on until the migration below exists and has been tested on a
-copy of a real database. Shipping the derivation change alone would orphan existing My List and
-history rows.
+Status: **implemented and verified on a copy of the real 14.76M-channel database.** The v2
+derivation and the resumable runner are live; issues 6 and 7 are fixed. The snapshot used for the
+real run had no favorites, history or title sources, so those rekey paths are covered by the
+synthetic migration tests, not by that snapshot. Issue 15's title backfill is still only rebuilt
+when `title_sources` exists; the real library's empty title tables need the paged backfill planned
+with the library-scale work.
 
 Related: [OPEN-ISSUES.md](OPEN-ISSUES.md) issues 6, 7, 8, 9, 15.
 
@@ -110,7 +111,41 @@ There is no in-place undo for a destructive rekey. The `VACUUM INTO` backup is t
 the app, replace `lumen.db` with the backup. Do not delete the backup automatically; keep the most
 recent one and mention its path in the log.
 
-## Test plan before enabling
+## Implementation and results
+
+- `crates/lumen-core/src/content_migration.rs`: versioned runner with `content_key_version`,
+  `content_key_migration_cursor` and `content_key_migration_started_at` settings. It starts in
+  `init_db`'s background task before the title backfill.
+- `VACUUM INTO` a sibling `lumen.db.pre-key-v2-<timestamp>.db` before the first write. If the
+  backup fails, the migration stops before touching anything.
+- Keyset batches of 500 channels; the cursor is committed in the same transaction as that batch's
+  rekeys. Empty tables are detected once, so a 14.76M-channel library with no favorites/history/
+  title sources is a scan rather than three lookups per channel.
+- Favorites and history are scoped by both URL/path and the legacy key, so query-distinct streams
+  split correctly. `title_sources` gets its v2 `titles` row first (foreign key) and is rebuilt in
+  pages. Legacy `titles` rows are removed only when no source references them.
+- Sync tombstones/fresh pushes are queued only when this device has synced at least once; a
+  sync-disabled library does not accumulate millions of queue rows.
+- Completion requires all three identity tables to have no legacy keys and `PRAGMA quick_check`
+  to return `ok`.
+
+### Real database copy
+
+Run against a snapshot of `~/.local/share/com.quinton.lumen/lumen.db` (14,760,400 channels):
+
+- **143.6 s** in a release build, including the `VACUUM INTO` backup (5.4 GB).
+- `content_key_version = 2`, cursor absent, zero legacy keys, `quick_check = ok`.
+- The snapshot had 0 favorites, 0 history, 0 titles and 0 title_sources, so it exercised the
+  channel scan, backup, verification and completion path. The rekey paths for the other tables are
+  covered by the synthetic fixture (`content_migration_tests.rs`), which includes two query-distinct
+  URLs sharing the old `stream:` key and a `tvg-id="None"` group.
+- The real library's `titles` table was already empty (`titles_backfill_v1 = done`), and with no
+  title sources the runner correctly skips an hours-long 14.76M-row title rebuild. Fallback/"new
+  since last visit" therefore remain empty on this library until the paged title backfill lands.
+
+Rollback: quit Lumen, then replace `lumen.db` with the `.pre-key-v2-*.db` file named in the log.
+
+## Test plan
 
 1. **Unit:** v2 stream keys separate `?id=1`/`?id=2`; rotating `token`/`expires` keeps one key;
    fragments ignored; placeholder `tvg-id`s fall through; real IDs unchanged.
@@ -128,8 +163,9 @@ recent one and mention its path in the log.
 
 ## Not in this migration
 
-- Issue 15's backfill also needs its `fetch_all` replaced with keyset paging; do that in the same
-  change or the migration will load 14.76M rows into memory.
+- Issue 15's backfill still needs its `fetch_all` replaced with keyset paging. The migration
+  already pages its own title rebuild, but with no `title_sources` it skips that rebuild rather
+  than materializing 14.76M rows; the real library's empty title tables need the paged backfill.
 - Issue 9's cross-URL *active* favorite is handled by the phase-1 `apply_favorite` fix (tombstones
   match by content key). v2 only changes which key that is.
 - Playlist URLs themselves are not rewritten; only identity hashes change.

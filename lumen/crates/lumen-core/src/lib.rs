@@ -4,6 +4,7 @@ pub mod bulk;
 pub mod cast;
 pub mod child_env;
 pub mod content_key;
+pub mod content_migration;
 pub mod db;
 pub mod diagnostics;
 pub mod error;
@@ -30,6 +31,8 @@ pub mod tmdb;
 pub mod update;
 pub mod update_sig;
 
+#[cfg(test)]
+mod content_migration_tests;
 #[cfg(test)]
 mod identity_tests;
 #[cfg(test)]
