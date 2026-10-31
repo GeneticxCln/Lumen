@@ -1,5 +1,5 @@
 import { t, tn } from "../i18n/index.ts";
-import type { BrowseTitle, Channel, HistoryEntry } from "./types.ts";
+import type { BrowseTitle, CatalogShelves, Channel, FacetCounts, HistoryEntry } from "./types.ts";
 
 // Names and descriptions are read when the page draws them, so they follow the language in use.
 export const themes = [
@@ -343,6 +343,24 @@ export function buildFacets(channels: Channel[], selection: FacetSelection): Fac
   };
 }
 
+/** Builds the same rails from full-library counts returned by the backend. */
+export function buildFacetsFromCounts(counts: FacetCounts): Facets {
+  const toMap = (values: FacetCounts["groups"]) => new Map(values.map((entry) => [entry.value, entry.count]));
+  const labelGenre = (value: string) => (value === UNKNOWN_FACET ? t("lib.facet.genreUnknown") : value);
+  const labelYear = (value: string) => (value === UNKNOWN_FACET ? t("lib.facet.yearUnknown") : value);
+  return {
+    groups: facetList(toMap(counts.groups), counts.totals.groups, groupLabel),
+    genres: facetList(toMap(counts.genres), counts.totals.genres, labelGenre),
+    years: facetList(toMap(counts.years), counts.totals.years, labelYear, (a, b) => {
+      if (a.value === UNKNOWN_FACET) return 1;
+      if (b.value === UNKNOWN_FACET) return -1;
+      return Number(b.value) - Number(a.value);
+    }),
+    hasTmdbGenres: counts.has_tmdb_genres,
+    enriched: counts.enriched,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Discovery shelves: the TMDB catalogue, arranged by real TMDB metadata.
 // ---------------------------------------------------------------------------
@@ -413,6 +431,26 @@ export function catalogShelves(channels: Channel[]): CatalogShelf[] {
  * One line of detail for a browse-only TMDB title: year, rating and up to two genres.
  * Browse titles are not in the library, so nothing here depends on local playback data.
  */
+/** Turns the backend's full-library shelf rows into the same localized shelf model. */
+export function catalogShelvesFromServer(data: CatalogShelves): CatalogShelf[] {
+  const shelves: CatalogShelf[] = [];
+  if (data.top_rated.length) {
+    shelves.push({ id: "top-rated", title: t("lib.shelf.topRated.title"), subtitle: t("lib.shelf.topRated.subtitle"), channels: data.top_rated });
+  }
+  if (data.recent.length) {
+    shelves.push({ id: "recent", title: t("lib.shelf.recent.title"), subtitle: t("lib.shelf.recent.subtitle"), channels: data.recent });
+  }
+  for (const shelf of data.genres) {
+    shelves.push({
+      id: `genre-${shelf.genre}`,
+      title: shelf.genre,
+      subtitle: tn("lib.shelf.genre", shelf.channels.length),
+      channels: shelf.channels,
+    });
+  }
+  return shelves;
+}
+
 export function browseCaption(title: BrowseTitle): string {
   const genres = (title.genre_names || "").split(";").map((value) => value.trim()).filter(Boolean).slice(0, 2);
   const parts = [

@@ -449,10 +449,12 @@ async fn rekey_orphan_title_sources(pool: &Pool<Sqlite>, batch: i64) -> Result<(
 /// afterwards only when nothing references them.
 async fn rebuild_titles(pool: &Pool<Sqlite>, batch: i64) -> Result<()> {
     // With no sources there is nothing whose key changed, and rebuilding 14.76M title rows here
-    // would be an hours-long, multi-gigabyte backfill unrelated to this migration. Leave that to
-    // the paged title backfill planned with the library-scale work.
+    // would be an hours-long, multi-gigabyte backfill unrelated to this migration. The paged
+    // `backfill_titles_and_sources` startup pass now uses a new settings key, so it rebuilds
+    // those rows after this migration instead of skipping an old `v1 = done` marker.
     if count(pool, "title_sources").await? == 0 {
-        crate::db::set_setting(pool, TITLES_BACKFILL_SETTING, "done").await?;
+        // Do NOT write the completion marker: the paged startup backfill must still run and
+        // populate `titles` from `channels`. Writing it here was what kept old databases empty.
         return Ok(());
     }
     let mut cursor = 0i64;

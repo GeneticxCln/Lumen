@@ -526,6 +526,7 @@ pub async fn enrich(pool: &Pool<Sqlite>, limit: i64, force: bool) -> Result<Enri
                 )
                 .into_string();
                 rekey_content(&mut tx, &old_key, &new_key, now_ms).await?;
+                crate::db::refresh_channel_facets_tx(&mut tx, *channel_id).await?;
 
                 tx.commit()
                     .await
@@ -568,6 +569,25 @@ pub async fn clear_enrichment(pool: &Pool<Sqlite>) -> Result<i64> {
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?
     .rows_affected();
+
+    // Every kind/genre/release year just changed. Drop the derived index and mark it unready;
+    // the UI falls back to loaded-page counts until the background rebuild finishes.
+    sqlx::query("DELETE FROM channel_facets")
+        .execute(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    sqlx::query(
+        "DELETE FROM settings WHERE key IN ('channel_facets_ready', 'channel_facets_cursor')",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let pool = pool.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::db::backfill_channel_facets(&pool).await {
+            eprintln!("lumen: channel facets rebuild failed: {}", e);
+        }
+    });
 
     Ok(affected as i64)
 }

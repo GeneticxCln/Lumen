@@ -19,11 +19,13 @@ import { LocalDevicePage } from "./components/LocalDevicePage";
 import { SearchEnginePage } from "./components/SearchEnginePage";
 import { usePlayer } from "./hooks/usePlayer";
 import { useChannels } from "./hooks/useChannels";
-import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, getPlayerPrefs, listProfiles, onSyncApplied, setPlayerFullscreen, tmdbStatus, updateRestart, updateState } from "./lib/tauri";
+import { useBrowse } from "./hooks/useBrowse";
+import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, getPlayerPrefs, listProfiles, onSyncApplied, setPlayerFullscreen, tmdbStatus, updateRestart, updateState, libraryCatalog } from "./lib/tauri";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { BrowseTitle } from "./lib/types";
 import type { CastState, Channel, HistoryEntry, PlayerPrefs, Profile, UpdateEventPayload } from "./lib/types";
-import { readPreferences, recommendChannels, catalogShelves, contentKind, isAdult, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
+import { readPreferences, recommendChannels, catalogShelves, catalogShelvesFromServer, contentKind, isAdult, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
+import type { CatalogShelf } from "./lib/discovery";
 import { isLocalPath } from "./lib/local";
 import { refreshNetworkPrivacyEnabled } from "./lib/networkPrivacy";
 import { nextEpisode } from "./lib/episodes";
@@ -423,7 +425,50 @@ function App() {
     (!preferences.hideUnavailable || !channel.last_error) &&
     (preferences.showAdult || !isAdult(channel))
   ), [library.channels, preferences.hideUnavailable, preferences.showAdult]);
-  const catalog = useMemo(() => catalogShelves(available), [available]);
+  const browseKind = page === "movies" ? "movie" : page === "series" ? "series" : page === "live" ? "live" : null;
+  const serverBrowse = useBrowse({
+    enabled: browseKind !== null,
+    playlistId: library.selectedPlaylistId,
+    kind: browseKind,
+    selection: facetSelection,
+    hideUnavailable: preferences.hideUnavailable,
+    showAdult: preferences.showAdult,
+    refreshTrigger: refresh,
+    onChannels: library.addChannels,
+  });
+  const [serverCatalog, setServerCatalog] = useState<CatalogShelf[] | null>(null);
+  const catalogPlaylistId = library.selectedPlaylistId;
+  const addCatalogChannels = library.addChannels;
+  useEffect(() => {
+    if (page !== "discovery") return;
+    let active = true;
+    let timer: number | undefined;
+    const load = () => {
+      libraryCatalog(catalogPlaylistId, preferences.hideUnavailable, preferences.showAdult)
+        .then((data) => {
+          if (!active) return;
+          if (data.ready) {
+            addCatalogChannels([...data.top_rated, ...data.recent, ...data.genres.flatMap((shelf) => shelf.channels)]);
+            setServerCatalog(catalogShelvesFromServer(data));
+          } else {
+            setServerCatalog(null);
+            timer = window.setTimeout(load, 60_000);
+          }
+        })
+        .catch(() => {
+          if (!active) return;
+          setServerCatalog(null);
+          timer = window.setTimeout(load, 60_000);
+        });
+    };
+    void load();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [page, refresh, catalogPlaylistId, addCatalogChannels, preferences.hideUnavailable, preferences.showAdult]);
+  const fallbackCatalog = useMemo(() => catalogShelves(available), [available]);
+  const catalog = serverCatalog ?? fallbackCatalog;
   // What's playing, looked up across the whole library so the idle/buffering player stage can
   // show its art as a backdrop instead of flat black. Undefined for an external (non-library) URL.
   const currentChannel = useMemo(
@@ -471,6 +516,16 @@ function App() {
   // Entries added since this profile last used Lumen. The backend answers the same way for the
   // whole session, so this is "since the previous session" however often it is asked.
   const [newChannelIds, setNewChannelIds] = useState<number[]>([]);
+  const ensureChannels = library.ensureChannels;
+  // History and the "new since last visit" row can reference channels outside the first page.
+  // Hydrate exactly those ids rather than every channel in a 14.76M-row library.
+  useEffect(() => {
+    const ids = [
+      ...history.flatMap((entry) => entry.channel_id === undefined ? [] : [entry.channel_id]),
+      ...newChannelIds,
+    ];
+    if (ids.length > 0) void ensureChannels(ids);
+  }, [history, newChannelIds, ensureChannels]);
   // Watched marks set by hand, and the schedules of followed series.
   const [marks, setMarks] = useState<EpisodeMark[]>([]);
   const [upcoming, setUpcoming] = useState<UpcomingSeries[]>([]);
@@ -505,7 +560,7 @@ function App() {
     let active = true;
     boardNewChannelIds().then((ids) => { if (active) setNewChannelIds(ids ?? []); }).catch(() => { if (active) setNewChannelIds([]); });
     return () => { active = false; };
-  }, [activeProfileId, library.allChannels]);
+  }, [activeProfileId, refresh]);
   const recommendations = useMemo(() => recommendChannels(available, preferences.personalizedRows ? history : [], preferences.personalizedRows ? library.favoriteIds : new Set()), [available, history, library.favoriteIds, preferences.personalizedRows]);
 
   const board = useMemo(
@@ -523,6 +578,16 @@ function App() {
   }, [page, byKind, available]);
   const facets = useMemo(() => buildFacets(baseChannels, facetSelection), [baseChannels, facetSelection]);
   const browseChannels = useMemo(() => baseChannels.filter((channel) => matchesFacets(channel, facetSelection)), [baseChannels, facetSelection]);
+  // When the full-library index exists, the backend owns both counts and filtering. Otherwise
+  // the pre-index behavior (loaded pages only) keeps the page usable while it builds.
+  const useServerBrowse = serverBrowse.ready === true && serverBrowse.facets !== null;
+  const shownFacets = useServerBrowse ? serverBrowse.facets! : facets;
+  const shownBrowseChannels = useServerBrowse ? serverBrowse.channels : browseChannels;
+  const shownBrowseTotal = useServerBrowse ? serverBrowse.total : browseChannels.length;
+  const shownBrowseLoading = useServerBrowse ? serverBrowse.loading : library.loading;
+  const shownBrowseMore = useServerBrowse ? serverBrowse.hasMore : library.hasMore;
+  const shownBrowseLoadingMore = useServerBrowse ? serverBrowse.loadingMore : library.loadingMore;
+  const loadMoreBrowse = useServerBrowse ? serverBrowse.loadMore : library.loadMore;
   const filtered = Boolean(library.searchQuery.trim()) || facetCount(facetSelection) > 0 || library.selectedPlaylistId !== null;
 
   // Switching sections resets the browsing filters but keeps the top-bar search: someone who
@@ -678,24 +743,24 @@ function App() {
         onLibraryChanged={() => { setRefresh((value) => value + 1); library.loadChannels(); }}
         onOpenSources={() => openSettings("sources")}
       /> : <div className="browse-content standalone-content">
-          <div className="page-heading"><div><p className="eyebrow">{t("app.browse.eyebrow")}</p><h1>{t(headings[page as Exclude<Page, "discovery" | "search" | "local" | "settings">].title)}</h1><p>{t(headings[page as Exclude<Page, "discovery" | "search" | "local" | "settings">].blurb)}</p></div><span className="library-stat">{renderStrong(splitRich(tn("app.browse.libraryStat", listForPage(page).length)))}</span></div>
+          <div className="page-heading"><div><p className="eyebrow">{t("app.browse.eyebrow")}</p><h1>{t(headings[page as Exclude<Page, "discovery" | "search" | "local" | "settings">].title)}</h1><p>{t(headings[page as Exclude<Page, "discovery" | "search" | "local" | "settings">].blurb)}</p></div><span className="library-stat">{renderStrong(splitRich(tn("app.browse.libraryStat", useServerBrowse ? shownBrowseTotal : listForPage(page).length)))}</span></div>
 
           <div className="browse-toolbar">
             <p className="browse-summary" role="status">
-              {renderStrong(splitRich(tn("app.browse.count", browseChannels.length)))}
+              {renderStrong(splitRich(tn("app.browse.count", shownBrowseTotal)))}
               {facetCount(facetSelection) > 0 && <> {tn("app.browse.filtersApplied", facetCount(facetSelection))}</>}
             </p>
             {filtered && <button className="secondary-button browse-clear" onClick={() => { setFacetSelection(EMPTY_FACETS); library.setSearchQuery(""); library.selectPlaylist(null); }}>{t("app.browse.clearFilters")}</button>}
             <label className="source-filter"><span className="sr-only">{t("app.browse.filterBySource")}</span><select aria-label={t("app.browse.filterBySource")} value={library.selectedPlaylistId ?? "all"} onChange={(event) => library.selectPlaylist(event.target.value === "all" ? null : Number(event.target.value))}><option value="all">{t("app.browse.allSources")}</option>{library.playlists.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}</select></label>
           </div>
 
-          {library.loading ? <div className="skeleton-row" role="status" aria-label={t("app.browse.loading")}>{[1, 2, 3, 4].map((id) => <div key={id} />)}</div>
-            : (page === "movies" || page === "series" || page === "live") && listForPage(page).length === 0 && !filtered ? emptyState(page as "movies" | "series" | "live")
-            : baseChannels.length === 0 ? <div className="empty-state"><div className="empty-symbol"><Icon name="grid" size={32} /></div><h2>{library.error ? t("app.empty.libraryWillBeHere") : library.searchQuery ? t("app.empty.noMatchingTitles") : library.allChannels.length ? t("app.empty.nothingYet") : t("app.empty.firstFavorite")}</h2><p>{filtered ? t("app.empty.tryAnother") : t("app.empty.addOrExplore")}</p><button className="primary-button" onClick={() => { if (filtered) { setFacetSelection(EMPTY_FACETS); library.setSearchQuery(""); library.selectPlaylist(null); } else openSettings("sources"); }}>{filtered ? t("app.browse.clearFilters") : t("app.empty.addFirstSource")}</button></div>
+          {shownBrowseLoading ? <div className="skeleton-row" role="status" aria-label={t("app.browse.loading")}>{[1, 2, 3, 4].map((id) => <div key={id} />)}</div>
+            : (page === "movies" || page === "series" || page === "live") && shownBrowseTotal === 0 && !filtered ? emptyState(page as "movies" | "series" | "live")
+            : shownBrowseTotal === 0 ? <div className="empty-state"><div className="empty-symbol"><Icon name="grid" size={32} /></div><h2>{library.error ? t("app.empty.libraryWillBeHere") : library.searchQuery ? t("app.empty.noMatchingTitles") : library.allChannels.length ? t("app.empty.nothingYet") : t("app.empty.firstFavorite")}</h2><p>{filtered ? t("app.empty.tryAnother") : t("app.empty.addOrExplore")}</p><button className="primary-button" onClick={() => { if (filtered) { setFacetSelection(EMPTY_FACETS); library.setSearchQuery(""); library.selectPlaylist(null); } else openSettings("sources"); }}>{filtered ? t("app.browse.clearFilters") : t("app.empty.addFirstSource")}</button></div>
             : <>
               <FacetBrowser
-                channels={browseChannels}
-                facets={facets}
+                channels={shownBrowseChannels}
+                facets={shownFacets}
                 selection={facetSelection}
                 onSelectionChange={setFacetSelection}
                 favorites={library.favoriteIds}
@@ -705,7 +770,7 @@ function App() {
                 compact={preferences.compactCards}
                 emptyMessage={page === "live" ? t("app.empty.liveMatch") : page === "movies" ? t("app.empty.moviesMatch") : t("app.empty.seriesMatch")}
               />
-              {library.hasMore && <div className="browse-toolbar"><button type="button" className="secondary-button" disabled={library.loadingMore} onClick={() => void library.loadMore()}>{t(library.loadingMore ? "app.browse.loadingMore" : "app.browse.loadMore")}</button></div>}
+              {shownBrowseMore && <div className="browse-toolbar"><button type="button" className="secondary-button" disabled={shownBrowseLoadingMore} onClick={() => void loadMoreBrowse()}>{t(shownBrowseLoadingMore ? "app.browse.loadingMore" : "app.browse.loadMore")}</button></div>}
             </>}
       </div>}
       {page !== "settings" && <div className="browse-content">

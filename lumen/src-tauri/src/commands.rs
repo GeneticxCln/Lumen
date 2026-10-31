@@ -804,6 +804,7 @@ pub async fn list_channels_page_cmd(
     playlist_id: Option<i64>,
     query: Option<String>,
     group: Option<String>,
+    after_name: Option<String>,
     after_id: Option<i64>,
     limit: Option<i64>,
     app: AppHandle,
@@ -814,6 +815,7 @@ pub async fn list_channels_page_cmd(
         playlist_id,
         query.as_deref(),
         group.as_deref(),
+        after_name.as_deref(),
         after_id,
         limit.unwrap_or(500),
     )
@@ -834,6 +836,108 @@ pub async fn list_favorite_channels_cmd(app: AppHandle) -> Result<Vec<EnrichedCh
     let pool = ensure_db(&app).await?;
     let profile_id = active_profile_id(pool).await?;
     crate::db::list_favorite_channels(pool, profile_id).await
+}
+
+fn facet_filter_value(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && value != "all")
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn list_browse_facets_cmd(
+    playlist_id: Option<i64>,
+    kind: Option<String>,
+    group: Option<String>,
+    genre: Option<String>,
+    year: Option<String>,
+    hide_unavailable: Option<bool>,
+    show_adult: Option<bool>,
+    app: AppHandle,
+) -> Result<crate::db::FacetCounts> {
+    let pool = ensure_db(&app).await?;
+    let kind = facet_filter_value(kind);
+    let group = facet_filter_value(group);
+    let genre = facet_filter_value(genre);
+    let year = facet_filter_value(year);
+    crate::db::list_browse_facets(
+        pool,
+        crate::db::BrowseFilter {
+            playlist_id,
+            kind: kind.as_deref(),
+            group: group.as_deref(),
+            genre: genre.as_deref(),
+            year: year.as_deref(),
+            hide_unavailable: hide_unavailable.unwrap_or(false),
+            show_adult: show_adult.unwrap_or(false),
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn list_browse_page_cmd(
+    playlist_id: Option<i64>,
+    kind: Option<String>,
+    group: Option<String>,
+    genre: Option<String>,
+    year: Option<String>,
+    hide_unavailable: Option<bool>,
+    show_adult: Option<bool>,
+    after_name: Option<String>,
+    after_id: Option<i64>,
+    limit: Option<i64>,
+    app: AppHandle,
+) -> Result<crate::db::BrowsePage> {
+    let pool = ensure_db(&app).await?;
+    let kind = facet_filter_value(kind);
+    let group = facet_filter_value(group);
+    let genre = facet_filter_value(genre);
+    let year = facet_filter_value(year);
+    crate::db::list_browse_page(
+        pool,
+        crate::db::BrowseFilter {
+            playlist_id,
+            kind: kind.as_deref(),
+            group: group.as_deref(),
+            genre: genre.as_deref(),
+            year: year.as_deref(),
+            hide_unavailable: hide_unavailable.unwrap_or(false),
+            show_adult: show_adult.unwrap_or(false),
+        },
+        after_name.as_deref(),
+        after_id,
+        limit.unwrap_or(500),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn library_catalog_cmd(
+    playlist_id: Option<i64>,
+    hide_unavailable: Option<bool>,
+    show_adult: Option<bool>,
+    app: AppHandle,
+) -> Result<crate::db::CatalogShelves> {
+    let pool = ensure_db(&app).await?;
+    crate::db::list_library_catalog(
+        pool,
+        crate::db::BrowseFilter {
+            playlist_id,
+            hide_unavailable: hide_unavailable.unwrap_or(false),
+            show_adult: show_adult.unwrap_or(false),
+            ..crate::db::BrowseFilter::default()
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn channel_facets_status_cmd(app: AppHandle) -> Result<bool> {
+    let pool = ensure_db(&app).await?;
+    crate::db::channel_facets_ready(pool).await
 }
 
 #[tauri::command]

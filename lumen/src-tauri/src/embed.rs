@@ -433,6 +433,11 @@ pub fn mpv_args(xid: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// These tests deliberately rewrite process-wide display flags; running them in parallel
+    /// made one see the other's Wayland/X11 state.
+    static SESSION_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn mpv_is_pointed_at_the_area_and_its_own_controls_are_off() {
@@ -449,6 +454,9 @@ mod tests {
 
     #[test]
     fn a_session_that_cannot_embed_explains_itself() {
+        let _guard = SESSION_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         X11_SESSION.store(false, Ordering::SeqCst);
         WAYLAND_SESSION.store(false, Ordering::SeqCst);
         let support = support();
@@ -459,6 +467,9 @@ mod tests {
 
     #[test]
     fn wayland_embeds_when_libmpv_is_there_and_says_what_is_missing_when_not() {
+        let _guard = SESSION_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         X11_SESSION.store(false, Ordering::SeqCst);
         WAYLAND_SESSION.store(true, Ordering::SeqCst);
         let support = support();

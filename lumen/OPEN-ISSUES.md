@@ -19,9 +19,11 @@ tests named there", not as real-world proof: this audit reproduced failures thos
 **The identity/resume batch is complete on main (unreleased in 0.1.13).** Issues 8–14 are fixed,
 with six regression tests in `crates/lumen-core/src/identity_tests.rs`. Issues 6 and 7 are fixed
 by the v2 derivation and the resumable migration in `content_migration.rs`; it was run against a
-copy of the real library (14,760,400 channels, 143.6s, `quick_check=ok`, version 2). Issue 15's
-paged title backfill is still open: the real snapshot had no title sources, so the migration
-correctly skipped an hours-long 14.76M-row rebuild.
+copy of the real library (14,760,400 channels, 143.6s, `quick_check=ok`, version 2). Issue 15 is
+fixed as well: the startup title backfill is paged and now uses `titles_backfill_v2`, so the real
+snapshot's stale `titles_backfill_v1 = done` marker (with an empty `titles` table) no longer
+suppresses the rebuild. The 14.76M-row rebuild itself still runs on first launch, in the
+background, and is not completed by this change.
 
 **The player/privacy batch (16–19, 23–25) landed on main on 2026-10-31 (unreleased).** The player
 now opens with its spinner before mpv's load, records the attempted URL so a failed first load
@@ -35,9 +37,16 @@ privacy is on.
 500-row keyset page, fetches favorites by id for My List, gets group options from SQL counts, and
 offers Load more instead of materializing every channel. Search uses a resumable FTS5 index and
 falls back to LIKE until the background index is complete. Imports dedupe stream URLs and are
-capped at 250,000 channels per source and 20,000,000 in total. Remaining limitation: facet counts,
-Discover shelves and the Continue Watching board only describe the loaded pages, and paging is
-ordered by channel id rather than name.
+capped at 250,000 channels per source and 20,000,000 in total. Pages are ordered by title name
+with a `(name, id)` keyset. The Home board now hydrates the exact history/"new since last visit"
+channel ids it needs, so Continue Watching and the new row are complete without loading the
+library. The FTS backfill indexes 2,000 rows per transaction. Browse facets are now derived in
+the backend into `channel_facets` / `channel_facet_groups` / `channel_facet_genres` (kind, adult,
+release year, group tags and genre tags), so group/genre/year counts and filters cover the whole
+library, not the loaded page. Pages are filtered and counted in SQL, and Discover's local Top
+rated / Recently released / genre shelves come from a full-library query too. The index is built
+resumably in the background; until it is ready the UI keeps the old loaded-page behavior. The
+first real 14.76M-row facet and FTS builds still have to run on the user's machine.
 
 **State of the real library after the audit's own mistake** (it ran the release binary with
 `--version`, which opened the full app for about 3 minutes): SQLite `quick_check` is `ok`; the 186
@@ -70,8 +79,10 @@ minutes and works. **Fixed for startup (unreleased):** `useChannels` requests on
 instead of every channel, favorites are fetched separately for My List, groups come from SQL
 counts, search uses the FTS5 index once its background backfill completes, and imports are
 deduped and capped. The old full-library call remains only for compatibility; paged callers use
-`list_channels_page`. Limitation: the board/Discover shelves and facet counts only see loaded
-pages, so they become more complete as the user loads more.
+`list_channels_page`, ordered by name. The board hydrates history/new-id channels by id, so
+Continue Watching is complete. Full-library browse facets and Discover's local shelves are
+served from the derived facet index, with the old loaded-page path retained only until that
+background index is ready.
 
 ## Open — identity, history and sync (6–15)
 
@@ -111,11 +122,12 @@ pages, so they become more complete as the user loads more.
     `identity_tests::an_old_progress_tombstone_does_not_delete_newer_history`.
 15. **Fallback and "new since last visit" cannot work on an existing library.** `titles` is only
     populated by a one-time backfill gated on `titles_backfill_v1`; import now writes it, but a
-    database whose channels predate that never runs it again, so `titles` stays empty. **Partially
-    fixed (unreleased):** the backfill is now keyset-paged at 500 channels per transaction instead
-    of `fetch_all`, so it can run against a large library without loading it into memory. The real
-    database already has `titles_backfill_v1 = done` with empty `titles`, so it still needs a
-    deliberate reindex to populate fallback/"new since last visit" data.
+    database whose channels predate that never runs it again, so `titles` stays empty. **Fixed
+    (unreleased):** the backfill is keyset-paged at 500 channels per transaction, and the completion
+    marker was bumped to `titles_backfill_v2`, so the real database's stale v1 marker no longer
+    suppresses the rebuild. `v2_title_backfill_reruns_after_the_old_v1_marker` sets the old marker,
+    empties `titles`, and verifies all 600 fixture rows are rebuilt. The real 14.76M-row pass runs
+    in the background on first launch; it is not completed here.
 
 ## Open — playback and updates (16–22)
 
@@ -193,8 +205,8 @@ pages, so they become more complete as the user loads more.
 
 ## Missing capability (not bugs)
 
-- **Library scale:** database paging, FTS5 full-text search, import limits, duplicate handling.
-  Search truncates at 5,000 results by name, with no notice.
+- **Library scale:** paging, FTS5 full-text search, import limits and full-library facet counts
+  are in place. Search truncates at 5,000 results by name, with no notice.
 - **Features:** TV guide (`url-tvg` is ignored), catch-up, Xtream login.
 - **Backup/export:** none; sync doesn't carry playlists either.
 - **Diagnostics screen:** the backend commands exist, nothing uses them.
@@ -218,10 +230,11 @@ release signature files, and the published assets.
 
 1. ~~Release v0.1.12: remove the reconnect flags, enable TLS in the Flatpak, batch the delete
    query, add the tag/version check.~~ Done.
-2. Identity and resume (6–15). Phase 1 (8–14), the v2 key migration (6, 7) and the paged title
-   backfill are on main. Existing empty-title databases still need a deliberate reindex (15).
+2. ~~Identity and resume (6–15).~~ Phase 1 (8–14), the v2 key migration (6, 7) and the paged,
+   versioned title backfill (15) are on main.
 3. ~~Player state (16–19) and privacy (23–25), including an allowlist of stream schemes for
    mpv.~~ Done on main (unreleased).
-4. ~~Rework library loading (5) before adding features.~~ Done on main (unreleased): paged
-   loading, FTS5 search and import limits. Facet/board completeness across unloaded pages and the
-   first real-library FTS build remain follow-ups.
+4. ~~Rework library loading (5) before adding features.~~ Done on main (unreleased): paged,
+   name-ordered loading, FTS5 search, import limits, board hydration by id, full-library facet
+   counts/filtering and Discover's local shelves. The first real-library facet and FTS builds
+   remain follow-ups.

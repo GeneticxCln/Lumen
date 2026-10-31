@@ -2,9 +2,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, Event } from "@tauri-apps/api/event";
 import type {
+  BrowsePage,
+  CatalogShelves,
   Channel,
   ChannelGroup,
   ChannelPage,
+  FacetCounts,
   Playlist,
   LocalFile,
   PlayerState,
@@ -288,11 +291,12 @@ export async function listChannels(playlistId: number, query?: string, group?: s
 }
 
 /** One keyset page of the library. Prefer this over `listChannels` on any user-facing path. */
-export async function listChannelsPage(playlistId: number | null, query?: string, group?: string | null, afterId?: number | null, limit = 500) {
+export async function listChannelsPage(playlistId: number | null, query?: string, group?: string | null, afterName?: string | null, afterId?: number | null, limit = 500) {
   return callBackend<ChannelPage>("list_channels_page_cmd", {
     playlistId,
     query: query?.trim() || null,
     group: group || null,
+    afterName: afterName ?? null,
     afterId: afterId ?? null,
     limit,
   });
@@ -300,6 +304,60 @@ export async function listChannelsPage(playlistId: number | null, query?: string
 
 export async function listChannelGroups(playlistId: number | null) {
   return callBackend<ChannelGroup[]>("list_channel_groups_cmd", { playlistId });
+}
+
+export async function listBrowseFacets(
+  playlistId: number | null,
+  kind: "movie" | "series" | "live" | null,
+  group: string,
+  genre: string,
+  year: string,
+  hideUnavailable: boolean,
+  showAdult: boolean,
+) {
+  return callBackend<FacetCounts>("list_browse_facets_cmd", {
+    playlistId,
+    kind,
+    group: group === "all" ? null : group,
+    genre: genre === "all" ? null : genre,
+    year: year === "all" ? null : year,
+    hideUnavailable,
+    showAdult,
+  });
+}
+
+export async function listBrowsePage(
+  playlistId: number | null,
+  kind: "movie" | "series" | "live" | null,
+  group: string,
+  genre: string,
+  year: string,
+  hideUnavailable: boolean,
+  showAdult: boolean,
+  afterName?: string | null,
+  afterId?: number | null,
+  limit = 500,
+) {
+  return callBackend<BrowsePage>("list_browse_page_cmd", {
+    playlistId,
+    kind,
+    group: group === "all" ? null : group,
+    genre: genre === "all" ? null : genre,
+    year: year === "all" ? null : year,
+    hideUnavailable,
+    showAdult,
+    afterName: afterName ?? null,
+    afterId: afterId ?? null,
+    limit,
+  });
+}
+
+export async function channelFacetsReady() {
+  return callBackend<boolean>("channel_facets_status_cmd");
+}
+
+export async function libraryCatalog(playlistId: number | null, hideUnavailable: boolean, showAdult: boolean) {
+  return callBackend<CatalogShelves>("library_catalog_cmd", { playlistId, hideUnavailable, showAdult });
 }
 
 export async function listFavoriteChannels() {

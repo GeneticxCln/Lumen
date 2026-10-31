@@ -26,9 +26,50 @@ export interface NetworkPrivacyState {
 
 export interface ChannelPage {
   channels: Channel[];
-  /** Pass back as `afterId`; null when this was the last page. */
+  /** Pass both back as `afterName`/`afterId`; null on the last page. */
+  next_after_name: string | null;
   next_after_id: number | null;
   has_more: boolean;
+}
+
+export interface FacetCount {
+  value: string;
+  count: number;
+}
+
+export interface FacetTotals {
+  groups: number;
+  genres: number;
+  years: number;
+}
+
+/** Full-library facet counts; `ready` is false while the startup index is still building. */
+export interface FacetCounts {
+  ready: boolean;
+  groups: FacetCount[];
+  genres: FacetCount[];
+  years: FacetCount[];
+  totals: FacetTotals;
+  has_tmdb_genres: boolean;
+  enriched: number;
+}
+
+export interface BrowsePage extends ChannelPage {
+  ready: boolean;
+  total: number;
+}
+
+export interface CatalogGenreShelf {
+  genre: string;
+  channels: Channel[];
+}
+
+/** Full-library local shelves; not ready until the facet index finishes. */
+export interface CatalogShelves {
+  ready: boolean;
+  top_rated: Channel[];
+  recent: Channel[];
+  genres: CatalogGenreShelf[];
 }
 
 export interface ChannelGroup {

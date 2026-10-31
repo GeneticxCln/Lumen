@@ -1,6 +1,7 @@
 use crate::auth;
 use crate::content_key::{CategoryOverride, ContentKey, parse_season_episode};
 use crate::error::{PlayerError, Result};
+use crate::facets::{self, FacetValues};
 use crate::pin_guard;
 use crate::playlist::import::{Channel, Playlist, import_m3u_file};
 use crate::sync;
@@ -114,6 +115,11 @@ pub async fn init_db(app_dir: &Path) -> Result<Pool<Sqlite>> {
     tokio::spawn(async move {
         if let Err(e) = backfill_channel_languages(&backfill_pool).await {
             eprintln!("lumen: channel language backfill failed: {}", e);
+        }
+        // Facets are independent of the content-key migration and title rebuild, and they are
+        // what makes full-library browse counts available, so start them first.
+        if let Err(e) = backfill_channel_facets(&backfill_pool).await {
+            eprintln!("lumen: channel facets backfill failed: {}", e);
         }
         // Runs before the title backfill: it rebuilds titles itself and marks that backfill done.
         // A 14.76M-channel database can take a while, so it stays off the startup path and its
@@ -628,8 +634,10 @@ pub(crate) async fn rekey_content(
     Ok(())
 }
 
-/// Settings key recording that titles and title_sources were backfilled.
-pub(crate) const TITLES_BACKFILL_SETTING: &str = "titles_backfill_v1";
+/// Settings key recording that titles and title_sources were backfilled. Bumped to v2 because
+/// v1 could finish with an empty `titles` table on a database written by an older release; the
+/// new key makes that library rebuild instead of being skipped forever.
+pub(crate) const TITLES_BACKFILL_SETTING: &str = "titles_backfill_v2";
 
 /// Backfills `titles` and `title_sources` from existing `channels`, and populates `content_key`
 /// on pre-existing `favorites` and `history` rows.
@@ -792,6 +800,7 @@ pub(crate) async fn backfill_titles_for_playlist(
     let now = Utc::now().timestamp_millis();
     let prepared: Vec<TitleBackfillRow> = rows.iter().map(title_backfill_row_from).collect();
     batch_upsert_titles_and_sources(tx, &prepared, now).await?;
+    refresh_facets_for_playlist(tx, playlist_id).await?;
     Ok(())
 }
 
@@ -1107,7 +1116,9 @@ pub fn contains_pattern(needle: &str) -> String {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelPage {
     pub channels: Vec<EnrichedChannel>,
-    /// Pass back as `after_id` for the next page; `None` when the last page was returned.
+    /// Pass both back as `after_name` and `after_id` for the next page; `None` when the last
+    /// page was returned.
+    pub next_after_name: Option<String>,
     pub next_after_id: Option<i64>,
     pub has_more: bool,
 }
@@ -1116,6 +1127,54 @@ pub struct ChannelPage {
 pub struct ChannelGroup {
     pub name: Option<String>,
     pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FacetCount {
+    pub value: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FacetTotals {
+    pub groups: i64,
+    pub genres: i64,
+    pub years: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FacetCounts {
+    pub ready: bool,
+    pub groups: Vec<FacetCount>,
+    pub genres: Vec<FacetCount>,
+    pub years: Vec<FacetCount>,
+    pub totals: FacetTotals,
+    pub has_tmdb_genres: bool,
+    pub enriched: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowsePage {
+    pub ready: bool,
+    pub channels: Vec<EnrichedChannel>,
+    pub next_after_name: Option<String>,
+    pub next_after_id: Option<i64>,
+    pub has_more: bool,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CatalogGenreShelf {
+    pub genre: String,
+    pub channels: Vec<EnrichedChannel>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CatalogShelves {
+    pub ready: bool,
+    pub top_rated: Vec<EnrichedChannel>,
+    pub recent: Vec<EnrichedChannel>,
+    pub genres: Vec<CatalogGenreShelf>,
 }
 
 /// The largest single import accepted. A provider playlist above this is almost always an
@@ -1248,15 +1307,16 @@ async fn enrich_rows(pool: &Pool<Sqlite>, rows: Vec<SqliteRow>) -> Result<Vec<En
         .collect())
 }
 
-/// Keyset page ordered by `channels.id`, so browsing never materializes the whole library.
-/// `after_id` is the last id of the previous page. Search uses FTS5 once its background backfill
-/// has completed and falls back to LIKE before that, so an old library remains searchable during
-/// indexing.
+/// Keyset page ordered by `(name, id)`, so browsing is alphabetical and duplicate names cannot
+/// overlap or skip. `after_name`/`after_id` are the last row of the previous page. Search uses
+/// FTS5 once its background backfill has completed and falls back to LIKE before that, so an old
+/// library remains searchable during indexing.
 pub async fn list_channels_page(
     pool: &Pool<Sqlite>,
     playlist_id: Option<i64>,
     query: Option<&str>,
     group: Option<&str>,
+    after_name: Option<&str>,
     after_id: Option<i64>,
     limit: i64,
 ) -> Result<ChannelPage> {
@@ -1275,8 +1335,16 @@ pub async fn list_channels_page(
     if fts.is_some() {
         qb.push(" JOIN channels_fts ON channels_fts.rowid = c.id");
     }
-    qb.push(" WHERE c.id > ");
-    qb.push_bind(after_id.unwrap_or(0));
+    qb.push(" WHERE 1=1");
+    if let Some(after_name) = after_name {
+        qb.push(" AND (c.name > ");
+        qb.push_bind(after_name);
+        qb.push(" OR (c.name = ");
+        qb.push_bind(after_name);
+        qb.push(" AND c.id > ");
+        qb.push_bind(after_id.unwrap_or(0));
+        qb.push("))");
+    }
     if let Some(playlist_id) = playlist_id {
         qb.push(" AND c.playlist_id = ");
         qb.push_bind(playlist_id);
@@ -1302,7 +1370,7 @@ pub async fn list_channels_page(
         }
         (None, None) => {}
     }
-    qb.push(" ORDER BY c.id LIMIT ");
+    qb.push(" ORDER BY c.name, c.id LIMIT ");
     qb.push_bind(limit + 1);
 
     let mut rows = qb
@@ -1314,12 +1382,22 @@ pub async fn list_channels_page(
     if has_more {
         rows.truncate(limit as usize);
     }
-    let next_after_id = has_more
-        .then(|| rows.last().map(|row| row.get::<i64, _>("id")))
-        .flatten();
+    let (next_after_name, next_after_id) = if has_more {
+        rows.last()
+            .map(|row| {
+                (
+                    Some(row.get::<String, _>("name")),
+                    Some(row.get::<i64, _>("id")),
+                )
+            })
+            .unwrap_or((None, None))
+    } else {
+        (None, None)
+    };
     let channels = enrich_rows(pool, rows).await?;
     Ok(ChannelPage {
         channels,
+        next_after_name,
         next_after_id,
         has_more,
     })
@@ -1348,6 +1426,661 @@ pub async fn list_channel_groups(
             count: row.get("count"),
         })
         .collect())
+}
+
+const CHANNEL_FACETS_READY: &str = "channel_facets_ready";
+const CHANNEL_FACETS_CURSOR: &str = "channel_facets_cursor";
+const FACET_COLUMNS: &str = "c.id, c.name, c.url, c.group_title, c.tvg_id, c.tmdb_id, c.tmdb_type, \
+     c.genre_names, c.release_year, c.is_live";
+
+pub async fn channel_facets_ready(pool: &Pool<Sqlite>) -> Result<bool> {
+    Ok(get_setting(pool, CHANNEL_FACETS_READY).await?.as_deref() == Some("done"))
+}
+
+fn facet_values_from_row(
+    row: &SqliteRow,
+    override_kind: Option<&str>,
+    override_genres: Option<&str>,
+) -> FacetValues {
+    let tmdb_type: Option<String> = row.get("tmdb_type");
+    let genre_names: Option<String> = row.get("genre_names");
+    let group: Option<String> = row.get("group_title");
+    let name: String = row.get("name");
+    let is_live: Option<i64> = row.get("is_live");
+    facets::values(
+        tmdb_type.as_deref(),
+        override_kind,
+        group.as_deref(),
+        &name,
+        is_live.map(|value| value != 0),
+        genre_names.as_deref(),
+        override_genres,
+        row.get("release_year"),
+    )
+}
+
+fn channel_override_key(row: &SqliteRow) -> Option<String> {
+    let tmdb_id: Option<i64> = row.get("tmdb_id");
+    if tmdb_id.is_some() {
+        return None;
+    }
+    let name: String = row.get("name");
+    let url: String = row.get("url");
+    let tvg_id: Option<String> = row.get("tvg_id");
+    Some(ContentKey::derive(None, None, &name, tvg_id.as_deref(), &url).into_string())
+}
+
+async fn facet_overrides_tx(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    keys: &[String],
+) -> Result<HashMap<String, (Option<String>, Option<String>)>> {
+    let mut overrides = HashMap::new();
+    for chunk in keys.chunks(100) {
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+            "SELECT content_key, kind, genres FROM category_overrides WHERE content_key IN (",
+        );
+        {
+            let mut separated = qb.separated(", ");
+            for key in chunk {
+                separated.push_bind(key);
+            }
+        }
+        qb.push(")");
+        let rows = qb
+            .build()
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        for row in rows {
+            overrides.insert(row.get("content_key"), (row.get("kind"), row.get("genres")));
+        }
+    }
+    Ok(overrides)
+}
+
+async fn write_facet_rows(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    rows: &[(i64, FacetValues)],
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    for chunk in rows.chunks(900) {
+        let mut qb: QueryBuilder<Sqlite> =
+            QueryBuilder::new("DELETE FROM channel_facets WHERE channel_id IN (");
+        {
+            let mut separated = qb.separated(", ");
+            for (id, _) in chunk {
+                separated.push_bind(*id);
+            }
+        }
+        qb.push(")");
+        qb.build()
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    }
+
+    for chunk in rows.chunks(100) {
+        let mut qb: QueryBuilder<Sqlite> =
+            QueryBuilder::new("INSERT INTO channel_facets (channel_id, kind, adult, year) ");
+        qb.push_values(chunk, |mut b, (id, values)| {
+            b.push_bind(*id)
+                .push_bind(values.kind)
+                .push_bind(if values.adult { 1_i64 } else { 0_i64 })
+                .push_bind(&values.year);
+        });
+        qb.build()
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    }
+
+    let groups: Vec<(i64, &str)> = rows
+        .iter()
+        .flat_map(|(id, values)| values.groups.iter().map(move |value| (*id, value.as_str())))
+        .collect();
+    for chunk in groups.chunks(100) {
+        let mut qb: QueryBuilder<Sqlite> =
+            QueryBuilder::new("INSERT INTO channel_facet_groups (channel_id, value) ");
+        qb.push_values(chunk, |mut b, (id, value)| {
+            b.push_bind(*id).push_bind(*value);
+        });
+        qb.build()
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    }
+
+    let genres: Vec<(i64, &str)> = rows
+        .iter()
+        .flat_map(|(id, values)| values.genres.iter().map(move |value| (*id, value.as_str())))
+        .collect();
+    for chunk in genres.chunks(100) {
+        let mut qb: QueryBuilder<Sqlite> =
+            QueryBuilder::new("INSERT INTO channel_facet_genres (channel_id, value) ");
+        qb.push_values(chunk, |mut b, (id, value)| {
+            b.push_bind(*id).push_bind(*value);
+        });
+        qb.build()
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Recomputes facets for one channel. Used after a TMDB match or a manual category correction.
+pub(crate) async fn refresh_channel_facets_tx(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    channel_id: i64,
+) -> Result<()> {
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT {FACET_COLUMNS} FROM channels c WHERE c.id = ?"
+    )))
+    .bind(channel_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let Some(row) = row else {
+        return Ok(());
+    };
+    let key = channel_override_key(&row);
+    let keys: Vec<String> = key.clone().into_iter().collect();
+    let overrides = facet_overrides_tx(tx, &keys).await?;
+    let override_row = key.as_deref().and_then(|key| overrides.get(key));
+    let values = facet_values_from_row(
+        &row,
+        override_row.and_then(|(kind, _)| kind.as_deref()),
+        override_row.and_then(|(_, genres)| genres.as_deref()),
+    );
+    write_facet_rows(tx, &[(channel_id, values)]).await
+}
+
+pub async fn refresh_channel_facets(pool: &Pool<Sqlite>, channel_id: i64) -> Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    refresh_channel_facets_tx(&mut tx, channel_id).await?;
+    tx.commit()
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))
+}
+
+pub(crate) async fn refresh_facets_for_playlist(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    playlist_id: i64,
+) -> Result<()> {
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT {FACET_COLUMNS} FROM channels c WHERE c.playlist_id = ?"
+    )))
+    .bind(playlist_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let keys: Vec<String> = rows.iter().filter_map(channel_override_key).collect();
+    let overrides = facet_overrides_tx(tx, &keys).await?;
+    let computed: Vec<(i64, FacetValues)> = rows
+        .iter()
+        .map(|row| {
+            let key = channel_override_key(row);
+            let override_row = key.as_deref().and_then(|key| overrides.get(key));
+            (
+                row.get("id"),
+                facet_values_from_row(
+                    row,
+                    override_row.and_then(|(kind, _)| kind.as_deref()),
+                    override_row.and_then(|(_, genres)| genres.as_deref()),
+                ),
+            )
+        })
+        .collect();
+    write_facet_rows(tx, &computed).await
+}
+
+/// Builds the facet index for an existing library in page-sized transactions. The cursor is
+/// committed with each page, so a restart resumes instead of starting the 14.76M-row scan again.
+/// Until this records completion the UI keeps its old loaded-page counts, so browsing still works.
+pub async fn backfill_channel_facets(pool: &Pool<Sqlite>) -> Result<()> {
+    if channel_facets_ready(pool).await? {
+        return Ok(());
+    }
+    let mut batches = 0usize;
+    loop {
+        let cursor = get_setting(pool, CHANNEL_FACETS_CURSOR)
+            .await?
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0);
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {FACET_COLUMNS} FROM channels c WHERE c.id > ? ORDER BY c.id LIMIT 1000"
+        )))
+        .bind(cursor)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        if rows.is_empty() {
+            tx.commit()
+                .await
+                .map_err(|e| PlayerError::Sql(e.to_string()))?;
+            break;
+        }
+        let last_id: i64 = rows.last().map(|row| row.get("id")).unwrap_or(cursor);
+        let keys: Vec<String> = rows.iter().filter_map(channel_override_key).collect();
+        let overrides = facet_overrides_tx(&mut tx, &keys).await?;
+        let computed: Vec<(i64, FacetValues)> = rows
+            .iter()
+            .map(|row| {
+                let key = channel_override_key(row);
+                let override_row = key.as_deref().and_then(|key| overrides.get(key));
+                (
+                    row.get("id"),
+                    facet_values_from_row(
+                        row,
+                        override_row.and_then(|(kind, _)| kind.as_deref()),
+                        override_row.and_then(|(_, genres)| genres.as_deref()),
+                    ),
+                )
+            })
+            .collect();
+        write_facet_rows(&mut tx, &computed).await?;
+        sqlx::query(
+            "INSERT INTO settings (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(CHANNEL_FACETS_CURSOR)
+        .bind(last_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        batches += 1;
+        if batches.is_multiple_of(100) {
+            tracing::info!(
+                batches,
+                last_channel_id = last_id,
+                "channel facets backfill"
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    set_setting(pool, CHANNEL_FACETS_READY, "done").await?;
+    sqlx::query("DELETE FROM settings WHERE key = ?")
+        .bind(CHANNEL_FACETS_CURSOR)
+        .execute(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    tracing::info!("channel facets backfill complete");
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BrowseFilter<'a> {
+    pub playlist_id: Option<i64>,
+    pub kind: Option<&'a str>,
+    pub group: Option<&'a str>,
+    pub genre: Option<&'a str>,
+    pub year: Option<&'a str>,
+    pub hide_unavailable: bool,
+    pub show_adult: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FacetDimension {
+    Group,
+    Genre,
+    Year,
+}
+
+fn push_facet_scope(qb: &mut QueryBuilder<Sqlite>, filter: &BrowseFilter<'_>) {
+    if let Some(playlist_id) = filter.playlist_id {
+        qb.push(" AND c.playlist_id = ").push_bind(playlist_id);
+    }
+    if let Some(kind) = filter.kind {
+        qb.push(" AND cf.kind = ").push_bind(kind);
+    }
+    if !filter.show_adult {
+        qb.push(" AND cf.adult = 0");
+    }
+    if filter.hide_unavailable {
+        qb.push(" AND c.last_error IS NULL");
+    }
+}
+
+fn push_facet_value_condition(
+    qb: &mut QueryBuilder<Sqlite>,
+    dimension: FacetDimension,
+    other: FacetDimension,
+    value: Option<&str>,
+) {
+    let Some(value) = value else { return };
+    if dimension == other {
+        return;
+    }
+    match other {
+        FacetDimension::Group => {
+            qb.push(" AND EXISTS (SELECT 1 FROM channel_facet_groups f WHERE f.channel_id = cf.channel_id AND f.value = ")
+                .push_bind(value)
+                .push(")");
+        }
+        FacetDimension::Genre => {
+            qb.push(" AND EXISTS (SELECT 1 FROM channel_facet_genres f WHERE f.channel_id = cf.channel_id AND f.value = ")
+                .push_bind(value)
+                .push(")");
+        }
+        FacetDimension::Year => {
+            qb.push(" AND cf.year = ").push_bind(value);
+        }
+    }
+}
+
+fn push_other_facet_filters(
+    qb: &mut QueryBuilder<Sqlite>,
+    filter: &BrowseFilter<'_>,
+    dimension: FacetDimension,
+) {
+    push_facet_value_condition(qb, dimension, FacetDimension::Group, filter.group);
+    push_facet_value_condition(qb, dimension, FacetDimension::Genre, filter.genre);
+    push_facet_value_condition(qb, dimension, FacetDimension::Year, filter.year);
+}
+
+async fn facet_counts_for(
+    pool: &Pool<Sqlite>,
+    filter: &BrowseFilter<'_>,
+    dimension: FacetDimension,
+) -> Result<(Vec<FacetCount>, i64)> {
+    let (from, value_expr) = match dimension {
+        FacetDimension::Group => (
+            "channel_facet_groups v JOIN channel_facets cf ON cf.channel_id = v.channel_id \
+             JOIN channels c ON c.id = v.channel_id",
+            "v.value",
+        ),
+        FacetDimension::Genre => (
+            "channel_facet_genres v JOIN channel_facets cf ON cf.channel_id = v.channel_id \
+             JOIN channels c ON c.id = v.channel_id",
+            "v.value",
+        ),
+        FacetDimension::Year => (
+            "channel_facets cf JOIN channels c ON c.id = cf.channel_id",
+            "cf.year",
+        ),
+    };
+
+    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(format!(
+        "SELECT {value_expr} AS value, COUNT(*) AS count FROM {from} WHERE 1=1"
+    ));
+    push_facet_scope(&mut qb, filter);
+    push_other_facet_filters(&mut qb, filter, dimension);
+    qb.push(" GROUP BY ").push(value_expr);
+    let rows = qb
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let values = rows
+        .into_iter()
+        .map(|row| FacetCount {
+            value: row.get("value"),
+            count: row.get("count"),
+        })
+        .collect();
+
+    let mut total_qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+        "SELECT COUNT(*) FROM channel_facets cf JOIN channels c ON c.id = cf.channel_id WHERE 1=1",
+    );
+    push_facet_scope(&mut total_qb, filter);
+    push_other_facet_filters(&mut total_qb, filter, dimension);
+    let total: i64 = total_qb
+        .build_query_scalar()
+        .fetch_one(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    Ok((values, total))
+}
+
+pub async fn list_browse_facets(
+    pool: &Pool<Sqlite>,
+    filter: BrowseFilter<'_>,
+) -> Result<FacetCounts> {
+    if !channel_facets_ready(pool).await? {
+        return Ok(FacetCounts {
+            ready: false,
+            groups: Vec::new(),
+            genres: Vec::new(),
+            years: Vec::new(),
+            totals: FacetTotals {
+                groups: 0,
+                genres: 0,
+                years: 0,
+            },
+            has_tmdb_genres: false,
+            enriched: 0,
+        });
+    }
+    let (groups, groups_total) = facet_counts_for(pool, &filter, FacetDimension::Group).await?;
+    let (genres, genres_total) = facet_counts_for(pool, &filter, FacetDimension::Genre).await?;
+    let (years, years_total) = facet_counts_for(pool, &filter, FacetDimension::Year).await?;
+
+    let mut meta_qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+        "SELECT COUNT(*) FILTER (WHERE c.tmdb_id IS NOT NULL) AS enriched, \
+         COUNT(*) FILTER (WHERE c.genre_names IS NOT NULL AND trim(c.genre_names) <> '') AS tmdb_genres \
+         FROM channel_facets cf JOIN channels c ON c.id = cf.channel_id WHERE 1=1",
+    );
+    push_facet_scope(&mut meta_qb, &filter);
+    let row = meta_qb
+        .build()
+        .fetch_one(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    Ok(FacetCounts {
+        ready: true,
+        groups,
+        genres,
+        years,
+        totals: FacetTotals {
+            groups: groups_total,
+            genres: genres_total,
+            years: years_total,
+        },
+        has_tmdb_genres: row.get::<i64, _>("tmdb_genres") > 0,
+        enriched: row.get("enriched"),
+    })
+}
+
+fn push_browse_selection(qb: &mut QueryBuilder<Sqlite>, filter: &BrowseFilter<'_>) {
+    if let Some(group) = filter.group {
+        qb.push(" AND EXISTS (SELECT 1 FROM channel_facet_groups f WHERE f.channel_id = cf.channel_id AND f.value = ")
+            .push_bind(group)
+            .push(")");
+    }
+    if let Some(genre) = filter.genre {
+        qb.push(" AND EXISTS (SELECT 1 FROM channel_facet_genres f WHERE f.channel_id = cf.channel_id AND f.value = ")
+            .push_bind(genre)
+            .push(")");
+    }
+    if let Some(year) = filter.year {
+        qb.push(" AND cf.year = ").push_bind(year);
+    }
+}
+
+pub async fn list_browse_page(
+    pool: &Pool<Sqlite>,
+    filter: BrowseFilter<'_>,
+    after_name: Option<&str>,
+    after_id: Option<i64>,
+    limit: i64,
+) -> Result<BrowsePage> {
+    let limit = limit.clamp(1, 1_000);
+    if !channel_facets_ready(pool).await? {
+        return Ok(BrowsePage {
+            ready: false,
+            channels: Vec::new(),
+            next_after_name: None,
+            next_after_id: None,
+            has_more: false,
+            total: 0,
+        });
+    }
+
+    let columns = "c.id, c.playlist_id, c.name, c.url, c.group_title, c.tvg_id, c.tvg_logo, c.language, c.extra_headers, c.last_ok, c.last_error, c.is_live, \
+         c.tmdb_id, c.tmdb_type, c.poster_path, c.backdrop_path, c.overview, c.release_year, c.rating, c.genre_names, c.enriched_at";
+    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(format!(
+        "SELECT {columns} FROM channels c JOIN channel_facets cf ON cf.channel_id = c.id WHERE 1=1"
+    ));
+    push_facet_scope(&mut qb, &filter);
+    push_browse_selection(&mut qb, &filter);
+    if let Some(after_name) = after_name {
+        qb.push(" AND (c.name > ")
+            .push_bind(after_name)
+            .push(" OR (c.name = ")
+            .push_bind(after_name)
+            .push(" AND c.id > ")
+            .push_bind(after_id.unwrap_or(0))
+            .push("))");
+    }
+    qb.push(" ORDER BY c.name, c.id LIMIT ")
+        .push_bind(limit + 1);
+    let rows = qb
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let has_more = rows.len() as i64 > limit;
+    let mut rows = rows;
+    if has_more {
+        rows.truncate(limit as usize);
+    }
+    let (next_after_name, next_after_id) = if has_more {
+        rows.last()
+            .map(|row| {
+                (
+                    Some(row.get::<String, _>("name")),
+                    Some(row.get::<i64, _>("id")),
+                )
+            })
+            .unwrap_or((None, None))
+    } else {
+        (None, None)
+    };
+    let channels = enrich_rows(pool, rows).await?;
+
+    let mut total_qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+        "SELECT COUNT(*) FROM channels c JOIN channel_facets cf ON cf.channel_id = c.id WHERE 1=1",
+    );
+    push_facet_scope(&mut total_qb, &filter);
+    push_browse_selection(&mut total_qb, &filter);
+    let total: i64 = total_qb
+        .build_query_scalar()
+        .fetch_one(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    Ok(BrowsePage {
+        ready: true,
+        channels,
+        next_after_name,
+        next_after_id,
+        has_more,
+        total,
+    })
+}
+
+const CATALOG_COLUMNS: &str = "c.id, c.playlist_id, c.name, c.url, c.group_title, c.tvg_id, c.tvg_logo, c.language, c.extra_headers, c.last_ok, c.last_error, c.is_live, \
+     c.tmdb_id, c.tmdb_type, c.poster_path, c.backdrop_path, c.overview, c.release_year, c.rating, c.genre_names, c.enriched_at";
+
+/// Discovery's local shelves, selected from the whole library instead of the loaded page. TMDB
+/// matches only; unmatched playlist entries never form a catalogue shelf.
+pub async fn list_library_catalog(
+    pool: &Pool<Sqlite>,
+    filter: BrowseFilter<'_>,
+) -> Result<CatalogShelves> {
+    if !channel_facets_ready(pool).await? {
+        return Ok(CatalogShelves {
+            ready: false,
+            top_rated: Vec::new(),
+            recent: Vec::new(),
+            genres: Vec::new(),
+        });
+    }
+
+    let mut top_qb: QueryBuilder<Sqlite> = QueryBuilder::new(format!(
+        "SELECT {CATALOG_COLUMNS} FROM channels c JOIN channel_facets cf ON cf.channel_id = c.id \
+         WHERE c.tmdb_id IS NOT NULL AND c.rating IS NOT NULL AND c.rating > 0"
+    ));
+    push_facet_scope(&mut top_qb, &filter);
+    top_qb.push(" ORDER BY c.rating DESC, c.name LIMIT 20");
+    let top_rows = top_qb
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    let mut recent_qb: QueryBuilder<Sqlite> = QueryBuilder::new(format!(
+        "SELECT {CATALOG_COLUMNS} FROM channels c JOIN channel_facets cf ON cf.channel_id = c.id \
+         WHERE c.tmdb_id IS NOT NULL AND c.release_year IS NOT NULL AND c.release_year > 0"
+    ));
+    push_facet_scope(&mut recent_qb, &filter);
+    recent_qb.push(" ORDER BY c.release_year DESC, c.rating DESC, c.name LIMIT 20");
+    let recent_rows = recent_qb
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    let mut genre_qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+        "SELECT g.value AS genre, COUNT(*) AS count FROM channel_facet_genres g \
+         JOIN channel_facets cf ON cf.channel_id = g.channel_id \
+         JOIN channels c ON c.id = g.channel_id \
+         WHERE c.tmdb_id IS NOT NULL AND c.genre_names IS NOT NULL AND trim(c.genre_names) <> ''",
+    );
+    push_facet_scope(&mut genre_qb, &filter);
+    genre_qb
+        .push(" GROUP BY g.value HAVING COUNT(*) >= 2 ORDER BY count DESC, g.value ASC LIMIT 10");
+    let genre_rows = genre_qb
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+    let mut genres = Vec::new();
+    for row in genre_rows {
+        let genre: String = row.get("genre");
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(format!(
+            "SELECT {CATALOG_COLUMNS} FROM channels c \
+             JOIN channel_facets cf ON cf.channel_id = c.id \
+             JOIN channel_facet_genres g ON g.channel_id = c.id AND g.value = "
+        ));
+        qb.push_bind(&genre);
+        qb.push(" WHERE c.tmdb_id IS NOT NULL");
+        push_facet_scope(&mut qb, &filter);
+        qb.push(" ORDER BY c.rating DESC, c.name LIMIT 20");
+        let rows = qb
+            .build()
+            .fetch_all(pool)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        genres.push(CatalogGenreShelf {
+            genre,
+            channels: enrich_rows(pool, rows).await?,
+        });
+    }
+
+    Ok(CatalogShelves {
+        ready: true,
+        top_rated: enrich_rows(pool, top_rows).await?,
+        recent: enrich_rows(pool, recent_rows).await?,
+        genres,
+    })
 }
 
 pub async fn list_channels_by_ids(
@@ -1422,7 +2155,7 @@ pub async fn backfill_channel_search(pool: &Pool<Sqlite>) -> Result<()> {
         let inserted = sqlx::query(
             "INSERT OR REPLACE INTO channels_fts(rowid, name, group_title, tvg_id) \
              SELECT id, name, group_title, tvg_id FROM channels \
-             WHERE id > ? ORDER BY id LIMIT 500",
+             WHERE id > ? ORDER BY id LIMIT 2000",
         )
         .bind(cursor)
         .execute(pool)
@@ -1443,7 +2176,9 @@ pub async fn backfill_channel_search(pool: &Pool<Sqlite>) -> Result<()> {
             break;
         };
         set_setting(pool, CHANNEL_SEARCH_CURSOR, &next.to_string()).await?;
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        // 2,000 rows per transaction is four times fewer round trips than the first version,
+        // which matters for a 14.76M-row library. One millisecond still yields to playback writes.
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
     set_setting(pool, CHANNEL_SEARCH_READY, "done").await?;
     sqlx::query("DELETE FROM settings WHERE key = ?")
@@ -1760,6 +2495,7 @@ pub async fn set_category_override(
             .execute(pool)
             .await
             .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        refresh_channel_facets(pool, channel_id).await?;
         return Ok(CategoryOverride {
             content_key,
             kind: None,
@@ -1781,6 +2517,7 @@ pub async fn set_category_override(
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
+    refresh_channel_facets(pool, channel_id).await?;
     Ok(CategoryOverride {
         content_key,
         kind: kind.map(String::from),
@@ -4036,32 +4773,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v2_title_backfill_reruns_after_the_old_v1_marker() {
+        let pool = test_pool().await;
+        insert_large_playlist(&pool, 600).await;
+        // The old release marked v1 complete while leaving `titles` empty. That must not suppress
+        // the rebuilt backfill, or resume/fallback stay broken forever.
+        set_setting(&pool, "titles_backfill_v1", "done")
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM titles")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        backfill_titles_and_sources(&pool).await.unwrap();
+
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM titles")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(after, 600, "the stale v1 marker must not skip the rebuild");
+        assert_eq!(
+            get_setting(&pool, TITLES_BACKFILL_SETTING)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("done")
+        );
+    }
+
+    #[tokio::test]
+    async fn full_library_facets_count_and_filter_beyond_the_loaded_page() {
+        let pool = test_pool().await;
+        let mut news = test_channel("News One", "https://cdn.example/news.m3u8", None);
+        news.group_title = Some("News".into());
+        news.is_live = Some(true);
+        let mut sports = test_channel("Sports One", "https://cdn.example/sport.m3u8", None);
+        sports.group_title = Some("Sports;News".into());
+        sports.is_live = Some(true);
+        let mut film = test_channel("Feature Film", "https://cdn.example/film.mp4", None);
+        film.group_title = Some("Films".into());
+        film.is_live = Some(false);
+        let playlist_id = insert_test_playlist(&pool, &[news, sports, film]).await;
+
+        backfill_channel_facets(&pool).await.unwrap();
+        assert!(channel_facets_ready(&pool).await.unwrap());
+
+        let all = list_browse_facets(&pool, BrowseFilter::default())
+            .await
+            .unwrap();
+        assert!(all.ready);
+        let count = |values: &[FacetCount], value: &str| {
+            values
+                .iter()
+                .find(|entry| entry.value == value)
+                .map(|entry| entry.count)
+                .unwrap_or(0)
+        };
+        assert_eq!(count(&all.groups, "News"), 2, "packed group tags count");
+        assert_eq!(count(&all.groups, "Sports"), 1);
+        assert_eq!(count(&all.genres, "News"), 2, "inferred genre counts");
+        assert_eq!(count(&all.years, "unknown"), 3);
+        assert_eq!(all.totals.groups, 3);
+
+        let news_only = list_browse_facets(
+            &pool,
+            BrowseFilter {
+                group: Some("News"),
+                ..BrowseFilter::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            news_only.totals.groups, 3,
+            "the selected group does not narrow itself"
+        );
+        assert_eq!(count(&news_only.groups, "Sports"), 1);
+
+        let page = list_browse_page(
+            &pool,
+            BrowseFilter {
+                group: Some("News"),
+                ..BrowseFilter::default()
+            },
+            None,
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.channels.len(), 1);
+        assert!(page.has_more);
+
+        let second = list_browse_page(
+            &pool,
+            BrowseFilter {
+                group: Some("News"),
+                ..BrowseFilter::default()
+            },
+            page.next_after_name.as_deref(),
+            page.next_after_id,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.channels.len(), 1);
+        assert!(!second.has_more);
+        assert_ne!(
+            page.channels[0].channel.id, second.channels[0].channel.id,
+            "keyset pages must not repeat rows"
+        );
+        let _ = playlist_id;
+    }
+
+    #[tokio::test]
     async fn paged_channel_listing_is_bounded_and_has_no_gaps() {
         let pool = test_pool().await;
         let playlist_id = insert_large_playlist(&pool, 120).await;
 
-        let first = list_channels_page(&pool, Some(playlist_id), None, None, None, 50)
+        let first = list_channels_page(&pool, Some(playlist_id), None, None, None, None, 50)
             .await
             .unwrap();
         assert_eq!(first.channels.len(), 50);
         assert!(first.has_more);
-        let first_cursor = first.next_after_id.unwrap();
+        let first_name = first.next_after_name.clone().unwrap();
+        let first_id = first.next_after_id.unwrap();
 
-        let second =
-            list_channels_page(&pool, Some(playlist_id), None, None, Some(first_cursor), 50)
-                .await
-                .unwrap();
+        let second = list_channels_page(
+            &pool,
+            Some(playlist_id),
+            None,
+            None,
+            Some(&first_name),
+            Some(first_id),
+            50,
+        )
+        .await
+        .unwrap();
         assert_eq!(second.channels.len(), 50);
         assert!(second.has_more);
-        let second_cursor = second.next_after_id.unwrap();
-        assert!(second_cursor > first_cursor);
+        let second_name = second.next_after_name.clone().unwrap();
+        let second_id = second.next_after_id.unwrap();
 
         let third = list_channels_page(
             &pool,
             Some(playlist_id),
             None,
             None,
-            Some(second_cursor),
+            Some(&second_name),
+            Some(second_id),
             50,
         )
         .await
@@ -4069,7 +4931,18 @@ mod tests {
         assert_eq!(third.channels.len(), 20);
         assert!(!third.has_more);
         assert_eq!(third.next_after_id, None);
+        assert_eq!(third.next_after_name, None);
 
+        // Pages are alphabetical and names are used as the cursor, so equal names must not skip
+        // or repeat rows.
+        let names: Vec<&str> = first
+            .channels
+            .iter()
+            .chain(second.channels.iter())
+            .chain(third.channels.iter())
+            .map(|channel| channel.channel.name.as_str())
+            .collect();
+        assert!(names.windows(2).all(|pair| pair[0] <= pair[1]));
         let ids: Vec<i64> = first
             .channels
             .iter()
@@ -4098,9 +4971,10 @@ mod tests {
         .unwrap();
 
         // The index is not marked ready yet, so this exercises the LIKE fallback.
-        let before = list_channels_page(&pool, Some(playlist_id), Some("news"), None, None, 10)
-            .await
-            .unwrap();
+        let before =
+            list_channels_page(&pool, Some(playlist_id), Some("news"), None, None, None, 10)
+                .await
+                .unwrap();
         assert_eq!(before.channels.len(), 2);
 
         backfill_channel_search(&pool).await.unwrap();
@@ -4112,9 +4986,10 @@ mod tests {
             Some("done")
         );
 
-        let after = list_channels_page(&pool, Some(playlist_id), Some("news"), None, None, 10)
-            .await
-            .unwrap();
+        let after =
+            list_channels_page(&pool, Some(playlist_id), Some("news"), None, None, None, 10)
+                .await
+                .unwrap();
         assert_eq!(after.channels.len(), 2);
         assert!(
             after
@@ -4123,9 +4998,17 @@ mod tests {
                 .all(|channel| channel.channel.name.starts_with("News"))
         );
 
-        let sports = list_channels_page(&pool, Some(playlist_id), Some("sports"), None, None, 10)
-            .await
-            .unwrap();
+        let sports = list_channels_page(
+            &pool,
+            Some(playlist_id),
+            Some("sports"),
+            None,
+            None,
+            None,
+            10,
+        )
+        .await
+        .unwrap();
         assert_eq!(sports.channels.len(), 1);
 
         // FTS operators in the query are quoted as literal text, not evaluated.
@@ -4133,6 +5016,7 @@ mod tests {
             &pool,
             Some(playlist_id),
             Some("news\" OR *"),
+            None,
             None,
             None,
             10,

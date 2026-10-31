@@ -4,6 +4,7 @@ import {
   listChannelsPage,
   listChannelGroups,
   listFavoriteChannels,
+  listChannelsByIds,
   listFavorites,
   probeUrls,
   toggleFavorite,
@@ -40,7 +41,11 @@ export function useChannels(refreshTrigger = 0, options: ChannelsOptions = {}) {
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<number | null>(null);
   const [pageChannels, setPageChannels] = useState<Channel[]>([]);
   const [favoriteChannels, setFavoriteChannels] = useState<Channel[]>([]);
+  // Channels referenced by history or "new since last visit" that are not on the loaded page.
+  // Bounded by the history/new-id counts, so this stays small on a 14.76M-row library.
+  const [extraChannels, setExtraChannels] = useState<Channel[]>([]);
   const [groups, setGroups] = useState<string[]>([]);
+  const [nextAfterName, setNextAfterName] = useState<string | null>(null);
   const [nextAfterId, setNextAfterId] = useState<number | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [selectedGroup, setSelectedGroup] = useState("all");
@@ -119,10 +124,12 @@ export function useChannels(refreshTrigger = 0, options: ChannelsOptions = {}) {
           searchQuery,
           selectedGroup === "all" ? null : selectedGroup,
           null,
+          null,
           PAGE_SIZE,
         );
         if (cancelled || request !== requestId.current) return;
         setPageChannels(page.channels);
+        setNextAfterName(page.next_after_name);
         setNextAfterId(page.next_after_id);
         setHasMore(page.has_more);
         loadedOnce.current = true;
@@ -136,7 +143,7 @@ export function useChannels(refreshTrigger = 0, options: ChannelsOptions = {}) {
   }, [selectedPlaylistId, selectedGroup, searchQuery, refreshTrigger, revision]);
 
   const loadMore = useCallback(async () => {
-    if (nextAfterId === null || !hasMore || loadingMoreRef.current) return;
+    if (nextAfterName === null || nextAfterId === null || !hasMore || loadingMoreRef.current) return;
     loadingMoreRef.current = true;
     const request = requestId.current;
     setLoadingMore(true);
@@ -146,11 +153,13 @@ export function useChannels(refreshTrigger = 0, options: ChannelsOptions = {}) {
         selectedPlaylistId,
         searchQuery,
         selectedGroup === "all" ? null : selectedGroup,
+        nextAfterName,
         nextAfterId,
         PAGE_SIZE,
       );
       if (request !== requestId.current) return;
       setPageChannels((current) => mergeChannels(current, page.channels));
+      setNextAfterName(page.next_after_name);
       setNextAfterId(page.next_after_id);
       setHasMore(page.has_more);
     } catch (failure) {
@@ -159,11 +168,22 @@ export function useChannels(refreshTrigger = 0, options: ChannelsOptions = {}) {
       loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, [hasMore, nextAfterId, searchQuery, selectedGroup, selectedPlaylistId]);
+  }, [hasMore, nextAfterId, nextAfterName, searchQuery, selectedGroup, selectedPlaylistId]);
+
+  const ensureChannels = useCallback(async (ids: number[]) => {
+    const wanted = [...new Set(ids)].filter((id) => Number.isInteger(id));
+    if (wanted.length === 0) return;
+    try {
+      const rows = await listChannelsByIds(wanted);
+      setExtraChannels((current) => mergeChannels(current, rows));
+    } catch {
+      // The board simply omits channels it could not hydrate; playback is unaffected.
+    }
+  }, []);
 
   const allChannels = useMemo(
-    () => mergeChannels(favoriteChannels, pageChannels),
-    [favoriteChannels, pageChannels],
+    () => mergeChannels(extraChannels, favoriteChannels, pageChannels),
+    [extraChannels, favoriteChannels, pageChannels],
   );
   const sourceChannels = useMemo(
     () => selectedPlaylistId === null ? allChannels : allChannels.filter((channel) => channel.playlist_id === selectedPlaylistId),
@@ -246,7 +266,11 @@ export function useChannels(refreshTrigger = 0, options: ChannelsOptions = {}) {
     }
   }, [reload]);
 
-  return { playlists, selectedPlaylistId, selectPlaylist, allChannels, channels, groups, selectedGroup, setSelectedGroup,
+  const addChannels = useCallback((channels: Channel[]) => {
+    setExtraChannels((current) => mergeChannels(current, channels));
+  }, []);
+
+  return { playlists, selectedPlaylistId, selectPlaylist, allChannels, ensureChannels, addChannels, channels, groups, selectedGroup, setSelectedGroup,
     searchQuery, setSearchQuery, favoritesOnly, setFavoritesOnly, favoriteIds, loading, loadingMore, hasMore, loadMore,
     probing, refreshing, error,
     loadPlaylists: reload, loadChannels: reload, handleProbeVisible, handleToggleFavorite, handleSetCategoryOverride,

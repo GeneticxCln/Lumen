@@ -380,26 +380,38 @@ async fn pages_a_real_database_copy() {
         .await
         .unwrap();
     let first_started = std::time::Instant::now();
-    let first = crate::db::list_channels_page(&pool, None, None, None, None, 500)
+    let first = crate::db::list_channels_page(&pool, None, None, None, None, None, 500)
         .await
         .unwrap();
     let first_elapsed = first_started.elapsed();
     assert_eq!(first.channels.len(), 500);
     assert!(first.has_more);
-    let cursor = first.next_after_id.expect("a full page has a cursor");
+    let name_cursor = first
+        .next_after_name
+        .clone()
+        .expect("a full page has a name cursor");
+    let id_cursor = first.next_after_id.expect("a full page has an id cursor");
 
     let second_started = std::time::Instant::now();
-    let second = crate::db::list_channels_page(&pool, None, None, None, Some(cursor), 500)
-        .await
-        .unwrap();
+    let second = crate::db::list_channels_page(
+        &pool,
+        None,
+        None,
+        None,
+        Some(&name_cursor),
+        Some(id_cursor),
+        500,
+    )
+    .await
+    .unwrap();
     let second_elapsed = second_started.elapsed();
     assert_eq!(second.channels.len(), 500);
     assert!(
         second
             .channels
             .iter()
-            .all(|channel| channel.channel.id.unwrap() > cursor),
-        "keyset pages must move strictly forward"
+            .all(|channel| channel.channel.name.as_str() >= name_cursor.as_str()),
+        "keyset pages must move forward by name"
     );
 
     let groups_started = std::time::Instant::now();
@@ -408,7 +420,7 @@ async fn pages_a_real_database_copy() {
     assert!(!groups.is_empty());
 
     let search_started = std::time::Instant::now();
-    let search = crate::db::list_channels_page(&pool, None, Some("News"), None, None, 500)
+    let search = crate::db::list_channels_page(&pool, None, Some("News"), None, None, None, 500)
         .await
         .unwrap();
     let search_elapsed = search_started.elapsed();

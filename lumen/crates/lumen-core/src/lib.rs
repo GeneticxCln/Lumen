@@ -9,6 +9,7 @@ pub mod db;
 pub mod diagnostics;
 pub mod error;
 pub mod extract;
+pub mod facets;
 pub mod harvest;
 pub mod launch;
 pub mod media_tools;

@@ -140,8 +140,9 @@ Run against a snapshot of `~/.local/share/com.quinton.lumen/lumen.db` (14,760,40
   covered by the synthetic fixture (`content_migration_tests.rs`), which includes two query-distinct
   URLs sharing the old `stream:` key and a `tvg-id="None"` group.
 - The real library's `titles` table was already empty (`titles_backfill_v1 = done`), and with no
-  title sources the runner correctly skips an hours-long 14.76M-row title rebuild. Fallback/"new
-  since last visit" therefore remain empty on this library until the paged title backfill lands.
+  title sources the runner correctly skips an hours-long 14.76M-row title rebuild. The paged
+  startup backfill now gates on `titles_backfill_v2`, so that stale marker no longer suppresses the
+  rebuild; it runs in the background on the next launch.
 
 Rollback: quit Lumen, then replace `lumen.db` with the `.pre-key-v2-*.db` file named in the log.
 
