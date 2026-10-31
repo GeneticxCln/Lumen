@@ -460,7 +460,7 @@ async fn apply_profile(conn: &mut SqliteConnection, item: &SyncItem) -> Result<(
     Ok(())
 }
 
-async fn apply_favorite(conn: &mut SqliteConnection, item: &SyncItem) -> Result<()> {
+pub(crate) async fn apply_favorite(conn: &mut SqliteConnection, item: &SyncItem) -> Result<()> {
     let Some(profile_key) = item.payload.get("profile").and_then(Value::as_str) else {
         return Ok(());
     };
@@ -471,18 +471,54 @@ async fn apply_favorite(conn: &mut SqliteConnection, item: &SyncItem) -> Result<
     let Some(profile_id) = profile_id_for_key(conn, profile_key).await? else {
         return Ok(());
     };
+
+    if item.deleted {
+        // A removal is per title, not per URL: the device that removed it may hold a different
+        // source URL for the same content_key. The timestamp guard keeps an old tombstone from
+        // undoing a favorite that was re-added more recently on this device.
+        match content_key {
+            Some(key) => {
+                sqlx::query(
+                    "UPDATE favorites SET active = 0, updated_at = ? WHERE profile_id = ? \
+                     AND active = 1 AND updated_at < ? AND (content_key = ? OR channel_url = ?)",
+                )
+                .bind(item.updated_at)
+                .bind(profile_id)
+                .bind(item.updated_at)
+                .bind(key)
+                .bind(url)
+                .execute(conn)
+                .await
+                .map_err(sql_err)?;
+            }
+            None => {
+                sqlx::query(
+                    "UPDATE favorites SET active = 0, updated_at = ? WHERE profile_id = ? \
+                     AND active = 1 AND updated_at < ? AND channel_url = ?",
+                )
+                .bind(item.updated_at)
+                .bind(profile_id)
+                .bind(item.updated_at)
+                .bind(url)
+                .execute(conn)
+                .await
+                .map_err(sql_err)?;
+            }
+        }
+        return Ok(());
+    }
+
     sqlx::query(
-        "INSERT INTO favorites (profile_id, channel_url, content_key, active, updated_at) VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO favorites (profile_id, channel_url, content_key, active, updated_at) VALUES (?, ?, ?, 1, ?)
          ON CONFLICT (profile_id, channel_url) DO UPDATE SET
            content_key = COALESCE(excluded.content_key, favorites.content_key),
-           active = excluded.active,
+           active = 1,
            updated_at = excluded.updated_at
          WHERE excluded.updated_at > favorites.updated_at",
     )
     .bind(profile_id)
     .bind(url)
     .bind(content_key)
-    .bind(i64::from(!item.deleted))
     .bind(item.updated_at)
     .execute(conn)
     .await
@@ -490,7 +526,7 @@ async fn apply_favorite(conn: &mut SqliteConnection, item: &SyncItem) -> Result<
     Ok(())
 }
 
-async fn apply_progress(conn: &mut SqliteConnection, item: &SyncItem) -> Result<()> {
+pub(crate) async fn apply_progress(conn: &mut SqliteConnection, item: &SyncItem) -> Result<()> {
     let Some(profile_key) = item.payload.get("profile").and_then(Value::as_str) else {
         return Ok(());
     };
@@ -503,12 +539,19 @@ async fn apply_progress(conn: &mut SqliteConnection, item: &SyncItem) -> Result<
         let Some(profile_id) = profile_id_for_key(conn, profile_key).await? else {
             return Ok(());
         };
-        sqlx::query("DELETE FROM history WHERE profile_id = ? AND content_key = ?")
-            .bind(profile_id)
-            .bind(content_key)
-            .execute(&mut *conn)
-            .await
-            .map_err(sql_err)?;
+        // `played_at` is seconds and the tombstone timestamp is milliseconds. Only delete a row
+        // the tombstone is actually newer than; an old removal arriving late (a rekey's own
+        // tombstone, or a delayed push) must not erase history created since it was written.
+        sqlx::query(
+            "DELETE FROM history WHERE profile_id = ? AND content_key = ? \
+             AND played_at * 1000 <= ?",
+        )
+        .bind(profile_id)
+        .bind(content_key)
+        .bind(item.updated_at)
+        .execute(&mut *conn)
+        .await
+        .map_err(sql_err)?;
         return Ok(());
     }
 

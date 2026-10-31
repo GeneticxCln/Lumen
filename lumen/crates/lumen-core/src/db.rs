@@ -1368,8 +1368,13 @@ pub async fn toggle_favorite(
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
+    // A favorite belongs to the title, not to one source's URL. Another playlist's channel can
+    // derive the same content_key (same tvg_id or TMDB match), so turning the favorite off must
+    // clear every active row carrying that key — otherwise the title stays in My List through
+    // the other source and appears impossible to remove.
     let active: Option<i64> = sqlx::query_scalar(
-        "SELECT active FROM favorites WHERE profile_id = ? AND (content_key = ? OR channel_url = ?)",
+        "SELECT active FROM favorites WHERE profile_id = ? AND (content_key = ? OR channel_url = ?) \
+         ORDER BY active DESC LIMIT 1",
     )
     .bind(profile_id)
     .bind(&content_key)
@@ -1380,23 +1385,54 @@ pub async fn toggle_favorite(
 
     let favorite = active.unwrap_or(0) == 0;
     let now = Utc::now().timestamp_millis();
-    sqlx::query(
-        "INSERT INTO favorites (profile_id, channel_url, content_key, active, updated_at) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT (profile_id, channel_url) DO UPDATE SET
-           content_key = excluded.content_key,
-           active = excluded.active,
-           updated_at = excluded.updated_at",
-    )
-    .bind(profile_id)
-    .bind(&url)
-    .bind(&content_key)
-    .bind(i64::from(favorite))
-    .bind(now)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    if favorite {
+        sqlx::query(
+            "INSERT INTO favorites (profile_id, channel_url, content_key, active, updated_at) VALUES (?, ?, ?, 1, ?)
+             ON CONFLICT (profile_id, channel_url) DO UPDATE SET
+               content_key = excluded.content_key,
+               active = 1,
+               updated_at = excluded.updated_at",
+        )
+        .bind(profile_id)
+        .bind(&url)
+        .bind(&content_key)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    sync::queue_favorite(&mut tx, profile_id, &content_key, &url, favorite, now).await?;
+        sync::queue_favorite(&mut tx, profile_id, &content_key, &url, true, now).await?;
+    } else {
+        // Retire every key represented by the rows being turned off, including one written by
+        // an older version of the derivation, so both devices clear the same title.
+        let keys: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT COALESCE(content_key, ?) FROM favorites \
+             WHERE profile_id = ? AND active = 1 AND (content_key = ? OR channel_url = ?)",
+        )
+        .bind(&content_key)
+        .bind(profile_id)
+        .bind(&content_key)
+        .bind(&url)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+        sqlx::query(
+            "UPDATE favorites SET active = 0, updated_at = ? \
+             WHERE profile_id = ? AND active = 1 AND (content_key = ? OR channel_url = ?)",
+        )
+        .bind(now)
+        .bind(profile_id)
+        .bind(&content_key)
+        .bind(&url)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+
+        for key in keys {
+            sync::queue_favorite(&mut tx, profile_id, &key, &url, false, now).await?;
+        }
+    }
 
     tx.commit()
         .await
@@ -1773,6 +1809,77 @@ pub async fn merge_profiles(
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
+    // The merge is local identity work; without re-queueing, other devices keep the moved rows
+    // under the deleted profile's sync key until the tombstone removes them, so the data looks
+    // lost there instead of following the merge.
+    let now = Utc::now().timestamp_millis();
+    // The moved rows are about to be queued under the surviving profile; drop this profile's
+    // still-pending copies, or other devices receive both the merge and the old identity.
+    if let Some(key) = &sync_key {
+        let pattern = format!("%\"profile\":\"{key}\"%");
+        sqlx::query(
+            "DELETE FROM sync_queue WHERE kind IN ('favorite', 'progress', 'episode') \
+             AND payload LIKE ?",
+        )
+        .bind(pattern)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    }
+
+    let merged_favorites: Vec<(String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT channel_url, content_key, active FROM favorites WHERE profile_id = ?",
+    )
+    .bind(into_profile_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    for (url, key, active) in merged_favorites {
+        let key = key.unwrap_or_else(|| ContentKey::for_stream_url(&url).into_string());
+        sync::queue_favorite(&mut tx, into_profile_id, &key, &url, active != 0, now).await?;
+    }
+
+    let merged_history: Vec<(String, String, f64, f64, i64)> = sqlx::query_as(
+        "SELECT path, content_key, position, duration, played_at FROM history \
+         WHERE profile_id = ? AND content_key IS NOT NULL",
+    )
+    .bind(into_profile_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    for (path, key, position, duration, played_at) in merged_history {
+        sync::queue_progress(
+            &mut tx,
+            into_profile_id,
+            &key,
+            &path,
+            position,
+            duration,
+            played_at,
+        )
+        .await?;
+    }
+
+    let merged_episodes: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+        "SELECT series_key, season, episode, watched FROM episode_state WHERE profile_id = ?",
+    )
+    .bind(into_profile_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    for (series_key, season, episode, watched) in merged_episodes {
+        sync::queue_episode(
+            &mut tx,
+            into_profile_id,
+            &series_key,
+            season,
+            episode,
+            watched != 0,
+            now,
+        )
+        .await?;
+    }
+
     let result = sqlx::query("DELETE FROM profiles WHERE id = ?")
         .bind(from_profile_id)
         .execute(&mut *tx)
@@ -2139,11 +2246,18 @@ pub async fn get_history(
 pub async fn get_resume_position(
     pool: &Pool<Sqlite>,
     profile_id: i64,
+    channel_id: Option<i64>,
     path: &str,
 ) -> Result<Option<f64>> {
-    let content_key = resolve_content_key(pool, None, path).await;
+    // Resolving through the channel (when the caller has one) is what makes resume follow a
+    // title across sources: another playlist's row for the same tvg_id/TMDB match derives the
+    // same key, while the URL-only fallback never could. `path` still matches older rows that
+    // were written before content keys were backfilled.
+    let content_key = resolve_content_key(pool, channel_id, path).await;
     let row = sqlx::query(
-        "SELECT position FROM history WHERE profile_id = ? AND (content_key = ? OR path = ?) AND duration > 0 AND position > 0 AND position < duration ORDER BY played_at DESC LIMIT 1",
+        "SELECT position FROM history WHERE profile_id = ? AND (content_key = ? OR path = ?) \
+         AND duration > 0 AND position > 0 AND position < duration - 5.0 \
+         ORDER BY played_at DESC LIMIT 1",
     )
     .bind(profile_id)
     .bind(&content_key)
@@ -3024,7 +3138,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            get_resume_position(&pool, DEFAULT_PROFILE_ID, "/tmp/video.mkv")
+            get_resume_position(&pool, DEFAULT_PROFILE_ID, None, "/tmp/video.mkv")
                 .await
                 .unwrap(),
             Some(42.5)
@@ -3143,7 +3257,7 @@ mod tests {
         assert_eq!(rows[0].duration, 120.0);
         assert_eq!(rows[0].channel_id, Some(channel_id));
         assert_eq!(
-            get_resume_position(&pool, DEFAULT_PROFILE_ID, "/media/movie.mkv")
+            get_resume_position(&pool, DEFAULT_PROFILE_ID, None, "/media/movie.mkv")
                 .await
                 .unwrap(),
             Some(42.5)
@@ -3168,7 +3282,7 @@ mod tests {
             1
         );
         assert_eq!(
-            get_resume_position(&pool, DEFAULT_PROFILE_ID, "/media/movie.mkv")
+            get_resume_position(&pool, DEFAULT_PROFILE_ID, None, "/media/movie.mkv")
                 .await
                 .unwrap(),
             None
@@ -3261,7 +3375,7 @@ mod tests {
         );
         assert_eq!(rows[0].position, 77.0);
         assert_eq!(
-            get_resume_position(&pool, DEFAULT_PROFILE_ID, "/media/legacy.mkv")
+            get_resume_position(&pool, DEFAULT_PROFILE_ID, None, "/media/legacy.mkv")
                 .await
                 .unwrap(),
             Some(77.0)
@@ -3385,9 +3499,14 @@ mod tests {
             vec![7]
         );
         assert_eq!(
-            get_resume_position(&pool, DEFAULT_PROFILE_ID, "https://example.com/old.m3u8")
-                .await
-                .unwrap(),
+            get_resume_position(
+                &pool,
+                DEFAULT_PROFILE_ID,
+                None,
+                "https://example.com/old.m3u8"
+            )
+            .await
+            .unwrap(),
             Some(12.5)
         );
         let rows = get_history(&pool, DEFAULT_PROFILE_ID, 50).await.unwrap();
@@ -3448,13 +3567,18 @@ mod tests {
         toggle_favorite(&pool, second.id, channel_id).await.unwrap();
 
         assert_eq!(
-            get_resume_position(&pool, DEFAULT_PROFILE_ID, "https://example.com/one.m3u8")
-                .await
-                .unwrap(),
+            get_resume_position(
+                &pool,
+                DEFAULT_PROFILE_ID,
+                None,
+                "https://example.com/one.m3u8"
+            )
+            .await
+            .unwrap(),
             Some(30.0)
         );
         assert_eq!(
-            get_resume_position(&pool, second.id, "https://example.com/one.m3u8")
+            get_resume_position(&pool, second.id, None, "https://example.com/one.m3u8")
                 .await
                 .unwrap(),
             None,
@@ -3483,9 +3607,14 @@ mod tests {
             1
         );
         assert_eq!(
-            get_resume_position(&pool, DEFAULT_PROFILE_ID, "https://example.com/one.m3u8")
-                .await
-                .unwrap(),
+            get_resume_position(
+                &pool,
+                DEFAULT_PROFILE_ID,
+                None,
+                "https://example.com/one.m3u8"
+            )
+            .await
+            .unwrap(),
             Some(30.0)
         );
     }

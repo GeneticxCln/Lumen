@@ -31,4 +31,6 @@ pub mod update;
 pub mod update_sig;
 
 #[cfg(test)]
+mod identity_tests;
+#[cfg(test)]
 mod sync_tests;

@@ -27,7 +27,7 @@ pub struct Channel {
 pub struct Playlist {
     pub id: Option<i64>,
     pub name: String,
-    pub source: String, // 'file' | 'url' | 'extract' | 'catalog'
+    pub source: String, // 'file' | 'url' | 'extract' | 'harvest' | 'catalog'
     pub origin: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,

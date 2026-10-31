@@ -259,8 +259,9 @@ async fn play_url_inner(
         .load(&load_url, hdrs.as_deref(), audio_url.as_deref())
         .await?;
 
-    // Check if there is a saved resume position for local files
-    if let Ok(Some(resume_pos)) = get_resume_position(pool, profile_id, &url).await
+    // Resume follows this title whichever source is playing it; passing the channel lets the
+    // lookup derive the same content_key another source's history was saved under.
+    if let Ok(Some(resume_pos)) = get_resume_position(pool, profile_id, channel_id, &url).await
         && resume_pos > 1.0
     {
         let _ = backend.seek(resume_pos).await;
@@ -1013,11 +1014,13 @@ pub async fn harvest_page(url: String, app: AppHandle) -> Result<HarvestResponse
             .to_string();
         let playlist = Playlist {
             id: None,
-            name: format!("Harvested: {}", host_label),
-            source: "extract".to_string(),
+            // Not `extract`: a harvested entries' URLs are already the streams that were found,
+            // so playback must use them directly instead of re-running yt-dlp on the page.
+            source: "harvest".to_string(),
             origin: Some(url.clone()),
             created_at: now,
             updated_at: now,
+            name: format!("Harvested: {}", host_label),
         };
         let mut all_channels = Vec::new();
         for (idx, found_url) in harvested.urls.iter().enumerate() {

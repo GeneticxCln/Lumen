@@ -14,6 +14,12 @@ tests named there", not as real-world proof: this audit reproduced failures thos
 - **Open, reported** — the auditor's finding, marked `[Ran]`/`[Read]` as they did; not re-run here.
 - **Deferred** — needs a schema or sync-protocol change and a data migration.
 
+**Phase 1 of the identity/resume batch landed on main on 2026-10-31 (unreleased).** Issues 8–14
+are fixed, with six regression tests in `crates/lumen-core/src/identity_tests.rs`. Issues 6, 7
+and 15 need the v2 `content_key` migration, which is designed in
+[IDENTITY-MIGRATION.md](IDENTITY-MIGRATION.md) but deliberately not enabled yet: flipping the
+derivation without the migration would orphan existing My List and history rows.
+
 **State of the real library after the audit's own mistake** (it ran the release binary with
 `--version`, which opened the full app for about 3 minutes): SQLite `quick_check` is `ok`; the 186
 lists and 14.76M channels are intact. Settings changed: `last_visit_1`, `update_last_check`, and
@@ -49,29 +55,41 @@ limits/warnings — not a small patch.
 6. **Different channels merge into one.** `ContentKey::for_stream_url` hashes the URL after
    stripping the query and fragment, so `…/play.php?id=1` and `…/?id=2` get the same key:
    favoriting one favorites both, history collapses into one row, fallback can jump between them.
-   **Open, confirmed** (`content_key.rs`, `for_stream_url`).
+   **Open — v2 key change designed, not enabled** (`content_key.rs`, `for_stream_url`; see
+   [IDENTITY-MIGRATION.md](IDENTITY-MIGRATION.md)).
 7. **`tvg-id="None"` merges unrelated titles.** `for_tvg` accepts any non-empty string, including
-   the literal placeholder. **Open, confirmed** (`content_key.rs`, `for_tvg`).
-8. **Removing a favorite through another source doesn't remove it from My List.** **Open,
-   reported** (`db.rs:1326` at `a95e0ab`).
+   the literal placeholder. **Open — v2 key change designed, not enabled** (`content_key.rs`,
+   `for_tvg`; see [IDENTITY-MIGRATION.md](IDENTITY-MIGRATION.md)).
+8. **Removing a favorite through another source doesn't remove it from My List.** **Fixed
+   (unreleased):** toggling off now clears every active row sharing the title key;
+   `identity_tests::unfavoriting_one_source_clears_the_title_everywhere`.
 9. **A favorite removal on one device may not reach another** when the devices use different
-   stream URLs for the same favorite. **Open, reported** (`sync.rs:474`).
-10. **Resume doesn't follow a title across sources**, and switching source loses it. **Open,
-    reported** (`db.rs:2099`).
-11. **Finished titles resume at the end**, so they stop immediately. **Open, reported**
-    (`db.rs:2101`).
+   stream URLs for the same favorite. **Fixed (unreleased):** remote tombstones match by content
+   key, not the sender's URL, and respect `updated_at`;
+   `identity_tests::remote_favorite_tombstone_clears_a_different_url_for_the_same_title`.
+10. **Resume doesn't follow a title across sources**, and switching source loses it. **Fixed
+    (unreleased):** the lookup resolves through the playing channel's id, so another source's
+    row derives the same key; `identity_tests::resume_follows_the_title_across_sources_and_ignores_the_last_seconds`.
+11. **Finished titles resume at the end**, so they stop immediately. **Fixed (unreleased):** a
+    position within five seconds of the end is treated as finished; same test as issue 10.
 12. **Harvested streams run yt-dlp on the page** instead of playing the stream that was found.
-    **Open, reported** (`commands.rs:1017`, `commands.rs:227`).
+    **Fixed (unreleased):** harvested playlists use their own `harvest` source, which
+    `extract_origin_for_channel` does not resolve;
+    `identity_tests::harvested_entries_play_their_found_stream_instead_of_resolving_the_page`.
 13. **Merging profiles doesn't queue the moved data for sync.** Only the profile deletion is
     queued, so an already-synced favorite/history row under the removed profile's key can be lost
-    on other devices. **Open, confirmed** (also noted at the end of `AUDIT.md`).
+    on other devices. **Fixed (unreleased):** the merge re-queues favorites, history and episode
+    marks under the surviving profile and drops the old profile's pending copies;
+    `identity_tests::merging_profiles_queues_the_moved_data_under_the_surviving_profile`.
 14. **An old progress deletion from sync erases newer local history.** `apply_progress` deletes
-    history by `(profile_id, content_key)` with no timestamp guard. **Open, confirmed**
-    (`sync.rs`, `apply_progress`).
+    history by `(profile_id, content_key)` with no timestamp guard. **Fixed (unreleased):** the
+    delete now requires `played_at * 1000 <= tombstone.updated_at`;
+    `identity_tests::an_old_progress_tombstone_does_not_delete_newer_history`.
 15. **Fallback and "new since last visit" cannot work on an existing library.** `titles` is only
     populated by a one-time backfill gated on `titles_backfill_v1`; import now writes it, but a
-    database whose channels predate that never runs it again, so `titles` stays empty. **Open,
-    confirmed** (`db.rs`, `TITLES_BACKFILL_SETTING`).
+    database whose channels predate that never runs it again, so `titles` stays empty. **Open —**
+    the v2 backfill is part of [IDENTITY-MIGRATION.md](IDENTITY-MIGRATION.md); the current one-shot
+    `fetch_all` must not be run against a 14.76M-row library as-is.
 
 ## Open — playback and updates (16–22)
 
@@ -165,8 +183,8 @@ release signature files, and the published assets.
 
 1. ~~Release v0.1.12: remove the reconnect flags, enable TLS in the Flatpak, batch the delete
    query, add the tag/version check.~~ Done.
-2. Identity and resume (6–15). These change stored data keys and sync records, so they need a
-   migration and cross-device tests before shipping.
+2. Identity and resume (6–15). Phase 1 (8–14) is on main; phase 2 (6, 7, 15) needs the v2 key
+   migration before the derivation can change.
 3. Player state (16–19) and privacy (23–25), including an allowlist of stream schemes for mpv.
 4. Rework library loading (5) before adding features; until then the real library stays too big to
    load, and only trimming it from the UI helps.
