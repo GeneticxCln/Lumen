@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{
     Pool, QueryBuilder, Row, Sqlite, SqliteConnection, sqlite::SqlitePoolOptions, sqlite::SqliteRow,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -795,6 +795,10 @@ pub async fn import_playlist_if_nonempty(
     import_playlist(pool, playlist, channels).await.map(Some)
 }
 
+/// Removed URLs per `IN (...)` list. One unchunked list failed with "too many SQL variables"
+/// past 16,383 channels; 400 keeps every statement well below even SQLite's older 999 limit.
+const REMOVED_URLS_PER_QUERY: usize = 400;
+
 /// Tombstones any active favorite whose only remaining channel row is one of `removed` (as
 /// `(channel_id, url)` pairs about to disappear), using the favorite's own already-stored
 /// content_key — never re-derived, since by the time this runs the channel row (and its
@@ -811,42 +815,62 @@ pub(crate) async fn tombstone_favorites_for_removed_channels(
         return Ok(());
     }
 
-    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
-        "SELECT f.profile_id, f.channel_url, f.content_key FROM favorites f \
-         WHERE f.active = 1 AND f.channel_url IN (",
-    );
-    {
-        let mut separated = qb.separated(", ");
-        for (_, url) in removed {
-            separated.push_bind(url.clone());
-        }
+    // Which channel ids are going away, grouped by URL. A duplicate URL can appear in several
+    // channel rows — and therefore in several query chunks — so each URL is looked up once, and
+    // a favorite is tombstoned only when every channel row carrying that URL is in this set.
+    let mut removed_by_url: HashMap<&str, HashSet<i64>> = HashMap::new();
+    for (id, url) in removed {
+        removed_by_url.entry(url.as_str()).or_default().insert(*id);
     }
-    qb.push(
-        ") AND NOT EXISTS (SELECT 1 FROM channels c WHERE c.url = f.channel_url AND c.id NOT IN (",
-    );
-    {
-        let mut separated = qb.separated(", ");
-        for (id, _) in removed {
-            separated.push_bind(*id);
-        }
-    }
-    qb.push("))");
+    let removed_urls: Vec<&str> = removed_by_url.keys().copied().collect();
 
-    let rows = qb
-        .build()
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(|e| PlayerError::Sql(e.to_string()))?;
-    let orphaned: Vec<(i64, String, Option<String>)> = rows
-        .into_iter()
-        .map(|row| {
-            (
-                row.get("profile_id"),
-                row.get("channel_url"),
-                row.get("content_key"),
-            )
-        })
-        .collect();
+    // The same favorite can be selected in more than one chunk (it is matched by URL), so only
+    // tombstone and queue it once.
+    let mut seen: HashSet<(i64, String)> = HashSet::new();
+    let mut candidates: Vec<(i64, String, Option<String>)> = Vec::new();
+    for chunk in removed_urls.chunks(REMOVED_URLS_PER_QUERY) {
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+            "SELECT f.profile_id, f.channel_url, f.content_key FROM favorites f \
+             WHERE f.active = 1 AND f.channel_url IN (",
+        );
+        {
+            let mut separated = qb.separated(", ");
+            for url in chunk {
+                separated.push_bind(*url);
+            }
+        }
+        qb.push(")");
+
+        let rows = qb
+            .build()
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        for row in rows {
+            let profile_id: i64 = row.get("profile_id");
+            let url: String = row.get("channel_url");
+            let content_key: Option<String> = row.get("content_key");
+            if seen.insert((profile_id, url.clone())) {
+                candidates.push((profile_id, url, content_key));
+            }
+        }
+    }
+
+    let mut orphaned: Vec<(i64, String, Option<String>)> = Vec::new();
+    for (profile_id, url, content_key) in candidates {
+        let channel_ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM channels WHERE url = ?")
+            .bind(&url)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        let removed_ids = removed_by_url.get(url.as_str());
+        if channel_ids
+            .iter()
+            .all(|id| removed_ids.is_some_and(|ids| ids.contains(id)))
+        {
+            orphaned.push((profile_id, url, content_key));
+        }
+    }
 
     for (profile_id, url, stored_content_key) in orphaned {
         let content_key = match stored_content_key {
@@ -981,6 +1005,27 @@ pub(crate) async fn insert_channel_rows(
             .map_err(|e| PlayerError::Sql(e.to_string()))?;
     }
 
+    Ok(())
+}
+
+/// Deletes channel rows by id in chunks below SQLite's bind-parameter limit. A refresh that
+/// drops most of a large playlist used to build one `DELETE ... IN (...)` with every id, which
+/// failed with "too many SQL variables" past 16,383 ids.
+pub(crate) async fn delete_channel_rows(conn: &mut SqliteConnection, ids: &[i64]) -> Result<()> {
+    for chunk in ids.chunks(900) {
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("DELETE FROM channels WHERE id IN (");
+        {
+            let mut separated = qb.separated(", ");
+            for id in chunk {
+                separated.push_bind(*id);
+            }
+        }
+        qb.push(")");
+        qb.build()
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    }
     Ok(())
 }
 
@@ -2240,6 +2285,43 @@ mod tests {
         // `list_channels` reads the enrichment columns, which `init_db` adds after migrating.
         migrate_tmdb_columns(&pool).await.unwrap();
         pool
+    }
+
+    /// A playlist with `count` channels, inserted without the per-channel titles backfill so a
+    /// scale test stays fast.
+    async fn insert_large_playlist(pool: &Pool<Sqlite>, count: usize) -> i64 {
+        let now = 1_700_000_000;
+        let playlist_id: i64 = sqlx::query_scalar(
+            "INSERT INTO playlists (name, source, origin, created_at, updated_at) \
+             VALUES ('Large', 'url', 'https://lists.example/large.m3u', ?, ?) RETURNING id",
+        )
+        .bind(now)
+        .bind(now)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let channels: Vec<Channel> = (0..count)
+            .map(|index| Channel {
+                id: None,
+                playlist_id,
+                name: format!("Channel {index}"),
+                url: format!("https://cdn.example/{index}.m3u8"),
+                group_title: None,
+                tvg_id: None,
+                tvg_logo: None,
+                language: None,
+                extra_headers: None,
+                last_ok: None,
+                last_error: None,
+                is_live: None,
+            })
+            .collect();
+        let mut tx = pool.begin().await.unwrap();
+        insert_channel_rows(&mut tx, playlist_id, &channels)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        playlist_id
     }
 
     #[tokio::test]
@@ -3709,6 +3791,52 @@ mod tests {
             "the tombstone must reuse the favorite's original sync item_key"
         );
         assert_eq!(queued_after[0].1, 1, "queued as removed");
+    }
+
+    /// Deleting a whole playlist used to put every channel URL and id into one `IN (...)`, so a
+    /// list with more than 16,383 channels failed with "too many SQL variables" and could not be
+    /// deleted at all. The tombstone lookup now chunks; the delete itself cascades.
+    #[tokio::test]
+    async fn deleting_a_playlist_past_the_sql_variable_limit_removes_it() {
+        let pool = test_pool().await;
+        let playlist_id = insert_large_playlist(&pool, 16_384).await;
+
+        delete_playlist(&pool, playlist_id).await.unwrap();
+
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE playlist_id = ?")
+                .bind(playlist_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 0);
+        assert!(get_playlist(&pool, playlist_id).await.unwrap().is_none());
+    }
+
+    /// The refresh path deletes only the channels that disappeared upstream, with one
+    /// `DELETE ... IN (...)`; past the bind limit that statement failed the whole refresh.
+    #[tokio::test]
+    async fn deleting_refreshed_channels_past_the_sql_variable_limit_removes_them_all() {
+        let pool = test_pool().await;
+        let playlist_id = insert_large_playlist(&pool, 16_384).await;
+        let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM channels WHERE playlist_id = ?")
+            .bind(playlist_id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(ids.len(), 16_384);
+
+        let mut conn = pool.acquire().await.unwrap();
+        delete_channel_rows(&mut conn, &ids).await.unwrap();
+        drop(conn);
+
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE playlist_id = ?")
+                .bind(playlist_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 0);
     }
 
     /// Reproduces the stale-`content_key` bug: a title favorited and watched under a weak

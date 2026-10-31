@@ -288,10 +288,11 @@ impl MpvIpcBackend {
     }
 
     /// Builds the mpv `Command` (arguments only — no stdio/env/spawn, so this is testable without
-    /// a real mpv binary). `--network-timeout` and `--stream-lavf-o`'s reconnect options are
-    /// libavformat HTTP/HLS settings: a harmless no-op for local files, and placed before
-    /// `extra_args` so a user's own arguments can still override them (mpv's own parsing takes
-    /// the last occurrence of an option).
+    /// a real mpv binary). `--network-timeout` is a libavformat HTTP/HLS setting: a harmless
+    /// no-op for local files, and placed before `extra_args` so a user's own arguments can still
+    /// override it (mpv's own parsing takes the last occurrence of an option). Reconnect options
+    /// are deliberately not set: `reconnect_at_eof=1` made mpv re-request a stream at its end
+    /// forever instead of reporting that it loaded, so HLS playback never started.
     fn build_command(socket_path: &str, hwdec: &str, cache: &str, extra_args: &str) -> Command {
         let hwdec_arg = format!(
             "--hwdec={}",
@@ -316,7 +317,6 @@ impl MpvIpcBackend {
             // Warnings and errors only, kept (see `MpvLog`) to explain a start that fails.
             "--msg-level=all=warn",
             "--network-timeout=10",
-            "--stream-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_delay_max=7,reconnect_at_eof=1",
         ]);
 
         if !extra_args.trim().is_empty() {
@@ -1034,15 +1034,12 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_flags_are_present_and_come_before_the_users_own_arguments() {
+    fn network_timeout_is_present_and_comes_before_the_users_own_arguments() {
         let cmd =
             MpvIpcBackend::build_command("/tmp/lumen-test.sock", "", "", "--no-audio --vid=2");
         let args = args_of(&cmd);
 
         let network_timeout = args.iter().position(|a| a == "--network-timeout=10");
-        let reconnect = args.iter().position(|a| {
-            a == "--stream-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_delay_max=7,reconnect_at_eof=1"
-        });
         let first_user_arg = args.iter().position(|a| a == "--no-audio");
 
         assert!(
@@ -1050,24 +1047,22 @@ mod tests {
             "expected --network-timeout, got {args:?}"
         );
         assert!(
-            reconnect.is_some(),
-            "expected the reconnect stream-lavf-o flag, got {args:?}"
-        );
-        assert!(
-            network_timeout.unwrap() < first_user_arg.unwrap()
-                && reconnect.unwrap() < first_user_arg.unwrap(),
-            "reconnect flags must come before extra_args, so a user can still override them: {args:?}"
+            network_timeout.unwrap() < first_user_arg.unwrap(),
+            "--network-timeout must come before extra_args, so a user can still override it: {args:?}"
         );
     }
 
+    /// `reconnect_at_eof=1` made mpv re-request a stream at its end forever instead of reporting
+    /// the load finished; HLS playback then never started. Lumen no longer forces the reconnect
+    /// family — a user can still opt in through their own mpv arguments.
     #[test]
-    fn reconnect_flags_are_present_even_with_no_extra_args() {
+    fn no_reconnect_options_are_forced_on_the_player() {
         let cmd = MpvIpcBackend::build_command("/tmp/lumen-test.sock", "auto-safe", "yes", "");
         let args = args_of(&cmd);
         assert!(args.contains(&"--network-timeout=10".to_string()));
         assert!(
-            args.iter()
-                .any(|a| a.starts_with("--stream-lavf-o=reconnect=1"))
+            !args.iter().any(|a| a.contains("reconnect")),
+            "Lumen must not force libavformat reconnect options: {args:?}"
         );
     }
 
@@ -1434,8 +1429,10 @@ mod tests {
         std::fs::write(dir.join("es.srt"), srt("Hola")).unwrap();
         std::fs::write(dir.join("episode.srt"), srt("Sidecar")).unwrap();
         let out = dir.join("episode.mkv");
-        let status = std::process::Command::new("ffmpeg")
+        let mut child = std::process::Command::new("ffmpeg")
             .current_dir(dir)
+            // ffmpeg 9's `-shortest` deadlocks on this input set (reproduced: it writes the file
+            // but never exits); the 3-second sources already end together, so it is not needed.
             .args([
                 "-v",
                 "error",
@@ -1480,12 +1477,31 @@ mod tests {
                 "language=eng",
                 "-metadata:s:s:1",
                 "language=spa",
-                "-shortest",
             ])
             .arg(&out)
-            .status()
+            .spawn()
             .expect("ffmpeg should run");
-        assert!(status.success(), "fixture encode failed");
+
+        // ffmpeg 9 has been seen to deadlock on this fixture command. A bounded wait turns that
+        // into a test failure (and kills the child) instead of hanging the whole test job.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(status.success(), "fixture encode failed");
+                    break;
+                }
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("ffmpeg did not create the fixture within 30 seconds");
+                }
+                Err(error) => panic!("could not wait for ffmpeg: {error}"),
+            }
+        }
         out
     }
 

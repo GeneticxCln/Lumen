@@ -75,6 +75,15 @@ jobs:
       - name: Tests (desktop)
         run: cargo test -p lumen --lib
 
+  # A release is cut from a tag, and every package/manifest carries the same version. This catches
+  # the v0.1.11 case, where the tag, the app and the packaging files disagreed.
+  version:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node scripts/check-version.mjs
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest

@@ -10,7 +10,7 @@ use crate::error::{PlayerError, Result};
 use crate::playlist::import::{Channel, fetch_playlist_text, parse_into_channels};
 use chrono::Utc;
 use serde::Serialize;
-use sqlx::{Pool, QueryBuilder, Row, Sqlite};
+use sqlx::{Pool, Row, Sqlite};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -153,18 +153,8 @@ pub async fn refresh_playlist(
 
     db::tombstone_favorites_for_removed_channels(&mut tx, pool, &removed, now).await?;
     if !removed.is_empty() {
-        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("DELETE FROM channels WHERE id IN (");
-        {
-            let mut separated = qb.separated(", ");
-            for (id, _) in &removed {
-                separated.push_bind(*id);
-            }
-        }
-        qb.push(")");
-        qb.build()
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        let ids: Vec<i64> = removed.iter().map(|(id, _)| *id).collect();
+        db::delete_channel_rows(&mut tx, &ids).await?;
     }
 
     // Covers every channel row that now exists under this playlist — the just-updated and the

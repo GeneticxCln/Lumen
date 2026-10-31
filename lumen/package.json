@@ -2,7 +2,7 @@
   "name": "lumen",
   "private": true,
   "license": "MIT",
-  "version": "0.1.10",
+  "version": "0.1.12",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,6 +11,7 @@
     "test": "node --experimental-strip-types src/lib/discovery.test.ts && node --experimental-strip-types src/lib/errors.test.ts && node --experimental-strip-types src/lib/local.test.ts && node --experimental-strip-types src/lib/language.test.ts && node --experimental-strip-types src/lib/playerKeys.test.ts && node --experimental-strip-types src/lib/episodes.test.ts && node --experimental-strip-types src/lib/sync.test.ts && node --experimental-strip-types src/lib/board.test.ts && node --experimental-strip-types src/lib/series.test.ts && node --experimental-strip-types src/lib/languages.test.ts && node --experimental-strip-types src/lib/launch.test.ts && node --experimental-strip-types src/lib/autoplay.test.ts && node --experimental-strip-types src/lib/alerts.test.ts && node --experimental-strip-types src/lib/remoteImage.test.ts && node --experimental-strip-types src/lib/backoff.test.ts && node --experimental-strip-types src/i18n/i18n.test.ts && node --experimental-strip-types src/i18n/gate.test.ts",
     "preview": "vite preview",
     "tauri": "tauri",
+    "version:check": "node scripts/check-version.mjs",
     "lint": "eslint src --max-warnings 0",
     "i18n:hits": "node --experimental-strip-types src/i18n/hits.ts",
     "i18n:baseline": "node --experimental-strip-types src/i18n/gate.test.ts --update"

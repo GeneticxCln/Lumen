@@ -26,8 +26,19 @@ defaults:
     working-directory: lumen
 
 jobs:
+  # Never publish a tag whose version does not match what the app and packaging files declare:
+  # v0.1.11 was published while the binary itself reported 0.1.10.
+  verify-version:
+    name: Version matches the tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag against every version declaration
+        run: node scripts/check-version.mjs "${{ inputs.tag || github.ref_name }}"
+
   linux:
     name: Linux packages
+    needs: verify-version
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
