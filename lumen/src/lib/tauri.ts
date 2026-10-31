@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, Event } from "@tauri-apps/api/event";
 import type {
   Channel,
+  ChannelGroup,
+  ChannelPage,
   Playlist,
   LocalFile,
   PlayerState,
@@ -46,6 +48,8 @@ import type { OpenTarget } from "./launch";
 
 export type {
   Channel,
+  ChannelGroup,
+  ChannelPage,
   Playlist,
   LocalFile,
   PlayerState,
@@ -281,6 +285,29 @@ export async function listChannels(playlistId: number, query?: string, group?: s
     query: query || null,
     group: group || null,
   });
+}
+
+/** One keyset page of the library. Prefer this over `listChannels` on any user-facing path. */
+export async function listChannelsPage(playlistId: number | null, query?: string, group?: string | null, afterId?: number | null, limit = 500) {
+  return callBackend<ChannelPage>("list_channels_page_cmd", {
+    playlistId,
+    query: query?.trim() || null,
+    group: group || null,
+    afterId: afterId ?? null,
+    limit,
+  });
+}
+
+export async function listChannelGroups(playlistId: number | null) {
+  return callBackend<ChannelGroup[]>("list_channel_groups_cmd", { playlistId });
+}
+
+export async function listFavoriteChannels() {
+  return callBackend<Channel[]>("list_favorite_channels_cmd");
+}
+
+export async function listChannelsByIds(ids: number[]) {
+  return callBackend<Channel[]>("list_channels_by_ids_cmd", { ids });
 }
 
 // Search engine

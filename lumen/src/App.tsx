@@ -705,6 +705,7 @@ function App() {
                 compact={preferences.compactCards}
                 emptyMessage={page === "live" ? t("app.empty.liveMatch") : page === "movies" ? t("app.empty.moviesMatch") : t("app.empty.seriesMatch")}
               />
+              {library.hasMore && <div className="browse-toolbar"><button type="button" className="secondary-button" disabled={library.loadingMore} onClick={() => void library.loadMore()}>{t(library.loadingMore ? "app.browse.loadingMore" : "app.browse.loadMore")}</button></div>}
             </>}
       </div>}
       {page !== "settings" && <div className="browse-content">

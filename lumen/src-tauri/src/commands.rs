@@ -800,6 +800,52 @@ pub async fn list_channels_cmd(
 }
 
 #[tauri::command]
+pub async fn list_channels_page_cmd(
+    playlist_id: Option<i64>,
+    query: Option<String>,
+    group: Option<String>,
+    after_id: Option<i64>,
+    limit: Option<i64>,
+    app: AppHandle,
+) -> Result<crate::db::ChannelPage> {
+    let pool = ensure_db(&app).await?;
+    crate::db::list_channels_page(
+        pool,
+        playlist_id,
+        query.as_deref(),
+        group.as_deref(),
+        after_id,
+        limit.unwrap_or(500),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn list_channel_groups_cmd(
+    playlist_id: Option<i64>,
+    app: AppHandle,
+) -> Result<Vec<crate::db::ChannelGroup>> {
+    let pool = ensure_db(&app).await?;
+    crate::db::list_channel_groups(pool, playlist_id).await
+}
+
+#[tauri::command]
+pub async fn list_favorite_channels_cmd(app: AppHandle) -> Result<Vec<EnrichedChannel>> {
+    let pool = ensure_db(&app).await?;
+    let profile_id = active_profile_id(pool).await?;
+    crate::db::list_favorite_channels(pool, profile_id).await
+}
+
+#[tauri::command]
+pub async fn list_channels_by_ids_cmd(
+    ids: Vec<i64>,
+    app: AppHandle,
+) -> Result<Vec<EnrichedChannel>> {
+    let pool = ensure_db(&app).await?;
+    crate::db::list_channels_by_ids(pool, &ids).await
+}
+
+#[tauri::command]
 pub async fn search_engine(
     query: String,
     check_availability: Option<bool>,

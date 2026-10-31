@@ -124,6 +124,11 @@ pub async fn init_db(app_dir: &Path) -> Result<Pool<Sqlite>> {
         if let Err(e) = backfill_titles_and_sources(&backfill_pool).await {
             eprintln!("lumen: titles and title_sources backfill failed: {}", e);
         }
+        // Long but bounded and resumable: it never holds the library in memory, and search
+        // uses LIKE until the index is complete.
+        if let Err(e) = backfill_channel_search(&backfill_pool).await {
+            eprintln!("lumen: channel search backfill failed: {}", e);
+        }
     });
 
     Ok(pool)
@@ -633,48 +638,44 @@ pub async fn backfill_titles_and_sources(pool: &Pool<Sqlite>) -> Result<()> {
         return Ok(());
     }
 
-    let channels = sqlx::query(
-        "SELECT id, name, url, group_title, tvg_id, tvg_logo, extra_headers, is_live, \
-         tmdb_id, tmdb_type, poster_path, backdrop_path, overview, release_year, genre_names \
-         FROM channels",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| PlayerError::Sql(e.to_string()))?;
-
-    let now = Utc::now().timestamp_millis();
-    let mut tx = pool
-        .begin()
+    // Keyset pages, never `fetch_all`: the old version loaded every channel of a 14.76M-row
+    // library into memory just to build titles. Each page commits on its own, so a restart
+    // resumes from the channels table rather than losing the whole run. The identity columns on
+    // favorites/history are filled by `batch_upsert_titles_and_sources`; the removed SQL fallback
+    // here used to write pre-v2 `stream:` keys after the v2 migration had verified the database.
+    let mut cursor = 0i64;
+    loop {
+        let channels = sqlx::query(
+            "SELECT id, name, url, group_title, tvg_id, tvg_logo, extra_headers, is_live, \
+             tmdb_id, tmdb_type, poster_path, backdrop_path, overview, release_year, genre_names \
+             FROM channels WHERE id > ? ORDER BY id LIMIT 500",
+        )
+        .bind(cursor)
+        .fetch_all(pool)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        if channels.is_empty() {
+            break;
+        }
+        cursor = channels
+            .last()
+            .map(|row| row.get::<i64, _>("id"))
+            .unwrap_or(cursor);
 
-    let prepared: Vec<TitleBackfillRow> = channels.iter().map(title_backfill_row_from).collect();
-    batch_upsert_titles_and_sources(&mut tx, &prepared, now).await?;
+        let now = Utc::now().timestamp_millis();
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        let prepared: Vec<TitleBackfillRow> =
+            channels.iter().map(title_backfill_row_from).collect();
+        batch_upsert_titles_and_sources(&mut tx, &prepared, now).await?;
+        tx.commit()
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
 
-    // For any remaining history or favorites rows, generate a stream/file fallback content_key
-    // SQLite doesn't have sha256 built-in, so derive using URL prefix or rowid fallback
-    sqlx::query(
-        "UPDATE favorites SET content_key = 'stream:' || hex(channel_url) \
-         WHERE content_key IS NULL",
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| PlayerError::Sql(e.to_string()))?;
-
-    sqlx::query(
-        "UPDATE history SET content_key = CASE \
-           WHEN path LIKE 'http%' THEN 'stream:' || hex(path) \
-           ELSE 'file:' || hex(path) \
-         END \
-         WHERE content_key IS NULL",
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| PlayerError::Sql(e.to_string()))?;
-
-    tx.commit()
-        .await
-        .map_err(|e| PlayerError::Sql(e.to_string()))?;
     set_setting(pool, TITLES_BACKFILL_SETTING, "done").await?;
     Ok(())
 }
@@ -753,7 +754,13 @@ pub async fn import_playlist(
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
     let playlist_id: i64 = row.get("id");
-    insert_channel_rows(&mut tx, playlist_id, channels).await?;
+    let channels = dedupe_import_channels(channels);
+    let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    validate_import_size(channels.len(), existing)?;
+    insert_channel_rows(&mut tx, playlist_id, &channels).await?;
     backfill_titles_for_playlist(&mut tx, playlist_id).await?;
 
     tx.commit()
@@ -1060,7 +1067,7 @@ pub async fn list_playlists(pool: &Pool<Sqlite>) -> Result<Vec<Playlist>> {
 
 /// A channel row plus its TMDB enrichment, flattened so the frontend receives one object
 /// per title exactly as it does today, with the metadata fields simply added.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct EnrichedChannel {
     #[serde(flatten)]
     pub channel: Channel,
@@ -1097,6 +1104,50 @@ pub fn contains_pattern(needle: &str) -> String {
     pattern
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelPage {
+    pub channels: Vec<EnrichedChannel>,
+    /// Pass back as `after_id` for the next page; `None` when the last page was returned.
+    pub next_after_id: Option<i64>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelGroup {
+    pub name: Option<String>,
+    pub count: i64,
+}
+
+/// The largest single import accepted. A provider playlist above this is almost always an
+/// aggregate that should be split; accepting it is what made one import look like a hang.
+pub const MAX_PLAYLIST_CHANNELS: usize = 250_000;
+/// An absolute ceiling across all sources, to stop accidental repeated imports from filling the
+/// disk. It is deliberately above a large real library so existing sources keep working.
+pub const MAX_LIBRARY_CHANNELS: i64 = 20_000_000;
+
+fn dedupe_import_channels(channels: &[Channel]) -> Vec<Channel> {
+    let mut seen = HashSet::new();
+    channels
+        .iter()
+        .filter(|channel| seen.insert(channel.url.trim().to_string()))
+        .cloned()
+        .collect()
+}
+
+fn validate_import_size(incoming: usize, existing: i64) -> Result<()> {
+    if incoming > MAX_PLAYLIST_CHANNELS {
+        return Err(PlayerError::InvalidArg(format!(
+            "This playlist has {incoming} channels; one source is limited to {MAX_PLAYLIST_CHANNELS}. Split it into smaller sources."
+        )));
+    }
+    if existing.saturating_add(incoming as i64) > MAX_LIBRARY_CHANNELS {
+        return Err(PlayerError::InvalidArg(format!(
+            "Adding {incoming} channels would exceed the {MAX_LIBRARY_CHANNELS}-channel library limit."
+        )));
+    }
+    Ok(())
+}
+
 pub async fn list_channels(
     pool: &Pool<Sqlite>,
     playlist_id: i64,
@@ -1114,7 +1165,7 @@ pub async fn list_channels(
     }
 
     if group.is_some() {
-        sql.push_str(" AND group_title = ?");
+        sql.push_str(" AND COALESCE(group_title, 'Other') = ?");
     }
 
     sql.push_str(" ORDER BY group_title, name");
@@ -1134,7 +1185,12 @@ pub async fn list_channels(
         .fetch_all(pool)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    enrich_rows(pool, rows).await
+}
 
+/// Turns channel rows into the UI shape, resolving manual category overrides in one batch.
+/// Shared by the full listing, the paged listing and by-id lookups so their fields cannot drift.
+async fn enrich_rows(pool: &Pool<Sqlite>, rows: Vec<SqliteRow>) -> Result<Vec<EnrichedChannel>> {
     // A content_key per row that has no TMDB match, so its override (if any) can be looked up;
     // `None` for a TMDB-matched row, since TMDB stays authoritative and any leftover override
     // row must be ignored.
@@ -1156,7 +1212,7 @@ pub async fn list_channels(
         fetch_category_overrides(pool, content_keys.iter().filter_map(|key| key.as_deref()))
             .await?;
 
-    let channels = rows
+    Ok(rows
         .into_iter()
         .zip(content_keys)
         .map(|(row, content_key)| {
@@ -1189,9 +1245,213 @@ pub async fn list_channels(
                 category_override_genres: override_row.and_then(|o| o.genres.clone()),
             }
         })
-        .collect();
+        .collect())
+}
 
-    Ok(channels)
+/// Keyset page ordered by `channels.id`, so browsing never materializes the whole library.
+/// `after_id` is the last id of the previous page. Search uses FTS5 once its background backfill
+/// has completed and falls back to LIKE before that, so an old library remains searchable during
+/// indexing.
+pub async fn list_channels_page(
+    pool: &Pool<Sqlite>,
+    playlist_id: Option<i64>,
+    query: Option<&str>,
+    group: Option<&str>,
+    after_id: Option<i64>,
+    limit: i64,
+) -> Result<ChannelPage> {
+    let limit = limit.clamp(1, 1_000);
+    let query = query.map(str::trim).filter(|value| !value.is_empty());
+    let fts = if query.is_some() && channel_search_ready(pool).await? {
+        query.and_then(fts_query)
+    } else {
+        None
+    };
+
+    let columns = "c.id, c.playlist_id, c.name, c.url, c.group_title, c.tvg_id, c.tvg_logo, c.language, c.extra_headers, c.last_ok, c.last_error, c.is_live, \
+         c.tmdb_id, c.tmdb_type, c.poster_path, c.backdrop_path, c.overview, c.release_year, c.rating, c.genre_names, c.enriched_at";
+    let mut qb: QueryBuilder<Sqlite> =
+        QueryBuilder::new(format!("SELECT {columns} FROM channels c"));
+    if fts.is_some() {
+        qb.push(" JOIN channels_fts ON channels_fts.rowid = c.id");
+    }
+    qb.push(" WHERE c.id > ");
+    qb.push_bind(after_id.unwrap_or(0));
+    if let Some(playlist_id) = playlist_id {
+        qb.push(" AND c.playlist_id = ");
+        qb.push_bind(playlist_id);
+    }
+    if let Some(group) = group {
+        qb.push(" AND COALESCE(c.group_title, 'Other') = ");
+        qb.push_bind(group);
+    }
+    match (&fts, query) {
+        (Some(fts), _) => {
+            qb.push(" AND channels_fts MATCH ");
+            qb.push_bind(fts);
+        }
+        (None, Some(query)) => {
+            let pattern = contains_pattern(query);
+            qb.push(" AND (c.name LIKE ");
+            qb.push_bind(pattern.clone());
+            qb.push(" ESCAPE '\\' OR c.group_title LIKE ");
+            qb.push_bind(pattern.clone());
+            qb.push(" ESCAPE '\\' OR c.tvg_id LIKE ");
+            qb.push_bind(pattern);
+            qb.push(" ESCAPE '\\')");
+        }
+        (None, None) => {}
+    }
+    qb.push(" ORDER BY c.id LIMIT ");
+    qb.push_bind(limit + 1);
+
+    let mut rows = qb
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    let has_more = rows.len() > limit as usize;
+    if has_more {
+        rows.truncate(limit as usize);
+    }
+    let next_after_id = has_more
+        .then(|| rows.last().map(|row| row.get::<i64, _>("id")))
+        .flatten();
+    let channels = enrich_rows(pool, rows).await?;
+    Ok(ChannelPage {
+        channels,
+        next_after_id,
+        has_more,
+    })
+}
+
+pub async fn list_channel_groups(
+    pool: &Pool<Sqlite>,
+    playlist_id: Option<i64>,
+) -> Result<Vec<ChannelGroup>> {
+    let mut qb: QueryBuilder<Sqlite> =
+        QueryBuilder::new("SELECT group_title, COUNT(*) AS count FROM channels");
+    if let Some(playlist_id) = playlist_id {
+        qb.push(" WHERE playlist_id = ");
+        qb.push_bind(playlist_id);
+    }
+    qb.push(" GROUP BY group_title ORDER BY group_title");
+    let rows = qb
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ChannelGroup {
+            name: row.get("group_title"),
+            count: row.get("count"),
+        })
+        .collect())
+}
+
+pub async fn list_channels_by_ids(
+    pool: &Pool<Sqlite>,
+    ids: &[i64],
+) -> Result<Vec<EnrichedChannel>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut rows = Vec::new();
+    for chunk in ids.chunks(900) {
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+            "SELECT id, playlist_id, name, url, group_title, tvg_id, tvg_logo, language, extra_headers, last_ok, last_error, is_live, \
+             tmdb_id, tmdb_type, poster_path, backdrop_path, overview, release_year, rating, genre_names, enriched_at \
+             FROM channels WHERE id IN (",
+        );
+        {
+            let mut separated = qb.separated(", ");
+            for id in chunk {
+                separated.push_bind(*id);
+            }
+        }
+        qb.push(") ORDER BY id");
+        rows.extend(
+            qb.build()
+                .fetch_all(pool)
+                .await
+                .map_err(|e| PlayerError::Sql(e.to_string()))?,
+        );
+    }
+    enrich_rows(pool, rows).await
+}
+
+pub async fn list_favorite_channels(
+    pool: &Pool<Sqlite>,
+    profile_id: i64,
+) -> Result<Vec<EnrichedChannel>> {
+    let ids = list_favorites(pool, profile_id).await?;
+    list_channels_by_ids(pool, &ids).await
+}
+
+const CHANNEL_SEARCH_READY: &str = "channels_fts_ready";
+const CHANNEL_SEARCH_CURSOR: &str = "channels_fts_cursor";
+
+async fn channel_search_ready(pool: &Pool<Sqlite>) -> Result<bool> {
+    Ok(get_setting(pool, CHANNEL_SEARCH_READY).await?.as_deref() == Some("done"))
+}
+
+/// Every term becomes a quoted prefix (`"news"*`), so FTS5 operators in user input are literal
+/// text instead of a query syntax error.
+fn fts_query(raw: &str) -> Option<String> {
+    let terms: Vec<String> = raw
+        .split_whitespace()
+        .filter(|term| !term.is_empty())
+        .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
+        .collect();
+    (!terms.is_empty()).then(|| terms.join(" "))
+}
+
+/// Indexes existing channels in keyset pages. Runs in the background and resumes after a restart;
+/// until it records completion, `list_channels_page` falls back to LIKE search so the library is
+/// never unsearchable while a large index is being built.
+pub async fn backfill_channel_search(pool: &Pool<Sqlite>) -> Result<()> {
+    if get_setting(pool, CHANNEL_SEARCH_READY).await?.as_deref() == Some("done") {
+        return Ok(());
+    }
+    loop {
+        let cursor = get_setting(pool, CHANNEL_SEARCH_CURSOR)
+            .await?
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0);
+        let inserted = sqlx::query(
+            "INSERT OR REPLACE INTO channels_fts(rowid, name, group_title, tvg_id) \
+             SELECT id, name, group_title, tvg_id FROM channels \
+             WHERE id > ? ORDER BY id LIMIT 500",
+        )
+        .bind(cursor)
+        .execute(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?
+        .rows_affected();
+        if inserted == 0 {
+            break;
+        }
+        let next: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(id) FROM (SELECT id FROM channels WHERE id > ? ORDER BY id LIMIT 500)",
+        )
+        .bind(cursor)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        let Some(next) = next.filter(|next| *next > cursor) else {
+            break;
+        };
+        set_setting(pool, CHANNEL_SEARCH_CURSOR, &next.to_string()).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    set_setting(pool, CHANNEL_SEARCH_READY, "done").await?;
+    sqlx::query("DELETE FROM settings WHERE key = ?")
+        .bind(CHANNEL_SEARCH_CURSOR)
+        .execute(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    Ok(())
 }
 
 /// Batch-fetches overrides for exactly the given content keys, so listing channels never issues
@@ -3739,6 +3999,218 @@ mod tests {
         assert_eq!(flag("Live"), Some(true));
         assert_eq!(flag("Film"), Some(false));
         assert_eq!(flag("Unknown"), None);
+    }
+
+    #[tokio::test]
+    async fn titles_backfill_is_paged_and_complete() {
+        let pool = test_pool().await;
+        let playlist_id = insert_large_playlist(&pool, 600).await;
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM titles")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(before, 0);
+
+        backfill_titles_and_sources(&pool).await.unwrap();
+
+        let after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM titles WHERE content_key LIKE 'stream2:%'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(after, 600, "every page of channels must be represented");
+        assert_eq!(
+            get_setting(&pool, TITLES_BACKFILL_SETTING)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("done")
+        );
+        let sources: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM title_sources WHERE channel_id IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(sources, 600);
+        let _ = playlist_id;
+    }
+
+    #[tokio::test]
+    async fn paged_channel_listing_is_bounded_and_has_no_gaps() {
+        let pool = test_pool().await;
+        let playlist_id = insert_large_playlist(&pool, 120).await;
+
+        let first = list_channels_page(&pool, Some(playlist_id), None, None, None, 50)
+            .await
+            .unwrap();
+        assert_eq!(first.channels.len(), 50);
+        assert!(first.has_more);
+        let first_cursor = first.next_after_id.unwrap();
+
+        let second =
+            list_channels_page(&pool, Some(playlist_id), None, None, Some(first_cursor), 50)
+                .await
+                .unwrap();
+        assert_eq!(second.channels.len(), 50);
+        assert!(second.has_more);
+        let second_cursor = second.next_after_id.unwrap();
+        assert!(second_cursor > first_cursor);
+
+        let third = list_channels_page(
+            &pool,
+            Some(playlist_id),
+            None,
+            None,
+            Some(second_cursor),
+            50,
+        )
+        .await
+        .unwrap();
+        assert_eq!(third.channels.len(), 20);
+        assert!(!third.has_more);
+        assert_eq!(third.next_after_id, None);
+
+        let ids: Vec<i64> = first
+            .channels
+            .iter()
+            .chain(second.channels.iter())
+            .chain(third.channels.iter())
+            .map(|channel| channel.channel.id.unwrap())
+            .collect();
+        let unique: HashSet<i64> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len(), "pages must not overlap");
+        assert_eq!(ids.len(), 120);
+    }
+
+    #[tokio::test]
+    async fn channel_search_works_before_and_after_the_fts_backfill() {
+        let pool = test_pool().await;
+        let playlist_id = import_playlist(
+            &pool,
+            &playlist("Search"),
+            &[
+                channel(0, "News One", "https://cdn.example/news1.m3u8"),
+                channel(0, "Sports One", "https://cdn.example/sport1.m3u8"),
+                channel(0, "News Two", "https://cdn.example/news2.m3u8"),
+            ],
+        )
+        .await
+        .unwrap();
+
+        // The index is not marked ready yet, so this exercises the LIKE fallback.
+        let before = list_channels_page(&pool, Some(playlist_id), Some("news"), None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(before.channels.len(), 2);
+
+        backfill_channel_search(&pool).await.unwrap();
+        assert_eq!(
+            get_setting(&pool, CHANNEL_SEARCH_READY)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("done")
+        );
+
+        let after = list_channels_page(&pool, Some(playlist_id), Some("news"), None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(after.channels.len(), 2);
+        assert!(
+            after
+                .channels
+                .iter()
+                .all(|channel| channel.channel.name.starts_with("News"))
+        );
+
+        let sports = list_channels_page(&pool, Some(playlist_id), Some("sports"), None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(sports.channels.len(), 1);
+
+        // FTS operators in the query are quoted as literal text, not evaluated.
+        let odd = list_channels_page(
+            &pool,
+            Some(playlist_id),
+            Some("news\" OR *"),
+            None,
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+        assert!(odd.channels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn channel_groups_are_counted_per_source() {
+        let pool = test_pool().await;
+        let playlist_id = import_playlist(
+            &pool,
+            &playlist("Groups"),
+            &[
+                channel(0, "News A", "https://cdn.example/a.m3u8"),
+                channel(0, "News B", "https://cdn.example/b.m3u8"),
+                channel(0, "Other", "https://cdn.example/c.m3u8"),
+            ],
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE channels SET group_title = 'News' WHERE playlist_id = ? AND name LIKE 'News%'",
+        )
+        .bind(playlist_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let groups = list_channel_groups(&pool, Some(playlist_id)).await.unwrap();
+        assert_eq!(
+            groups
+                .iter()
+                .find(|group| group.name.as_deref() == Some("News"))
+                .unwrap()
+                .count,
+            2
+        );
+        assert_eq!(
+            groups
+                .iter()
+                .find(|group| group.name.is_none())
+                .unwrap()
+                .count,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn importing_duplicate_stream_urls_keeps_one_row() {
+        let pool = test_pool().await;
+        let playlist_id = import_playlist(
+            &pool,
+            &playlist("Duplicates"),
+            &[
+                channel(0, "First", "https://cdn.example/same.m3u8"),
+                channel(0, "Second", "https://cdn.example/same.m3u8"),
+            ],
+        )
+        .await
+        .unwrap();
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM channels WHERE playlist_id = ?")
+                .bind(playlist_id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, vec!["First"]);
+    }
+
+    #[test]
+    fn import_limits_reject_oversized_sources() {
+        assert!(validate_import_size(MAX_PLAYLIST_CHANNELS, 0).is_ok());
+        assert!(validate_import_size(MAX_PLAYLIST_CHANNELS + 1, 0).is_err());
+        assert!(validate_import_size(1, MAX_LIBRARY_CHANNELS - 1).is_ok());
+        assert!(validate_import_size(1, MAX_LIBRARY_CHANNELS).is_err());
     }
 
     #[tokio::test]

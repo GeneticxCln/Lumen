@@ -356,6 +356,72 @@ async fn migrates_a_real_database_copy() {
     pool.close().await;
 }
 
+/// Opt-in library-scale measurement. Point `LUMEN_PAGE_TEST_DB_COPY` at a copy of a large
+/// database and run:
+/// `LUMEN_PAGE_TEST_DB_COPY=/tmp/lumen.db cargo test -p lumen-core --release \
+///  pages_a_real_database_copy -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "set LUMEN_PAGE_TEST_DB_COPY to a database copy"]
+async fn pages_a_real_database_copy() {
+    let path = std::env::var("LUMEN_PAGE_TEST_DB_COPY")
+        .expect("set LUMEN_PAGE_TEST_DB_COPY to a database copy");
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("sqlite://{path}?mode=rwc"))
+        .await
+        .unwrap();
+    // Applies migration 014 (the FTS table/triggers) to the old snapshot; it does not start the
+    // long index backfill, so the search below exercises the LIKE fallback.
+    run_migrations(&pool).await.unwrap();
+    migrate_tmdb_columns(&pool).await.unwrap();
+
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let first_started = std::time::Instant::now();
+    let first = crate::db::list_channels_page(&pool, None, None, None, None, 500)
+        .await
+        .unwrap();
+    let first_elapsed = first_started.elapsed();
+    assert_eq!(first.channels.len(), 500);
+    assert!(first.has_more);
+    let cursor = first.next_after_id.expect("a full page has a cursor");
+
+    let second_started = std::time::Instant::now();
+    let second = crate::db::list_channels_page(&pool, None, None, None, Some(cursor), 500)
+        .await
+        .unwrap();
+    let second_elapsed = second_started.elapsed();
+    assert_eq!(second.channels.len(), 500);
+    assert!(
+        second
+            .channels
+            .iter()
+            .all(|channel| channel.channel.id.unwrap() > cursor),
+        "keyset pages must move strictly forward"
+    );
+
+    let groups_started = std::time::Instant::now();
+    let groups = crate::db::list_channel_groups(&pool, None).await.unwrap();
+    let groups_elapsed = groups_started.elapsed();
+    assert!(!groups.is_empty());
+
+    let search_started = std::time::Instant::now();
+    let search = crate::db::list_channels_page(&pool, None, Some("News"), None, None, 500)
+        .await
+        .unwrap();
+    let search_elapsed = search_started.elapsed();
+
+    println!(
+        "real pages: {total} channels, first={first_elapsed:?}, second={second_elapsed:?}, \
+         groups={groups_elapsed:?} ({} groups), LIKE search={search_elapsed:?} ({} rows)",
+        groups.len(),
+        search.channels.len()
+    );
+    pool.close().await;
+}
+
 #[tokio::test]
 async fn v2_migration_queues_tombstones_when_sync_has_been_used() {
     let (pool, dir) = test_pool("sync").await;

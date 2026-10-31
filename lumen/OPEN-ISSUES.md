@@ -2,14 +2,16 @@
 
 An independent, hands-on audit of `a95e0ab` (release v0.1.11) was run against a real library —
 186 playlists, 14,764,xxx channels. It found the release broken in real use. Its first four
-critical findings, plus one test-harness hang, are fixed in v0.1.12 (`570bf9f`); everything else
-below is still open.
+critical findings, plus one test-harness hang, are fixed in v0.1.12 (`570bf9f`). The
+identity/resume batch, the player/privacy batch and the library-scale loading rework are on main,
+unreleased in 0.1.13; the remaining findings are listed below.
 
 `AUDIT.md` remains the design and test record, but read its "verified" language as "covered by the
 tests named there", not as real-world proof: this audit reproduced failures those tests miss.
 
 **Status key**
 - **Fixed in 0.1.12** — closed by the named commit and test.
+- **Fixed (unreleased)** — closed on main after 0.1.12, not yet in a published release.
 - **Open, confirmed** — re-checked in the current tree on 2026-10-31.
 - **Open, reported** — the auditor's finding, marked `[Ran]`/`[Read]` as they did; not re-run here.
 - **Deferred** — needs a schema or sync-protocol change and a data migration.
@@ -28,6 +30,14 @@ learned mpv's real load-failure wording. PIN loading is fail-closed. A new
 `src-tauri/src/playback_policy.rs` allowlists playback schemes, rejects local files from fetched
 playlists, applies `netguard` to LAN addresses, and refuses non-HTTP protocols while network
 privacy is on.
+
+**Library-scale loading (5) landed on main on 2026-10-31 (unreleased).** The UI now requests a
+500-row keyset page, fetches favorites by id for My List, gets group options from SQL counts, and
+offers Load more instead of materializing every channel. Search uses a resumable FTS5 index and
+falls back to LIKE until the background index is complete. Imports dedupe stream URLs and are
+capped at 250,000 channels per source and 20,000,000 in total. Remaining limitation: facet counts,
+Discover shelves and the Continue Watching board only describe the loaded pages, and paging is
+ordered by channel id rather than name.
 
 **State of the real library after the audit's own mistake** (it ran the release binary with
 `--version`, which opened the full app for about 3 minutes): SQLite `quick_check` is `ok`; the 186
@@ -56,8 +66,12 @@ reference was corrected, and `AUDIT.md`'s packaging/self-update entries were upd
 `list_channels` returns every row. At 14.76M channels that is roughly 7 GiB of JSON (extrapolated
 from a real 120k-channel list); after 154s the page had loaded about 114 of 186 lists and never
 finished. Nothing caps imports or warns about size. One 120k list on its own imports in about 2.5
-minutes and works. **Open, confirmed.** Needs database paging, FTS5 search, and import
-limits/warnings — not a small patch.
+minutes and works. **Fixed for startup (unreleased):** `useChannels` requests one 500-row page
+instead of every channel, favorites are fetched separately for My List, groups come from SQL
+counts, search uses the FTS5 index once its background backfill completes, and imports are
+deduped and capped. The old full-library call remains only for compatibility; paged callers use
+`list_channels_page`. Limitation: the board/Discover shelves and facet counts only see loaded
+pages, so they become more complete as the user loads more.
 
 ## Open — identity, history and sync (6–15)
 
@@ -97,11 +111,11 @@ limits/warnings — not a small patch.
     `identity_tests::an_old_progress_tombstone_does_not_delete_newer_history`.
 15. **Fallback and "new since last visit" cannot work on an existing library.** `titles` is only
     populated by a one-time backfill gated on `titles_backfill_v1`; import now writes it, but a
-    database whose channels predate that never runs it again, so `titles` stays empty. **Still
-    open for the real library.** The v2 migration pages its own title rebuild, but with zero
-    `title_sources` it correctly skips materializing 14.76M rows; the one-shot `fetch_all`
-    backfill still must not be run against that library. This needs the paged backfill planned
-    with issue 5.
+    database whose channels predate that never runs it again, so `titles` stays empty. **Partially
+    fixed (unreleased):** the backfill is now keyset-paged at 500 channels per transaction instead
+    of `fetch_all`, so it can run against a large library without loading it into memory. The real
+    database already has `titles_backfill_v1 = done` with empty `titles`, so it still needs a
+    deliberate reindex to populate fallback/"new since last visit" data.
 
 ## Open — playback and updates (16–22)
 
@@ -204,9 +218,10 @@ release signature files, and the published assets.
 
 1. ~~Release v0.1.12: remove the reconnect flags, enable TLS in the Flatpak, batch the delete
    query, add the tag/version check.~~ Done.
-2. Identity and resume (6–15). Phase 1 (8–14) and the v2 key migration (6, 7) are on main. Issue
-   15's paged title backfill remains.
+2. Identity and resume (6–15). Phase 1 (8–14), the v2 key migration (6, 7) and the paged title
+   backfill are on main. Existing empty-title databases still need a deliberate reindex (15).
 3. ~~Player state (16–19) and privacy (23–25), including an allowlist of stream schemes for
    mpv.~~ Done on main (unreleased).
-4. Rework library loading (5) before adding features; until then the real library stays too big to
-   load, and only trimming it from the UI helps.
+4. ~~Rework library loading (5) before adding features.~~ Done on main (unreleased): paged
+   loading, FTS5 search and import limits. Facet/board completeness across unloaded pages and the
+   first real-library FTS build remain follow-ups.

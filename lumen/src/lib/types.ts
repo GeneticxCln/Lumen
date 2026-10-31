@@ -24,6 +24,18 @@ export interface NetworkPrivacyState {
   error?: string;
 }
 
+export interface ChannelPage {
+  channels: Channel[];
+  /** Pass back as `afterId`; null when this was the last page. */
+  next_after_id: number | null;
+  has_more: boolean;
+}
+
+export interface ChannelGroup {
+  name: string | null;
+  count: number;
+}
+
 export interface Channel {
   id: number;
   playlist_id: number;
