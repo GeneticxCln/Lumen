@@ -2,6 +2,8 @@
 
 Current state of correctness, security boundaries and release readiness. The earlier version of this file described the Python sidecar and browser bridge, which no longer exist.
 
+> **External audit, 2026-10-31.** A hands-on audit of `a95e0ab`/v0.1.11, run against a real 186-playlist, ~14.76M-channel library, found the app broken in real use. v0.1.12 fixed its first four critical findings (HLS reconnect flags, version mismatch, Flatpak TLS, 16,384+ channel deletes) and an ffmpeg test hang; everything else it reported is tracked in [OPEN-ISSUES.md](OPEN-ISSUES.md). Read "verified" below as "covered by the tests named", not as real-world proof — the audit reproduced failures those tests miss. In particular, "fail-closed throughout" in the network-privacy paragraph overstates coverage: mpv's `--http-proxy` covers HTTP(S) only, so rtsp/rtmp/tcp/ftp/mms playback is not proxied (open issue 23).
+
 ## Architecture in one paragraph
 
 Tauri v2 shell (`src-tauri`) over a UI-agnostic Rust core (`crates/lumen-core`: M3U parsing, SQLite, search, TMDB, extraction, harvesting, probing, sync, network guard). Video plays in a separate native mpv window controlled over JSON IPC. The React UI talks only to Tauri commands. There is no browser mode and no local HTTP server. Extraction runs a pinned, checksum-verified `yt-dlp` binary as a subprocess.

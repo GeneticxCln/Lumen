@@ -91,7 +91,7 @@ Local-network sources always connect directly (like a VPN split tunnel). Casting
 
 ## Sync
 
-Optional; no accounts. The library/files/playback work without it. Official builds use a sync server we run by default; self-host your own instead if preferred (see below).
+Optional; no accounts. The library/files/playback work without it. Current releases have no sync server baked in — the official server is wired in at build time through `LUMEN_SYNC_URL` and that variable is not set yet — so Sync asks for a server address. Self-host your own (see below), or set the variable when building.
 
 Turn on in **Settings → Profiles & sync**. Lumen makes a random secret key on that device (shown once, 14 groups of four chars with a checksum). On another device choose **Add this device** and type the key. Nothing else exchanged: no email, no sign-in, no expiring code.
 
@@ -108,7 +108,7 @@ Synced devices share: profiles (name/colour; PINs never leave the device), favor
 
 ### Running your own sync server
 
-A small Cloudflare Worker with a D1 database in `sync-server/`. Deploy: `npx wrangler d1 create lumen-sync`, put the database id in `sync-server/wrangler.jsonc`, `npx wrangler deploy`. Enter its address in **Settings → Profiles & sync → Sync server** to use it instead of the default.
+A small Cloudflare Worker with a D1 database in `sync-server/`. Deploy: `npx wrangler d1 create lumen-sync`, put the database id in `sync-server/wrangler.jsonc`, `npx wrangler deploy`. Enter its address in **Settings → Profiles & sync → Sync server**.
 
 ## Translating Lumen
 
