@@ -104,10 +104,7 @@ pub(crate) async fn migrate_inner(
         }
 
         let now = Utc::now().timestamp_millis();
-        let mut tx = pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(sql_err)?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.map_err(sql_err)?;
         let mut last_id = cursor;
         for row in &rows {
             let id: i64 = row.get("id");
@@ -518,10 +515,7 @@ async fn fill_missing_keys(pool: &Pool<Sqlite>, batch: i64) -> Result<()> {
         if rows.is_empty() {
             break;
         }
-        let mut tx = pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(sql_err)?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.map_err(sql_err)?;
         for (profile_id, url, _) in rows {
             let key = ContentKey::derive(None, None, "", None, &url).into_string();
             sqlx::query(
@@ -547,10 +541,7 @@ async fn fill_missing_keys(pool: &Pool<Sqlite>, batch: i64) -> Result<()> {
         if rows.is_empty() {
             break;
         }
-        let mut tx = pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(sql_err)?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.map_err(sql_err)?;
         for (id, path) in rows {
             let key = ContentKey::derive(None, None, "", None, &path).into_string();
             sqlx::query("UPDATE history SET content_key = ? WHERE id = ?")

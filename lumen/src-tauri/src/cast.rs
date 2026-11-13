@@ -77,12 +77,9 @@ pub async fn cast_start_cmd(
     if let Some(id) = item.channel_id
         && let Some(page) = lumen_core::db::extract_origin_for_channel(pool, id).await?
     {
-        let resolved = lumen_core::extract::resolve_stream(
-            &page,
-            app.path().app_data_dir().ok(),
-            allow_lan,
-        )
-        .await?;
+        let resolved =
+            lumen_core::extract::resolve_stream(&page, app.path().app_data_dir().ok(), allow_lan)
+                .await?;
         if resolved.audio_url.is_some() {
             return Err(PlayerError::InvalidArg(
                 "This page keeps its video and audio separate, which a TV cannot play".into(),

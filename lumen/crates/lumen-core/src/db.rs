@@ -414,7 +414,10 @@ pub(crate) fn title_backfill_row_from(row: &SqliteRow) -> TitleBackfillRow {
         genre_names: row.get("genre_names"),
         extra_headers: row.get("extra_headers"),
         is_live,
-        created_at: row.try_get::<Option<i64>, _>("playlist_created_at").ok().flatten(),
+        created_at: row
+            .try_get::<Option<i64>, _>("playlist_created_at")
+            .ok()
+            .flatten(),
     }
 }
 
@@ -1349,8 +1352,17 @@ pub async fn list_channels_page(
     after_id: Option<i64>,
     limit: i64,
 ) -> Result<ChannelPage> {
-    list_channels_page_mode(pool, playlist_id, query, group, after_name, after_id, limit, false)
-        .await
+    list_channels_page_mode(
+        pool,
+        playlist_id,
+        query,
+        group,
+        after_name,
+        after_id,
+        limit,
+        false,
+    )
+    .await
 }
 
 /// `list_channels_page`, continuing a search that already fell back to substring matching:
@@ -1369,21 +1381,46 @@ pub async fn list_channels_page_mode(
 ) -> Result<ChannelPage> {
     if substring {
         return list_channels_page_with(
-            pool, playlist_id, query, group, after_name, after_id, limit, true,
+            pool,
+            playlist_id,
+            query,
+            group,
+            after_name,
+            after_id,
+            limit,
+            true,
         )
         .await;
     }
     let page = list_channels_page_with(
-        pool, playlist_id, query, group, after_name, after_id, limit, false,
+        pool,
+        playlist_id,
+        query,
+        group,
+        after_name,
+        after_id,
+        limit,
+        false,
     )
     .await?;
     // The full-text index matches whole-word prefixes ("net" finds "Netflix", "flix" does not),
     // where the substring search it replaced found both. When the index finds nothing for the
     // first page, one substring scan keeps a mid-word query from looking like "no results".
     let searched = query.map(str::trim).is_some_and(|value| !value.is_empty());
-    if page.channels.is_empty() && after_name.is_none() && searched && channel_search_ready(pool).await? {
+    if page.channels.is_empty()
+        && after_name.is_none()
+        && searched
+        && channel_search_ready(pool).await?
+    {
         return list_channels_page_with(
-            pool, playlist_id, query, group, after_name, after_id, limit, true,
+            pool,
+            playlist_id,
+            query,
+            group,
+            after_name,
+            after_id,
+            limit,
+            true,
         )
         .await;
     }

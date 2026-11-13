@@ -374,7 +374,14 @@ fn year_from(date: Option<&str>) -> Option<i64> {
 }
 
 /// `id, name, url, tvg_id, group_title, is_live` of a channel waiting to be matched.
-type Candidate = (i64, String, String, Option<String>, Option<String>, Option<i64>);
+type Candidate = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+);
 
 /// Whether a TMDB entry is a title that can really be played, rather than something that only
 /// shares its name with a channel. A film needs a release and a runtime (a 0-minute or
@@ -1060,20 +1067,26 @@ mod tests {
     fn a_film_needs_a_release_and_a_runtime_to_count() {
         let film = detail(serde_json::json!({ "id": 1, "runtime": 112, "status": "Released" }));
         assert!(plausible_title(&film, "movie", false));
-        let placeholder = detail(serde_json::json!({ "id": 2, "runtime": 0, "status": "Released" }));
+        let placeholder =
+            detail(serde_json::json!({ "id": 2, "runtime": 0, "status": "Released" }));
         assert!(!plausible_title(&placeholder, "movie", false));
         let no_runtime = detail(serde_json::json!({ "id": 3, "status": "Released" }));
         assert!(!plausible_title(&no_runtime, "movie", false));
-        let unreleased = detail(serde_json::json!({ "id": 4, "runtime": 90, "status": "In Production" }));
+        let unreleased =
+            detail(serde_json::json!({ "id": 4, "runtime": 90, "status": "In Production" }));
         assert!(!plausible_title(&unreleased, "movie", false));
     }
 
     #[test]
     fn a_live_looking_channel_only_matches_scripted_shows_and_documentaries() {
-        let drama = detail(serde_json::json!({ "id": 1, "type": "Scripted", "number_of_episodes": 24 }));
-        let news = detail(serde_json::json!({ "id": 2, "type": "News", "number_of_episodes": 9000 }));
-        let talk = detail(serde_json::json!({ "id": 3, "type": "Talk Show", "number_of_episodes": 500 }));
-        let empty = detail(serde_json::json!({ "id": 4, "type": "Scripted", "number_of_episodes": 0 }));
+        let drama =
+            detail(serde_json::json!({ "id": 1, "type": "Scripted", "number_of_episodes": 24 }));
+        let news =
+            detail(serde_json::json!({ "id": 2, "type": "News", "number_of_episodes": 9000 }));
+        let talk =
+            detail(serde_json::json!({ "id": 3, "type": "Talk Show", "number_of_episodes": 500 }));
+        let empty =
+            detail(serde_json::json!({ "id": 4, "type": "Scripted", "number_of_episodes": 0 }));
         assert!(plausible_title(&drama, "tv", true));
         assert!(!plausible_title(&news, "tv", true));
         assert!(!plausible_title(&talk, "tv", true));

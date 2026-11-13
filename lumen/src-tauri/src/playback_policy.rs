@@ -86,7 +86,11 @@ fn check_streaming_host(raw: &str, allow_lan: bool) -> Result<()> {
         !netguard::is_allowed_ip(ip, allow_lan)
     };
     let blocked = match url.host() {
-        None => return Err(PlayerError::InvalidArg("The address has no host".to_string())),
+        None => {
+            return Err(PlayerError::InvalidArg(
+                "The address has no host".to_string(),
+            ));
+        }
         Some(url::Host::Ipv4(ip)) => ip_blocked(IpAddr::V4(ip)),
         Some(url::Host::Ipv6(ip)) => ip_blocked(IpAddr::V6(ip)),
         // Non-special schemes (rtsp, udp, ...) parse an IP literal as an opaque domain, so the
@@ -114,7 +118,12 @@ pub fn check_direct_local_media(raw: &str) -> Result<()> {
     }
     let path = trimmed
         .strip_prefix("file://")
-        .or_else(|| trimmed.get(..7).filter(|p| p.eq_ignore_ascii_case("file://")).map(|_| &trimmed[7..]))
+        .or_else(|| {
+            trimmed
+                .get(..7)
+                .filter(|p| p.eq_ignore_ascii_case("file://"))
+                .map(|_| &trimmed[7..])
+        })
         .unwrap_or(trimmed);
     let ext = std::path::Path::new(path)
         .extension()

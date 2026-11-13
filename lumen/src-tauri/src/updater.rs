@@ -274,7 +274,8 @@ async fn automatic(app: &AppHandle) {
         let tag = available.tag.clone();
         async move { get_setting(pool, key).await.ok().flatten().as_deref() == Some(tag.as_str()) }
     };
-    if said(INSTALLED_TAG_SETTING).await && pending_restart_tag(pool).await.ok().flatten().is_some() {
+    if said(INSTALLED_TAG_SETTING).await && pending_restart_tag(pool).await.ok().flatten().is_some()
+    {
         return; // Already put in place; waiting for a restart.
     }
     let event = UpdateEvent {
