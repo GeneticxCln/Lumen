@@ -660,11 +660,17 @@ pub async fn stop(app: AppHandle) -> Result<()> {
 /// Play video inside the Lumen window instead of a separate mpv window.
 const EMBED_PLAYER_SETTING: &str = "embed_player";
 
-/// On unless the user turned it off. Where the display cannot host the video (no X11 window, no
-/// libmpv on native Wayland) playback falls back to the separate mpv window by itself, so the
-/// default is safe everywhere.
+/// What the user chose, or else on only where it has been shown to work: a native Wayland window
+/// (libmpv drawing into the window, checked on KDE Wayland with the NVIDIA driver). On X11 the
+/// mpv `--wid` path stays opt-in: with the video area shown, mpv's control socket stopped
+/// answering on XWayland and the smoke test on a virtual X display could not play at all. Where
+/// the display cannot host the video, playback falls back to the separate mpv window by itself.
 async fn embed_player_enabled(pool: &sqlx::Pool<sqlx::Sqlite>) -> bool {
-    !matches!(get_setting(pool, EMBED_PLAYER_SETTING).await, Ok(Some(value)) if value == "false")
+    match get_setting(pool, EMBED_PLAYER_SETTING).await {
+        Ok(Some(value)) if value == "true" => true,
+        Ok(Some(value)) if value == "false" => false,
+        _ => embed::mode() == Some(embed::Mode::Gl),
+    }
 }
 
 /// The user's opt-in to fetch from their own network (a NAS, Jellyfin on this machine).
