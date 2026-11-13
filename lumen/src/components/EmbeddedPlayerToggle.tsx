@@ -4,9 +4,9 @@ import type { EmbeddedSupport } from "../lib/tauri";
 import { t } from "../i18n/index.ts";
 
 /**
- * Experimental: play video inside the Lumen window instead of a separate mpv window. It needs an
- * X11 window or, on native Wayland, libmpv on the system, so the switch explains itself when it is
- * unavailable. Saved at once; it applies the next time playback starts.
+ * Play video inside the Lumen window instead of a separate mpv window (on by default). It needs
+ * an X11 window or, on native Wayland, libmpv on the system, so the switch explains itself when it
+ * is unavailable. Saved at once; it applies the next time playback starts.
  */
 export function EmbeddedPlayerToggle() {
   const [enabled, setEnabled] = useState<boolean | null>(null);

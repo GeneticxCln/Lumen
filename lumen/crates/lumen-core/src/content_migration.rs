@@ -614,19 +614,26 @@ async fn ensure_backup(pool: &Pool<Sqlite>) -> Result<()> {
         // In-memory database: nothing to back up and nowhere to put it.
         return Ok(());
     };
+    // No backup has been recorded as complete, so anything already named like one is what an
+    // earlier attempt left behind when it was killed or failed part-way (a copy of a very large
+    // library, several gigabytes each time, together with its journal). Remove it first: each
+    // start used to add another.
+    remove_backups(&file, Duration::ZERO);
     let backup = format!(
         "{file}.pre-key-v2-{}.db",
         Utc::now().format("%Y%m%d-%H%M%S")
     );
     let escaped = backup.replace('\'', "''");
-    sqlx::query(sqlx::AssertSqlSafe(format!("VACUUM INTO '{escaped}'")))
+    if let Err(error) = sqlx::query(sqlx::AssertSqlSafe(format!("VACUUM INTO '{escaped}'")))
         .execute(pool)
         .await
-        .map_err(|e| {
-            PlayerError::Sql(format!(
-                "content-key v2 migration stopped: backup to {backup} failed ({e})"
-            ))
-        })?;
+    {
+        // A failed copy is partial and useless as a rollback: do not leave it on the disk.
+        remove_backups(&file, Duration::ZERO);
+        return Err(PlayerError::Sql(format!(
+            "content-key v2 migration stopped: backup to {backup} failed ({error})"
+        )));
+    }
     tracing::info!(backup = %backup, "content-key v2 backup written");
     crate::db::set_setting(
         pool,
@@ -641,21 +648,10 @@ async fn ensure_backup(pool: &Pool<Sqlite>) -> Result<()> {
 /// problem and go back, short enough not to leave a copy of a very large library on disk forever.
 const BACKUP_KEEP: Duration = Duration::from_secs(30 * 24 * 3600);
 
-/// Removes `<database>.pre-key-v2-*.db` copies older than `BACKUP_KEEP`. Best effort.
-async fn prune_old_backups(pool: &Pool<Sqlite>) {
-    let Ok(rows) = sqlx::query("PRAGMA database_list").fetch_all(pool).await else {
-        return;
-    };
-    let Some(file) = rows.iter().find_map(|row| {
-        let name: String = row.get("name");
-        (name == "main")
-            .then(|| row.get::<Option<String>, _>("file"))
-            .flatten()
-            .filter(|path| !path.is_empty())
-    }) else {
-        return;
-    };
-    let path = std::path::Path::new(&file);
+/// Removes `<database>.pre-key-v2-*` copies (and their `-journal`/`-wal`/`-shm` files) older than
+/// `older_than`. Best effort.
+fn remove_backups(database: &str, older_than: Duration) {
+    let path = std::path::Path::new(database);
     let (Some(dir), Some(stem)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
         return;
     };
@@ -665,19 +661,36 @@ async fn prune_old_backups(pool: &Pool<Sqlite>) {
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !(name.starts_with(&prefix) && name.ends_with(".db")) {
+        if !name.starts_with(&prefix) {
             continue;
         }
-        let old = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|modified| modified.elapsed().ok())
-            .is_some_and(|age| age > BACKUP_KEEP);
-        if old {
-            let _ = std::fs::remove_file(entry.path());
-            tracing::info!(backup = %name, "removed an old content-key migration backup");
+        let old_enough = older_than.is_zero()
+            || entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > older_than);
+        if old_enough && std::fs::remove_file(entry.path()).is_ok() {
+            tracing::info!(backup = %name, "removed a content-key migration backup");
         }
+    }
+}
+
+/// Removes the pre-migration copy once it is older than `BACKUP_KEEP`.
+async fn prune_old_backups(pool: &Pool<Sqlite>) {
+    let Ok(rows) = sqlx::query("PRAGMA database_list").fetch_all(pool).await else {
+        return;
+    };
+    let file = rows.iter().find_map(|row| {
+        let name: String = row.get("name");
+        (name == "main")
+            .then(|| row.get::<Option<String>, _>("file"))
+            .flatten()
+            .filter(|path| !path.is_empty())
+    });
+    if let Some(file) = file {
+        remove_backups(&file, BACKUP_KEEP);
     }
 }
 

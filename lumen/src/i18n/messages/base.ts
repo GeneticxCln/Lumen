@@ -31,9 +31,9 @@ export const base = {
   "autoRefresh.everyHours": "Every {hours}h",
   "autoRefresh.useDefault": "Use default",
 
-  "embed.label": "Play video inside the Lumen window (experimental)",
+  "embed.label": "Play video inside the Lumen window",
   "embed.description":
-    "Shows the video above the controls in this window instead of opening a separate mpv window. Takes effect the next time playback starts.",
+    "Shows the video above the controls in this window instead of opening a separate mpv window. On by default; turn it off to use mpv's own window. Takes effect the next time playback starts.",
 
   "episodes.title": "Episodes",
   "episodes.season": "Season {season}",

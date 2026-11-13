@@ -22,7 +22,11 @@ Two independent layers. mpv's own libavformat reconnect flags try first (a no-op
 
 ### Is single-window playback (video inside the Lumen window) reliable?
 
-It's marked experimental for a reason. On X11/XWayland it's been checked by screenshot under a virtual display: one window, video above the controls, and turning the setting off correctly falls back to the separate mpv window. On native Wayland, the video renders through `libmpv` into a GTK GL area — checked under a headless Weston compositor with software rendering, where the frame did show real video content. Not checked: real GNOME, KDE or Hyprland sessions, hardware decoding on this specific path (the Wayland display isn't passed to `libmpv`, so it may fall back to software decoding), and fullscreen on a real window manager. If you hit a black frame, `LUMEN_GL_DEBUG=1` prints how much of the picture is actually lit, which helps tell "nothing is rendering" from "it's rendering but to the wrong place."
+On X11/XWayland it's been checked by screenshot under a virtual display: one window, video above the controls, and turning the setting off correctly falls back to the separate mpv window. On native Wayland, the video renders through `libmpv` into a GTK GL area — checked under a headless Weston compositor with software rendering, where the frame did show real video content. Not checked: real GNOME, KDE or Hyprland sessions, hardware decoding on this specific path (the Wayland display isn't passed to `libmpv`, so it may fall back to software decoding), and fullscreen on a real window manager. If you hit a black frame, `LUMEN_GL_DEBUG=1` prints how much of the picture is actually lit, which helps tell "nothing is rendering" from "it's rendering but to the wrong place."
+
+### The window stutters when I scroll. What can I do?
+
+On machines with the proprietary NVIDIA driver, WebKitGTK's GPU compositing stalls for 150 to 250 ms at a time (measured on KDE Wayland: scrolling a 3,000-title grid dropped frames and covered two thirds of the distance, where software compositing paced every frame evenly). Lumen therefore uses software compositing for the page when it finds that driver, and GPU compositing elsewhere. Set `LUMEN_WEBKIT_ACCEL=never`, `ondemand` or `always` to choose by hand, for example `LUMEN_WEBKIT_ACCEL=never lumen`. The video is not affected: it is drawn by mpv, not by the page.
 
 ## Casting
 

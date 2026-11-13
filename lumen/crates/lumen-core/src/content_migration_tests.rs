@@ -540,3 +540,35 @@ async fn rows_without_any_key_do_not_stop_the_migration_from_completing() {
     assert_eq!(missing, 0);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Backups left by attempts that were killed part-way (several gigabytes each on a large library,
+/// one more on every start) are removed before a new one is made.
+#[tokio::test]
+async fn a_leftover_partial_backup_is_removed_before_a_new_one_is_made() {
+    let (pool, dir) = test_pool("leftover-backup").await;
+    import_playlist(
+        &pool,
+        &playlist(),
+        &[channel("Leftover", "https://cdn.example/left.m3u8", None)],
+    )
+    .await
+    .unwrap();
+    let stale = dir.join("lumen.db.pre-key-v2-20200101-000000.db");
+    let journal = dir.join("lumen.db.pre-key-v2-20200101-000000.db-journal");
+    std::fs::write(&stale, vec![0u8; 4096]).unwrap();
+    std::fs::write(&journal, vec![0u8; 1024]).unwrap();
+
+    assert!(migrate_content_keys_v2(&pool).await.unwrap());
+
+    assert!(
+        !stale.exists() && !journal.exists(),
+        "the partial copy is gone"
+    );
+    let backups: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".pre-key-v2-"))
+        .collect();
+    assert_eq!(backups.len(), 1, "exactly the fresh backup remains");
+    let _ = std::fs::remove_dir_all(dir);
+}

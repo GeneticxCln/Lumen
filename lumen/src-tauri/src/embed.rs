@@ -1,4 +1,4 @@
-//! Embedded player (experimental).
+//! Embedded player.
 //!
 //! The video is drawn inside Lumen's own window instead of a second one: an area packed above the
 //! web page holds the picture, and the page (title, controls) fills the rest. Two ways to fill it:
@@ -296,6 +296,21 @@ fn gl_area(window: &tauri::WebviewWindow) -> Result<gtk::GLArea, String> {
     vbox.pack_start(&area, false, false, 0);
     vbox.reorder_child(&area, 0);
     area.connect_render(|area, _| {
+        if std::env::var_os("LUMEN_GL_DEBUG").is_some() {
+            thread_local!(static CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) });
+            CALLS.with(|calls| {
+                calls.set(calls.get() + 1);
+                if calls.get() % 50 == 1 {
+                    eprintln!(
+                        "lumen: render signal {} (area {}x{}, mapped {})",
+                        calls.get(),
+                        area.allocated_width(),
+                        area.allocated_height(),
+                        area.is_mapped()
+                    );
+                }
+            });
+        }
         RENDER.with(|slot| {
             let Some(render) = slot.borrow().as_ref().map(|r| r as *const libmpv::RenderContext) else {
                 return;
@@ -389,7 +404,10 @@ fn start_on_main(
     let mut render = libmpv::RenderContext::new(&player)?;
     let weak: gtk::glib::SendWeakRef<gtk::GLArea> = area.downgrade().into();
     render.set_update_callback(move || {
-        UPDATES.fetch_add(1, Ordering::Relaxed);
+        let updates = UPDATES.fetch_add(1, Ordering::Relaxed);
+        if updates.is_multiple_of(100) && std::env::var_os("LUMEN_GL_DEBUG").is_some() {
+            eprintln!("lumen: mpv asked for frame {updates}");
+        }
         let weak = weak.clone();
         gtk::glib::idle_add_once(move || {
             if let Some(area) = weak.upgrade() {
@@ -408,6 +426,9 @@ pub fn set_visible(app: &AppHandle, visible: bool, height: i32) -> Result<(), St
         .ok_or("The main window is not available")?;
     window
         .run_on_main_thread(move || {
+            if std::env::var_os("LUMEN_GL_DEBUG").is_some() {
+                eprintln!("lumen: video area visible={visible} height={height}");
+            }
             AREA.with(|slot| {
                 if let Some(area) = slot.borrow().as_ref() {
                     if visible && height > 0 {
