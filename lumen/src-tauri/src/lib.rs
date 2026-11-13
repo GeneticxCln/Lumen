@@ -227,6 +227,32 @@ pub fn run() {
     });
 }
 
+/// Whether the proprietary NVIDIA driver is loaded. WebKitGTK's GPU compositing stalls for
+/// 150-250 ms at a time on it (measured on KDE Wayland: scrolling a 3,000-title grid dropped
+/// frames and covered two thirds of the distance), while its software compositing paced every
+/// frame evenly; the page here is plain layout and images, which software draws without effort.
+#[cfg(target_os = "linux")]
+fn nvidia_driver_present() -> bool {
+    std::path::Path::new("/proc/driver/nvidia/version").exists()
+}
+
+/// Which compositing policy the page engine gets. `LUMEN_WEBKIT_ACCEL` (`never`, `ondemand` or
+/// `always`) decides when set; otherwise "never" on the NVIDIA driver and "always" elsewhere.
+#[cfg(target_os = "linux")]
+fn page_acceleration_policy(
+    requested: Option<&str>,
+    nvidia: bool,
+) -> webkit2gtk::HardwareAccelerationPolicy {
+    use webkit2gtk::HardwareAccelerationPolicy;
+    match requested {
+        Some("never") => HardwareAccelerationPolicy::Never,
+        Some("ondemand") => HardwareAccelerationPolicy::OnDemand,
+        Some("always") => HardwareAccelerationPolicy::Always,
+        _ if nvidia => HardwareAccelerationPolicy::Never,
+        _ => HardwareAccelerationPolicy::Always,
+    }
+}
+
 /// Asks the page engine for smooth, hardware-accelerated scrolling and drawing.
 #[cfg(target_os = "linux")]
 fn tune_page_engine(app: &tauri::AppHandle) {
@@ -234,10 +260,13 @@ fn tune_page_engine(app: &tauri::AppHandle) {
         return;
     };
     let _ = window.with_webview(|webview| {
-        use webkit2gtk::{HardwareAccelerationPolicy, SettingsExt, WebViewExt};
+        use webkit2gtk::{SettingsExt, WebViewExt};
         if let Some(settings) = webview.inner().settings() {
             settings.set_enable_smooth_scrolling(true);
-            settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Always);
+            settings.set_hardware_acceleration_policy(page_acceleration_policy(
+                std::env::var("LUMEN_WEBKIT_ACCEL").ok().as_deref(),
+                nvidia_driver_present(),
+            ));
         }
     });
 }
@@ -304,6 +333,38 @@ pub(crate) fn apply_webview_proxy(app: &tauri::AppHandle) {
 
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn apply_webview_proxy(_app: &tauri::AppHandle) {}
+
+#[cfg(all(test, target_os = "linux"))]
+mod page_acceleration_tests {
+    use super::page_acceleration_policy;
+    use webkit2gtk::HardwareAccelerationPolicy as Policy;
+
+    #[test]
+    fn the_nvidia_driver_gets_software_compositing_and_everything_else_hardware() {
+        assert_eq!(page_acceleration_policy(None, true), Policy::Never);
+        assert_eq!(page_acceleration_policy(None, false), Policy::Always);
+    }
+
+    #[test]
+    fn the_environment_override_wins_either_way() {
+        assert_eq!(
+            page_acceleration_policy(Some("always"), true),
+            Policy::Always
+        );
+        assert_eq!(
+            page_acceleration_policy(Some("never"), false),
+            Policy::Never
+        );
+        assert_eq!(
+            page_acceleration_policy(Some("ondemand"), true),
+            Policy::OnDemand
+        );
+        assert_eq!(
+            page_acceleration_policy(Some("nonsense"), true),
+            Policy::Never
+        );
+    }
+}
 
 #[cfg(test)]
 mod webview_proxy_tests {

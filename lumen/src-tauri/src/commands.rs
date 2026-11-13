@@ -187,8 +187,7 @@ async fn play_url_inner(
             let mut args = extra_args.clone();
             embed::set_in_use(false);
             let mut in_window = None;
-            if matches!(get_setting(pool, EMBED_PLAYER_SETTING).await, Ok(Some(value)) if value == "true")
-            {
+            if embed_player_enabled(pool).await {
                 match embed::mode() {
                     Some(embed::Mode::Wid) => match embed::ensure_area(&app).await {
                         Ok(xid) => {
@@ -658,8 +657,15 @@ pub async fn stop(app: AppHandle) -> Result<()> {
     Ok(())
 }
 
-/// Opt-in: play video inside the Lumen window instead of a separate mpv window (X11 only).
+/// Play video inside the Lumen window instead of a separate mpv window.
 const EMBED_PLAYER_SETTING: &str = "embed_player";
+
+/// On unless the user turned it off. Where the display cannot host the video (no X11 window, no
+/// libmpv on native Wayland) playback falls back to the separate mpv window by itself, so the
+/// default is safe everywhere.
+async fn embed_player_enabled(pool: &sqlx::Pool<sqlx::Sqlite>) -> bool {
+    !matches!(get_setting(pool, EMBED_PLAYER_SETTING).await, Ok(Some(value)) if value == "false")
+}
 
 /// The user's opt-in to fetch from their own network (a NAS, Jellyfin on this machine).
 const ALLOW_LAN_SETTING: &str = "allow_lan_sources";
@@ -2123,6 +2129,9 @@ pub async fn get_settings(app: AppHandle) -> Result<serde_json::Value> {
         "search_preferred_language": search_language,
         "search_hide_other_languages": hide_other_languages,
         "allow_lan_sources": get_setting(pool, ALLOW_LAN_SETTING).await?.unwrap_or_default(),
+        // The Playback switch reads this back; without it the switch showed "off" every time the
+        // page was opened, however it had been left, and could not be turned off again.
+        "embed_player": if embed_player_enabled(pool).await { "true" } else { "false" },
         "playlist_auto_refresh_hours": get_setting(pool, crate::playlist::refresh::DEFAULT_INTERVAL_SETTING)
             .await?
             .unwrap_or_else(|| "0".to_string()),

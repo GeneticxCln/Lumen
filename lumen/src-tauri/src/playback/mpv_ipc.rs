@@ -34,8 +34,10 @@ struct MpvMessage {
 /// How long `load` waits for mpv to report the file it was handed. Bounded so an unreachable
 /// stream cannot hold the command open indefinitely; network streams get a reasonable startup
 /// window, and a timeout is surfaced instead of pretending the file is ready for resume-seek.
-/// Shortest gap between `player://state` events caused only by the playback clock moving.
-const TIME_EMIT_INTERVAL: Duration = Duration::from_millis(250);
+/// Shortest gap between `player://state` events caused only by the playback clock moving. Every
+/// event re-renders the page, so a seek bar that moves once a second costs a quarter of what four
+/// updates a second did while something plays.
+const TIME_EMIT_INTERVAL: Duration = Duration::from_millis(1000);
 
 const LOAD_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 

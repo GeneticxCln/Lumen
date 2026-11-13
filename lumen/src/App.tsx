@@ -363,10 +363,13 @@ function App() {
     if (isFullscreen) void run(toggleFullscreen);
   }, [isFullscreen, toggleFullscreen]);
 
-  // Playing inside the window (experimental): give the video room above the page while the player
+  // Playing inside the window: give the video room above the page while the player
   // is open, keep it sized as the window changes, and hand the room back when it closes.
   const [embeddedActive, setEmbeddedActive] = useState(false);
   const videoHeightRef = useRef(0);
+  // Flips when a stream finishes loading, by which time the backend has marked the in-window
+  // player as in use: the effect below asks for the video area again then.
+  const loadedForEmbed = !player.playerState.buffering && player.playerState.duration > 0;
   useEffect(() => {
     if (!player.currentUrl || !playerOpen) {
       if (videoHeightRef.current > 0) {
@@ -377,7 +380,13 @@ function App() {
       return;
     }
     let active = true;
+    let retry: number | undefined;
+    let attempts = 0;
     const apply = async () => {
+      // The page asks as soon as it opens the player, which is before the backend has finished
+      // starting the in-window player and marked it as in use; the answer is then "not showing".
+      // Ask again a few times (and again when the stream finishes loading, see `loadedForEmbed`)
+      // instead of giving up on the first answer, which left the video playing unseen.
       // The page only sees the room left under the video, so the window height is both together.
       const total = window.innerHeight + videoHeightRef.current;
       const height = Math.round(total * (isFullscreen ? 0.85 : 0.62));
@@ -386,15 +395,19 @@ function App() {
         if (!active) return;
         videoHeightRef.current = showing ? height : 0;
         setEmbeddedActive(showing);
+        if (!showing && attempts < 8) {
+          attempts += 1;
+          retry = window.setTimeout(() => void apply(), 500);
+        }
       } catch {
         if (active) setEmbeddedActive(false);
       }
     };
     void apply();
-    const onResize = () => void apply();
+    const onResize = () => { attempts = 0; void apply(); };
     window.addEventListener("resize", onResize);
-    return () => { active = false; window.removeEventListener("resize", onResize); };
-  }, [player.currentUrl, playerOpen, isFullscreen]);
+    return () => { active = false; window.clearTimeout(retry); window.removeEventListener("resize", onResize); };
+  }, [player.currentUrl, playerOpen, isFullscreen, loadedForEmbed]);
 
 
   // The profile's player preferences the page itself uses: how far to skip, and the next-episode countdown.
