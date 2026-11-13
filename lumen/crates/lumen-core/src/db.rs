@@ -48,7 +48,7 @@ pub async fn init_db(app_dir: &Path) -> Result<Pool<Sqlite>> {
 
     // Pragmas set via a one-off query only take effect on whichever single connection ran it, not
     // on the other connections the pool opens — `after_connect` runs them on every connection
-    // instead. `busy_timeout` makes a write wait for a few seconds when another connection is
+    // instead. `busy_timeout` makes a write wait for up to 30 seconds (a large import or refresh holds the write lock for a good part of that) when another connection is
     // mid-transaction rather than failing at once with "database is locked", which otherwise a
     // user can hit from two ordinary actions (e.g. favoriting a channel while sync is writing).
     // `journal_mode` is actually stored in the database file itself and so only needs setting
@@ -66,7 +66,7 @@ pub async fn init_db(app_dir: &Path) -> Result<Pool<Sqlite>> {
                 sqlx::query("PRAGMA foreign_keys = ON;")
                     .execute(&mut *conn)
                     .await?;
-                sqlx::query("PRAGMA busy_timeout = 5000;")
+                sqlx::query("PRAGMA busy_timeout = 30000;")
                     .execute(&mut *conn)
                     .await?;
                 sqlx::query("PRAGMA journal_mode = WAL;")
@@ -370,6 +370,10 @@ pub(crate) struct TitleBackfillRow {
     genre_names: Option<String>,
     extra_headers: Option<String>,
     is_live: Option<i64>,
+    /// When set, the title's `created_at` (milliseconds): a backfill of channels that already
+    /// existed uses their playlist's age, so "new since your last visit" is not triggered for
+    /// the whole library the moment the backfill runs.
+    created_at: Option<i64>,
 }
 
 /// Builds one `TitleBackfillRow` from a `channels` row carrying the columns both
@@ -410,6 +414,7 @@ pub(crate) fn title_backfill_row_from(row: &SqliteRow) -> TitleBackfillRow {
         genre_names: row.get("genre_names"),
         extra_headers: row.get("extra_headers"),
         is_live,
+        created_at: row.try_get::<Option<i64>, _>("playlist_created_at").ok().flatten(),
     }
 }
 
@@ -447,7 +452,7 @@ pub(crate) async fn batch_upsert_titles_and_sources(
                 .push_bind(&row.backdrop_path)
                 .push_bind(&row.overview)
                 .push_bind(&row.genre_names)
-                .push_bind(now)
+                .push_bind(row.created_at.unwrap_or(now))
                 .push_bind(now);
         });
         titles_qb.push(
@@ -655,7 +660,8 @@ pub async fn backfill_titles_and_sources(pool: &Pool<Sqlite>) -> Result<()> {
     loop {
         let channels = sqlx::query(
             "SELECT id, name, url, group_title, tvg_id, tvg_logo, extra_headers, is_live, \
-             tmdb_id, tmdb_type, poster_path, backdrop_path, overview, release_year, genre_names \
+             tmdb_id, tmdb_type, poster_path, backdrop_path, overview, release_year, genre_names, \
+             (SELECT p.created_at * 1000 FROM playlists p WHERE p.id = channels.playlist_id) AS playlist_created_at \
              FROM channels WHERE id > ? ORDER BY id LIMIT 500",
         )
         .bind(cursor)
@@ -845,6 +851,7 @@ pub(crate) async fn tombstone_favorites_for_removed_channels(
         removed_by_url.entry(url.as_str()).or_default().insert(*id);
     }
     let removed_urls: Vec<&str> = removed_by_url.keys().copied().collect();
+    let removed_all_ids: HashSet<i64> = removed.iter().map(|(id, _)| *id).collect();
 
     // The same favorite can be selected in more than one chunk (it is matched by URL), so only
     // tombstone and queue it once.
@@ -886,12 +893,31 @@ pub(crate) async fn tombstone_favorites_for_removed_channels(
             .await
             .map_err(|e| PlayerError::Sql(e.to_string()))?;
         let removed_ids = removed_by_url.get(url.as_str());
-        if channel_ids
+        if !channel_ids
             .iter()
             .all(|id| removed_ids.is_some_and(|ids| ids.contains(id)))
         {
-            orphaned.push((profile_id, url, content_key));
+            continue;
         }
+        // The same title may still be served under another URL (a provider that rotates stream
+        // tokens drops every old URL and adds new ones in the same refresh). The favorite belongs
+        // to the title, so it stays while any channel outside the removed set carries its key.
+        if let Some(key) = content_key.as_deref() {
+            let sources: Vec<Option<i64>> =
+                sqlx::query_scalar("SELECT channel_id FROM title_sources WHERE content_key = ?")
+                    .bind(key)
+                    .fetch_all(&mut **tx)
+                    .await
+                    .map_err(|e| PlayerError::Sql(e.to_string()))?;
+            if sources
+                .into_iter()
+                .flatten()
+                .any(|id| !removed_all_ids.contains(&id))
+            {
+                continue;
+            }
+        }
+        orphaned.push((profile_id, url, content_key));
     }
 
     for (profile_id, url, stored_content_key) in orphaned {
@@ -916,7 +942,7 @@ pub(crate) async fn tombstone_favorites_for_removed_channels(
 pub async fn delete_playlist(pool: &Pool<Sqlite>, playlist_id: i64) -> Result<()> {
     let now = Utc::now().timestamp_millis();
     let mut tx = pool
-        .begin()
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
@@ -1116,6 +1142,9 @@ pub fn contains_pattern(needle: &str) -> String {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelPage {
     pub channels: Vec<EnrichedChannel>,
+    /// The page was matched as a substring rather than through the word-prefix index; send it
+    /// back with the next page's cursor so the whole search is matched the same way.
+    pub substring: bool,
     /// Pass both back as `after_name` and `after_id` for the next page; `None` when the last
     /// page was returned.
     pub next_after_name: Option<String>,
@@ -1184,7 +1213,7 @@ pub const MAX_PLAYLIST_CHANNELS: usize = 250_000;
 /// disk. It is deliberately above a large real library so existing sources keep working.
 pub const MAX_LIBRARY_CHANNELS: i64 = 20_000_000;
 
-fn dedupe_import_channels(channels: &[Channel]) -> Vec<Channel> {
+pub(crate) fn dedupe_import_channels(channels: &[Channel]) -> Vec<Channel> {
     let mut seen = HashSet::new();
     channels
         .iter()
@@ -1193,7 +1222,7 @@ fn dedupe_import_channels(channels: &[Channel]) -> Vec<Channel> {
         .collect()
 }
 
-fn validate_import_size(incoming: usize, existing: i64) -> Result<()> {
+pub(crate) fn validate_import_size(incoming: usize, existing: i64) -> Result<()> {
     if incoming > MAX_PLAYLIST_CHANNELS {
         return Err(PlayerError::InvalidArg(format!(
             "This playlist has {incoming} channels; one source is limited to {MAX_PLAYLIST_CHANNELS}. Split it into smaller sources."
@@ -1320,9 +1349,61 @@ pub async fn list_channels_page(
     after_id: Option<i64>,
     limit: i64,
 ) -> Result<ChannelPage> {
+    list_channels_page_mode(pool, playlist_id, query, group, after_name, after_id, limit, false)
+        .await
+}
+
+/// `list_channels_page`, continuing a search that already fell back to substring matching:
+/// pass back the `substring` flag the previous page reported, so every page of one search uses
+/// the same matching and the next page does not quietly switch to the word-prefix index.
+#[allow(clippy::too_many_arguments)]
+pub async fn list_channels_page_mode(
+    pool: &Pool<Sqlite>,
+    playlist_id: Option<i64>,
+    query: Option<&str>,
+    group: Option<&str>,
+    after_name: Option<&str>,
+    after_id: Option<i64>,
+    limit: i64,
+    substring: bool,
+) -> Result<ChannelPage> {
+    if substring {
+        return list_channels_page_with(
+            pool, playlist_id, query, group, after_name, after_id, limit, true,
+        )
+        .await;
+    }
+    let page = list_channels_page_with(
+        pool, playlist_id, query, group, after_name, after_id, limit, false,
+    )
+    .await?;
+    // The full-text index matches whole-word prefixes ("net" finds "Netflix", "flix" does not),
+    // where the substring search it replaced found both. When the index finds nothing for the
+    // first page, one substring scan keeps a mid-word query from looking like "no results".
+    let searched = query.map(str::trim).is_some_and(|value| !value.is_empty());
+    if page.channels.is_empty() && after_name.is_none() && searched && channel_search_ready(pool).await? {
+        return list_channels_page_with(
+            pool, playlist_id, query, group, after_name, after_id, limit, true,
+        )
+        .await;
+    }
+    Ok(page)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn list_channels_page_with(
+    pool: &Pool<Sqlite>,
+    playlist_id: Option<i64>,
+    query: Option<&str>,
+    group: Option<&str>,
+    after_name: Option<&str>,
+    after_id: Option<i64>,
+    limit: i64,
+    force_like: bool,
+) -> Result<ChannelPage> {
     let limit = limit.clamp(1, 1_000);
     let query = query.map(str::trim).filter(|value| !value.is_empty());
-    let fts = if query.is_some() && channel_search_ready(pool).await? {
+    let fts = if !force_like && query.is_some() && channel_search_ready(pool).await? {
         query.and_then(fts_query)
     } else {
         None
@@ -1397,6 +1478,7 @@ pub async fn list_channels_page(
     let channels = enrich_rows(pool, rows).await?;
     Ok(ChannelPage {
         channels,
+        substring: force_like,
         next_after_name,
         next_after_id,
         has_more,
@@ -1656,7 +1738,7 @@ pub async fn backfill_channel_facets(pool: &Pool<Sqlite>) -> Result<()> {
             .and_then(|value| value.parse::<i64>().ok())
             .unwrap_or(0);
         let mut tx = pool
-            .begin()
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|e| PlayerError::Sql(e.to_string()))?;
         let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -2152,29 +2234,27 @@ pub async fn backfill_channel_search(pool: &Pool<Sqlite>) -> Result<()> {
             .await?
             .and_then(|value| value.parse::<i64>().ok())
             .unwrap_or(0);
-        let inserted = sqlx::query(
-            "INSERT OR REPLACE INTO channels_fts(rowid, name, group_title, tvg_id) \
-             SELECT id, name, group_title, tvg_id FROM channels \
-             WHERE id > ? ORDER BY id LIMIT 2000",
-        )
-        .bind(cursor)
-        .execute(pool)
-        .await
-        .map_err(|e| PlayerError::Sql(e.to_string()))?
-        .rows_affected();
-        if inserted == 0 {
-            break;
-        }
-        let next: Option<i64> = sqlx::query_scalar(
-            "SELECT MAX(id) FROM (SELECT id FROM channels WHERE id > ? ORDER BY id LIMIT 500)",
+        // The batch is bounded once, up front: the insert and the cursor must agree on which rows
+        // were indexed, or the same rows are written again on every following round.
+        let upper: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(id) FROM (SELECT id FROM channels WHERE id > ? ORDER BY id LIMIT 2000)",
         )
         .bind(cursor)
         .fetch_one(pool)
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
-        let Some(next) = next.filter(|next| *next > cursor) else {
+        let Some(next) = upper.filter(|upper| *upper > cursor) else {
             break;
         };
+        sqlx::query(
+            "INSERT OR REPLACE INTO channels_fts(rowid, name, group_title, tvg_id) \
+             SELECT id, name, group_title, tvg_id FROM channels WHERE id > ? AND id <= ?",
+        )
+        .bind(cursor)
+        .bind(next)
+        .execute(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
         set_setting(pool, CHANNEL_SEARCH_CURSOR, &next.to_string()).await?;
         // 2,000 rows per transaction is four times fewer round trips than the first version,
         // which matters for a 14.76M-row library. One millisecond still yields to playback writes.
@@ -2365,7 +2445,7 @@ pub async fn toggle_favorite(
     .into_string();
 
     let mut tx = pool
-        .begin()
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
@@ -2495,7 +2575,7 @@ pub async fn set_category_override(
             .execute(pool)
             .await
             .map_err(|e| PlayerError::Sql(e.to_string()))?;
-        refresh_channel_facets(pool, channel_id).await?;
+        refresh_channels_sharing_key(pool, channel_id, tvg_id.as_deref(), &content_key).await?;
         return Ok(CategoryOverride {
             content_key,
             kind: None,
@@ -2517,12 +2597,51 @@ pub async fn set_category_override(
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
-    refresh_channel_facets(pool, channel_id).await?;
+    refresh_channels_sharing_key(pool, channel_id, tvg_id.as_deref(), &content_key).await?;
     Ok(CategoryOverride {
         content_key,
         kind: kind.map(String::from),
         genres: genres_joined,
     })
+}
+
+/// An override is stored per content key, so every unmatched channel that derives the same key
+/// (same non-placeholder `tvg-id`) changes with it; their facet rows must follow, not just the one
+/// the user clicked. Channels without a shareable id are only themselves.
+async fn refresh_channels_sharing_key(
+    pool: &Pool<Sqlite>,
+    channel_id: i64,
+    tvg_id: Option<&str>,
+    content_key: &str,
+) -> Result<()> {
+    let mut ids = vec![channel_id];
+    if content_key.starts_with("tvg:")
+        && let Some(tvg_id) = tvg_id
+    {
+        let others: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM channels WHERE tmdb_id IS NULL AND lower(trim(tvg_id)) = lower(trim(?)) LIMIT 5000",
+        )
+        .bind(tvg_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        ids.extend(others);
+        ids.sort_unstable();
+        ids.dedup();
+    }
+    for chunk in ids.chunks(200) {
+        let mut tx = pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        for id in chunk {
+            refresh_channel_facets_tx(&mut tx, *id).await?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Clears any override for a channel's content_key. Equivalent to
@@ -2695,7 +2814,7 @@ pub async fn delete_profile(pool: &Pool<Sqlite>, profile_id: i64) -> Result<()> 
     }
 
     let mut tx = pool
-        .begin()
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
@@ -2753,7 +2872,7 @@ pub async fn merge_profiles(
     }
 
     let mut tx = pool
-        .begin()
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
@@ -3297,8 +3416,12 @@ pub async fn list_ranked_sources(
     content_key: &str,
 ) -> Result<Vec<(String, Option<String>, Option<i64>)>> {
     let rows = sqlx::query(
-        "SELECT stream_url, headers, channel_id FROM title_sources \
-         WHERE content_key = ? ORDER BY rank DESC, id ASC",
+        // Sources that last checked out fine come first; `rank` was inserted as 0 for every row,
+        // so without this the order was only insertion order.
+        "SELECT ts.stream_url, ts.headers, ts.channel_id FROM title_sources ts \
+         LEFT JOIN channels c ON c.id = ts.channel_id \
+         WHERE ts.content_key = ? \
+         ORDER BY (c.last_error IS NOT NULL) ASC, ts.rank DESC, ts.id ASC",
     )
     .bind(content_key)
     .fetch_all(pool)
@@ -3317,14 +3440,27 @@ pub async fn next_ranked_source_after(
     pool: &Pool<Sqlite>,
     failed_url: &str,
 ) -> Result<Option<(String, Option<String>, Option<i64>)>> {
-    let key_row = sqlx::query(
-        "SELECT content_key FROM title_sources WHERE stream_url = ? \
-         ORDER BY rank DESC, id ASC LIMIT 1",
+    // Through `channels.url` (indexed) and `title_sources.channel_id` (indexed): a lookup by
+    // `title_sources.stream_url` alone scans every source of a 14M-channel library.
+    let mut key_row = sqlx::query(
+        "SELECT ts.content_key FROM channels c JOIN title_sources ts ON ts.channel_id = c.id \
+         WHERE c.url = ? ORDER BY ts.rank DESC, ts.id ASC LIMIT 1",
     )
     .bind(failed_url)
     .fetch_optional(pool)
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    if key_row.is_none() {
+        // Sources with no channel row (the partial index in migration 016 covers exactly these).
+        key_row = sqlx::query(
+            "SELECT content_key FROM title_sources WHERE stream_url = ? AND channel_id IS NULL \
+             ORDER BY rank DESC, id ASC LIMIT 1",
+        )
+        .bind(failed_url)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    }
 
     let Some(key_row) = key_row else {
         return Ok(None);
@@ -4953,6 +5089,36 @@ mod tests {
         let unique: HashSet<i64> = ids.iter().copied().collect();
         assert_eq!(unique.len(), ids.len(), "pages must not overlap");
         assert_eq!(ids.len(), 120);
+    }
+
+    #[tokio::test]
+    async fn a_mid_word_search_still_finds_its_match_once_the_index_is_ready() {
+        let pool = test_pool().await;
+        let playlist_id = import_playlist(
+            &pool,
+            &playlist("Search"),
+            &[
+                channel(0, "Netflix Originals", "https://cdn.example/a.m3u8"),
+                channel(0, "Sky Sports", "https://cdn.example/b.m3u8"),
+            ],
+        )
+        .await
+        .unwrap();
+        backfill_channel_search(&pool).await.unwrap();
+
+        // "flix" is no word's prefix, so the index finds nothing; the substring fallback does,
+        // and says so, so the next page of this search is matched the same way.
+        let page = list_channels_page(&pool, Some(playlist_id), Some("flix"), None, None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(page.channels.len(), 1);
+        assert!(page.substring);
+        // A word-prefix query is served by the index and says so too.
+        let page = list_channels_page(&pool, Some(playlist_id), Some("spor"), None, None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(page.channels.len(), 1);
+        assert!(!page.substring);
     }
 
     #[tokio::test]

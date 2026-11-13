@@ -1,0 +1,5 @@
+# RUSTSEC-2026-0459 is fixed in this build: libsqlite3-sys is patched to a copy of 0.39.0 (see
+# vendor/libsqlite3-sys/LUMEN-PATCH.md), which bundles SQLite 3.54.0. The copy keeps a 0.37.x
+# version number so sqlx-sqlite 0.9.0 accepts it, which is why the advisory still matches.
+[advisories]
+ignore = ["RUSTSEC-2026-0459"]

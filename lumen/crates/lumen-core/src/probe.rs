@@ -1,7 +1,7 @@
 //! Live stream availability probing (`probe.rs`).
 //!
 //! Uses `reqwest` with concurrency 8, 5 s per-request timeout, same-host redirect policy (up to 5
-//! hops), per-channel HTTP headers (B7), an overall deadline, and streams results back as they
+//! hops; a redirect to another permitted host counts as alive without being followed), per-channel HTTP headers (B7), an overall deadline, and streams results back as they
 //! complete so unresponsive hosts never block already-finished probes.
 
 use crate::netguard;
@@ -190,10 +190,19 @@ async fn probe_single_with_client(
             let Ok(next_url) = current_url.join(&loc) else {
                 return fail(Some(code), content_type);
             };
-            if !same_origin_host_port(&origin_url, &next_url)
-                || netguard::check_url(&next_url, allow_lan).is_err()
-            {
+            if netguard::check_url(&next_url, allow_lan).is_err() {
                 return fail(Some(code), content_type);
+            }
+            if !same_origin_host_port(&origin_url, &next_url) {
+                // The server answered and points at another (permitted) host, which is how IPTV
+                // providers hand streams to a CDN. Per-channel headers are never sent there, so
+                // do not follow; the redirect itself shows the entry is alive.
+                return ProbeResult {
+                    url: raw_url.to_string(),
+                    live: true,
+                    status: Some(code),
+                    content_type,
+                };
             }
             current_url = next_url;
             continue;
@@ -448,5 +457,32 @@ mod tests {
 
         fast_srv.abort();
         hang_srv.abort();
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_another_host_counts_as_alive_without_being_followed() {
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_port = target.local_addr().unwrap().port();
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_port = origin.local_addr().unwrap().port();
+        let srv = tokio::spawn(async move {
+            while let Ok((mut s, _)) = origin.accept().await {
+                let mut b = [0u8; 512];
+                let _ = s.read(&mut b).await;
+                let reply = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{target_port}/s.ts\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = s.write_all(reply.as_bytes()).await;
+            }
+        });
+        let result = probe_single(
+            &format!("http://127.0.0.1:{origin_port}/live.ts"),
+            &HashMap::new(),
+            true,
+        )
+        .await;
+        assert!(result.live, "{result:?}");
+        assert_eq!(result.status, Some(302));
+        srv.abort();
     }
 }

@@ -50,6 +50,14 @@ pub async fn refresh_playlist(
 
     let content = fetch_playlist_text(&origin, allow_lan).await?;
     let fresh = parse_into_channels(&content, Some(&origin), &origin, &playlist.name)?;
+    // Same rules as an import: one row per stream URL, and the per-source and library limits.
+    let fresh = db::dedupe_import_channels(&fresh);
+    let elsewhere: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE playlist_id != ?")
+        .bind(playlist_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    db::validate_import_size(fresh.len(), elsewhere)?;
 
     let existing_rows = sqlx::query(
         "SELECT id, url, name, tvg_id, tmdb_id, tmdb_type FROM channels WHERE playlist_id = ?",
@@ -103,7 +111,7 @@ pub async fn refresh_playlist(
 
     let now = Utc::now().timestamp_millis();
     let mut tx = pool
-        .begin()
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|e| PlayerError::Sql(e.to_string()))?;
 
@@ -151,16 +159,17 @@ pub async fn refresh_playlist(
 
     db::insert_channel_rows(&mut tx, playlist_id, &inserts).await?;
 
+    // Titles first: a favorite is only orphaned when no *new* channel serves the same title, and
+    // that is read from `title_sources`, which must already hold the just-inserted channels.
+    // Covers every row under this playlist (the removed ones go away with their channel row) —
+    // the same upsert-based logic `import_playlist` itself uses, safe to re-run.
+    db::backfill_titles_for_playlist(&mut tx, playlist_id).await?;
+
     db::tombstone_favorites_for_removed_channels(&mut tx, pool, &removed, now).await?;
     if !removed.is_empty() {
         let ids: Vec<i64> = removed.iter().map(|(id, _)| *id).collect();
         db::delete_channel_rows(&mut tx, &ids).await?;
     }
-
-    // Covers every channel row that now exists under this playlist — the just-updated and the
-    // newly-inserted ones alike (the removed ones are already gone) — the same upsert-based
-    // logic `import_playlist` itself uses, safe to re-run.
-    db::backfill_titles_for_playlist(&mut tx, playlist_id).await?;
 
     sqlx::query("UPDATE playlists SET last_refreshed_at = ? WHERE id = ?")
         .bind(now)
@@ -198,9 +207,9 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// This runs unattended in the background, unlike a user-triggered "Refresh now" or bulk-add —
 /// deliberately lower than `bulk.rs`'s own concurrency caps.
 const CONCURRENT_REFRESHES: usize = 2;
-/// Fetch, parse and merge together get the same budget `bulk.rs`'s own per-link import timeout
-/// gives that same combination of work.
-const REFRESH_TIMEOUT: Duration = Duration::from_secs(35);
+/// Fetch, parse and merge together. Generous on purpose: a large playlist's merge alone can take
+/// longer than a user-triggered import budget, and cutting it off rolls the whole merge back.
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Whether a playlist carrying this per-playlist override (`None` = use `default_hours`), this
 /// global default, and this `last_refreshed_at` should be refreshed at `now_ms`. An interval of
@@ -629,6 +638,68 @@ mod tests {
         );
         assert_eq!(synced[0].1, 0, "the fresh push is queued as active");
         assert_eq!(synced[1].1, 1, "the old key's record is tombstoned");
+    }
+
+    #[tokio::test]
+    async fn a_favorite_survives_a_refresh_that_rotates_every_url_of_the_same_title() {
+        let (port, _hits) = serve(playlist_response(
+            "#EXTM3U\n#EXTINF:-1 tvg-id=\"news.one\",News One\nhttp://example.test/new-token/news.m3u8\n",
+        ))
+        .await;
+        let list_url = format!("http://127.0.0.1:{port}/list.m3u");
+
+        let pool = test_pool().await;
+        let playlist = crate::playlist::m3u::Playlist {
+            id: None,
+            name: "Source".into(),
+            source: "url".into(),
+            origin: Some(list_url),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let channels = vec![Channel {
+            id: None,
+            playlist_id: 0,
+            name: "News One".into(),
+            url: "http://example.test/old-token/news.m3u8".into(),
+            group_title: None,
+            tvg_id: Some("news.one".into()),
+            tvg_logo: None,
+            language: None,
+            extra_headers: None,
+            last_ok: None,
+            last_error: None,
+            is_live: None,
+        }];
+        let playlist_id = db::import_playlist(&pool, &playlist, &channels)
+            .await
+            .unwrap();
+        db::create_profile(&pool, "Default", None).await.unwrap();
+        let profile_id: i64 = sqlx::query_scalar("SELECT id FROM profiles LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let before = channel_rows(&pool, playlist_id).await;
+        db::toggle_favorite(&pool, profile_id, before[0].0)
+            .await
+            .unwrap();
+
+        let stats = refresh_playlist(&pool, playlist_id, true).await.unwrap();
+        assert_eq!((stats.added, stats.removed), (1, 1), "the URL really rotated");
+
+        let favorites = db::list_favorites(&pool, profile_id).await.unwrap();
+        let after = channel_rows(&pool, playlist_id).await;
+        assert_eq!(
+            favorites,
+            vec![after[0].0],
+            "the favorite follows the title to its new URL instead of being tombstoned"
+        );
+        let tombstones: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sync_queue WHERE kind = 'favorite' AND deleted = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(tombstones, 0, "no removal is synced to other devices");
     }
 
     // --- is_refresh_due ---------------------------------------------------------------------

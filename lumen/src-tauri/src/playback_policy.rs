@@ -55,7 +55,11 @@ pub fn check_playback_url(raw: &str, from_remote_playlist: bool, allow_lan: bool
     }
 
     match scheme_of(trimmed).as_deref() {
-        Some(scheme) if STREAMING_SCHEMES.contains(&scheme) => Ok(()),
+        Some(scheme) if STREAMING_SCHEMES.contains(&scheme) => {
+            // Same rule as http(s): a playlist must not aim mpv at a LAN or loopback address
+            // through a streaming scheme when local-network sources are off.
+            check_streaming_host(trimmed, allow_lan)
+        }
         Some(scheme) => Err(PlayerError::InvalidArg(format!(
             "\"{scheme}://\" streams are not supported"
         ))),
@@ -63,6 +67,96 @@ pub fn check_playback_url(raw: &str, from_remote_playlist: bool, allow_lan: bool
             "That is not a stream address Lumen can open".to_string(),
         )),
     }
+}
+
+fn check_streaming_host(raw: &str, allow_lan: bool) -> Result<()> {
+    use lumen_core::netguard;
+    use std::net::IpAddr;
+    let Ok(url) = url::Url::parse(raw) else {
+        return Err(PlayerError::InvalidArg(
+            "That is not a stream address Lumen can open".to_string(),
+        ));
+    };
+    // Multicast is how udp:// and rtp:// IPTV normally arrives, so it is allowed; private and
+    // loopback ranges follow the local-network switch; unspecified and metadata never pass.
+    let ip_blocked = |ip: IpAddr| {
+        if ip.is_multicast() {
+            return false;
+        }
+        !netguard::is_allowed_ip(ip, allow_lan)
+    };
+    let blocked = match url.host() {
+        None => return Err(PlayerError::InvalidArg("The address has no host".to_string())),
+        Some(url::Host::Ipv4(ip)) => ip_blocked(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => ip_blocked(IpAddr::V6(ip)),
+        // Non-special schemes (rtsp, udp, ...) parse an IP literal as an opaque domain, so the
+        // literal is recognised by hand.
+        Some(url::Host::Domain(name)) => match name.trim_matches(['[', ']']).parse::<IpAddr>() {
+            Ok(ip) => ip_blocked(ip),
+            Err(_) => !allow_lan && netguard::is_local_name(name),
+        },
+    };
+    if blocked {
+        return Err(PlayerError::InvalidArg(
+            "That stream is on a private or local address. Turn on local-network sources in Settings to use it."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// A local path handed straight to the player (not through a library entry) must be a media or
+/// playlist file by extension, so search-provider or link text cannot open arbitrary local files.
+pub fn check_direct_local_media(raw: &str) -> Result<()> {
+    let trimmed = raw.trim();
+    if !is_local(trimmed) {
+        return Ok(());
+    }
+    let path = trimmed
+        .strip_prefix("file://")
+        .or_else(|| trimmed.get(..7).filter(|p| p.eq_ignore_ascii_case("file://")).map(|_| &trimmed[7..]))
+        .unwrap_or(trimmed);
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let known = lumen_core::launch::VIDEO_EXT.contains(&ext.as_str())
+        || lumen_core::launch::AUDIO_EXT.contains(&ext.as_str())
+        || lumen_core::launch::PLAYLIST_EXT.contains(&ext.as_str());
+    if known {
+        Ok(())
+    } else {
+        Err(PlayerError::InvalidArg(
+            "Only media files on this computer can be played".to_string(),
+        ))
+    }
+}
+
+/// For hostnames: refuse when any address the name resolves to is private or local (and
+/// local-network sources are off). mpv resolves the name itself, so this is a best-effort check
+/// made just before handing it over; with the network-privacy proxy the proxy resolves instead.
+pub async fn check_resolved_host(raw: &str, allow_lan: bool) -> Result<()> {
+    if allow_lan {
+        return Ok(());
+    }
+    let Ok(url) = url::Url::parse(raw.trim()) else {
+        return Ok(());
+    };
+    let Some(url::Host::Domain(name)) = url.host() else {
+        return Ok(());
+    };
+    let port = url.port_or_known_default().unwrap_or(80);
+    if let Ok(addrs) = tokio::net::lookup_host((name, port)).await
+        && addrs
+            .into_iter()
+            .any(|addr| !lumen_core::netguard::is_allowed_ip(addr.ip(), false))
+    {
+        return Err(PlayerError::InvalidArg(format!(
+            "{name} resolves to a private or local address. Turn on local-network sources in Settings to use it."
+        )));
+    }
+    Ok(())
 }
 
 /// Network privacy is an HTTP(S) proxy. mpv's `--http-proxy` cannot carry rtsp/rtmp/udp/etc., so
@@ -109,6 +203,23 @@ mod tests {
         assert!(check_playback_url("javascript:alert(1)", true, false).is_err());
         assert!(check_playback_url("data:text/html,hi", true, false).is_err());
         assert!(check_playback_url("smb://server/share", true, false).is_err());
+    }
+
+    #[test]
+    fn streaming_protocols_obey_the_local_network_switch() {
+        assert!(check_playback_url("rtsp://192.168.1.5/live", true, false).is_err());
+        assert!(check_playback_url("rtmp://localhost/live", true, false).is_err());
+        assert!(check_playback_url("udp://127.0.0.1:1234", true, false).is_err());
+        assert!(check_playback_url("rtsp://192.168.1.5/live", true, true).is_ok());
+    }
+
+    #[test]
+    fn direct_local_files_must_be_media() {
+        assert!(check_direct_local_media("/home/u/movie.mkv").is_ok());
+        assert!(check_direct_local_media("file:///home/u/song.FLAC").is_ok());
+        assert!(check_direct_local_media("file:///etc/passwd").is_err());
+        assert!(check_direct_local_media("/home/u/.ssh/id_rsa").is_err());
+        assert!(check_direct_local_media("https://example.com/x").is_ok());
     }
 
     #[test]

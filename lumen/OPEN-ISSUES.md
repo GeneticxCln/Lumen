@@ -54,6 +54,55 @@ lists and 14.76M channels are intact. Settings changed: `last_visit_1`, `update_
 possibly `update_notified_tag`, so the v0.1.11 update notice may not show again. Sync and
 auto-refresh were off. Nothing in the repo was modified by the audit.
 
+## Fixed in the follow-up code audit (unreleased)
+
+A read-through of the whole tree after the batches above (reproduced where marked) found and fixed:
+
+- **Player:** a failed progress save or event-listener error no longer feeds the retry/fallback
+  effect; Stop-interrupted loads are not errors; a newer load on one mpv cancels the older one
+  instead of reporting the newer file's success (generation counter); `time-pos`/`duration`
+  reset between files (reproduced against a real mpv); the `ended` flag is honoured; picking a
+  channel while another loads is no longer ignored; mpv dying mid-load fails at once; a failed
+  first load closes the empty mpv window; fullscreen follows changes made inside mpv.
+- **Policy:** streaming schemes obey the local-network switch, direct local paths must be media,
+  an unknown channel id is untrusted, hostnames are resolved before mpv sees them.
+- **Library:** favorites survive a refresh that rotates URLs of the same title; fallback sources
+  are ordered healthy-first; search no longer records failures it did not observe, and a redirect
+  to another permitted host counts as alive; FTS backfill writes each row once and falls back to
+  a substring scan when the index finds nothing; writes that read first use `BEGIN IMMEDIATE`
+  and `busy_timeout` is 30s; `clear_enrichment` works in slices; TMDB forced re-checks walk the
+  whole library and a network failure is not stamped as "checked"; null-key rows no longer block
+  the content-key migration; old migration backups are removed after 30 days; local playlists
+  are decoded like downloaded ones; web pages are refused as playlists; refresh applies the
+  import dedupe and caps.
+- **Sync:** the Worker takes its sequence number in the same batch as the write and settles
+  `row_count` to the real count; a failed push no longer blocks the pull; a device's own pushed
+  records no longer count as "applied" (no whole-library reload per sync); the installed-update
+  tag is cleared once it is the running version.
+- **UI:** My List and shelves show one card per title; series siblings are fetched for the next
+  episode and the episode list; Details works for search hits; the server-side browse rails step
+  aside during a search; dates use the local day.
+- **Issues 20, 21, 22, 26 (the pin; moved to `2026.10.26`, hash checked against the real binary),
+  28, 29, 30 and 33 above are fixed by this section.** Volume changes made inside mpv's window and
+  a search that fell back to substring matching now carry across pages.
+- **The four items left over from that audit are fixed too:**
+  - RUSTSEC-2026-0459: `libsqlite3-sys` is patched (`[patch.crates-io]`, `vendor/libsqlite3-sys`,
+    see its `LUMEN-PATCH.md`) to a copy of 0.39.0, which bundles SQLite 3.54.0 (was 3.51.3).
+    `.cargo/audit.toml` ignores the advisory because the copy keeps a 0.37.x number for sqlx.
+    Remove both once sqlx accepts `libsqlite3-sys >=0.39`.
+  - A `yt-dlp` on `PATH` older than the pinned release is no longer used (logged once; the
+    managed copy from Settings replaces it); a startup check logs which copy will be used.
+  - Redirect chains are resolved by the app (`redirect.rs`), every hop through `netguard`, and
+    mpv opens the end of the chain. Results are cached for 5 minutes (60 s for a host that did
+    not answer) and dropped when mpv reports a playback error, so only a first play of an address
+    costs a request.
+  - TMDB: entries that look like live TV (the library's own classification) are not searched
+    among films and match only scripted shows and documentaries; films need a release and a
+    runtime, shows need episodes.
+- **Still open:** a first play of an address costs one extra `GET` (headers only) to its host,
+  which a provider that counts connections may notice; nothing from the app-layer checks covers
+  a redirect target that changes between the check and mpv's own request.
+
 ## Closed by v0.1.12
 
 | # | Finding | Fix |

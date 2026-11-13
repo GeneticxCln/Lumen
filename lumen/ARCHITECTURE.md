@@ -24,7 +24,7 @@ Lumen doesn't play video through WebKit's `<video>` element — WebKitGTK doesn'
 
 - A real `mpv` process is spawned, controlled over its own JSON IPC socket (`src-tauri/src/playback/mpv_ipc.rs`). `loadfile`, `set_property`, `seek` go out; `pause`, `time-pos`, `duration`, `track-list` come back as events, forwarded to the frontend as `player://state` — the player is driven by events, not polled.
 - On Linux, the video can also render in-process (`src-tauri/src/embed.rs`), into a GTK GL area under the webview, for a single-window experience; `embed_unsupported.rs` is the no-op fallback on other platforms. Either way the control path is the same `PlaybackBackend` trait and the same IPC socket.
-- A dropped HTTP/HLS stream gets two independent recovery layers: mpv's own libavformat reconnect flags (`--stream-lavf-o=reconnect=1,...`, a no-op for local files) try first; if the app sees the stream fail anyway, `usePlayer.ts` retries the same URL a few times with backoff before falling through to the next ranked source for the same title.
+- A dropped HTTP/HLS stream is recovered by the app, not by mpv's own reconnect options (those are deliberately not set: `reconnect_at_eof=1` made HLS playback never start). `usePlayer.ts` retries the same URL a few times with backoff, then falls through to the next ranked source for the same title.
 
 ## Content identity: `content_key`, not the raw URL
 

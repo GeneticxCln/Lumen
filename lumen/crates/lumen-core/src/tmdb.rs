@@ -103,6 +103,19 @@ struct DetailsResponse {
     vote_average: Option<f64>,
     #[serde(default)]
     genres: Vec<Genre>,
+    /// Movies: minutes, absent or 0 for placeholders and unreleased entries.
+    #[serde(default)]
+    runtime: Option<i64>,
+    /// Movies: "Released" for a real film; TV: "Returning Series", "Ended", ...
+    #[serde(default)]
+    status: Option<String>,
+    /// TV only: "Scripted", "Miniseries", "Documentary", but also "News", "Talk Show",
+    /// "Reality" and "Video", which describe a broadcast, not a title.
+    #[serde(default, rename = "type")]
+    show_type: Option<String>,
+    /// TV only: a show with no episodes is a listing, not something to play.
+    #[serde(default)]
+    number_of_episodes: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -360,10 +373,36 @@ fn year_from(date: Option<&str>) -> Option<i64> {
     digits.parse::<i64>().ok()
 }
 
+/// `id, name, url, tvg_id, group_title, is_live` of a channel waiting to be matched.
+type Candidate = (i64, String, String, Option<String>, Option<String>, Option<i64>);
+
+/// Whether a TMDB entry is a title that can really be played, rather than something that only
+/// shares its name with a channel. A film needs a release and a runtime (a 0-minute or
+/// unreleased entry is a placeholder); a show needs episodes, and for a channel that looks like
+/// live TV, must be scripted or a documentary, not a news, talk, reality or video programme —
+/// those are broadcasts, and a channel named after one is the broadcast itself.
+fn plausible_title(detail: &DetailsResponse, media_type: &str, live: bool) -> bool {
+    if media_type == "movie" {
+        return detail.runtime.is_some_and(|minutes| minutes > 0)
+            && detail.status.as_deref() == Some("Released");
+    }
+    if detail.number_of_episodes == Some(0) {
+        return false;
+    }
+    if live {
+        return matches!(
+            detail.show_type.as_deref(),
+            Some("Scripted" | "Miniseries" | "Documentary")
+        );
+    }
+    true
+}
+
 async fn enrich_one(
     http: &reqwest::Client,
     key: &str,
     name: &str,
+    live: bool,
     requests: &mut i64,
 ) -> std::result::Result<Option<Found>, TmdbFailure> {
     let guess = match guess_title(name) {
@@ -371,9 +410,15 @@ async fn enrich_one(
         None => return Ok(None),
     };
 
-    // Movies first — the open-movie catalogue is what this library can actually match.
+    // Movies first — the open-movie catalogue is what this library can actually match. A channel
+    // that looks like live TV is never searched among films: a channel named after a film is the
+    // channel, and it is the one kind of entry where a name collision is the likely case.
     let mut media_type = "movie";
-    let mut matched = search(http, key, "movie", &guess, requests).await?;
+    let mut matched = if live {
+        None
+    } else {
+        search(http, key, "movie", &guess, requests).await?
+    };
     if matched.is_none() {
         media_type = "tv";
         matched = search(http, key, "tv", &guess, requests).await?;
@@ -384,6 +429,9 @@ async fn enrich_one(
     };
 
     let detail = details(http, key, media_type, tmdb_id, requests).await?;
+    if !plausible_title(&detail, media_type, live) {
+        return Ok(None);
+    }
 
     let genre_names = if detail.genres.is_empty() {
         None
@@ -419,6 +467,9 @@ async fn enrich_one(
     }))
 }
 
+/// Where a forced re-check of the whole library left off.
+const FORCE_CURSOR_SETTING: &str = "tmdb_force_cursor";
+
 pub async fn enrich(pool: &Pool<Sqlite>, limit: i64, force: bool) -> Result<EnrichOutcome> {
     let (key, _source) = api_key(pool)
         .await?
@@ -426,14 +477,36 @@ pub async fn enrich(pool: &Pool<Sqlite>, limit: i64, force: bool) -> Result<Enri
 
     let http = http_client()?;
 
-    let candidates: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT id, name, url, tvg_id FROM channels WHERE (enriched_at IS NULL OR ?) ORDER BY id LIMIT ?",
+    // A forced re-check walks the library in id order across calls (60 titles per click used to
+    // mean the same first 60 every time); the position is kept until the walk reaches the end.
+    let force_after: i64 = if force {
+        crate::db::get_setting(pool, FORCE_CURSOR_SETTING)
+            .await?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let candidates: Vec<Candidate> = sqlx::query_as(
+        "SELECT id, name, url, tvg_id, group_title, is_live FROM channels \
+         WHERE (enriched_at IS NULL AND ? = 0) OR (? = 1 AND id > ?) ORDER BY id LIMIT ?",
     )
     .bind(if force { 1_i64 } else { 0_i64 })
+    .bind(if force { 1_i64 } else { 0_i64 })
+    .bind(force_after)
     .bind(limit.max(0))
     .fetch_all(pool)
     .await
     .map_err(|e| PlayerError::Sql(e.to_string()))?;
+    if force {
+        // Past the last row: the next forced run starts over from the beginning.
+        let next = if candidates.len() < limit.max(0) as usize {
+            0
+        } else {
+            candidates.last().map(|row| row.0).unwrap_or(0)
+        };
+        crate::db::set_setting(pool, FORCE_CURSOR_SETTING, &next.to_string()).await?;
+    }
 
     let now = Utc::now().timestamp();
     let mut requests = 0_i64;
@@ -441,12 +514,26 @@ pub async fn enrich(pool: &Pool<Sqlite>, limit: i64, force: bool) -> Result<Enri
     let mut skipped = 0_i64;
     let mut failures = 0_i64;
 
-    for (index, (channel_id, name, url, tvg_id)) in candidates.iter().enumerate() {
+    for (index, (channel_id, name, url, tvg_id, group_title, is_live)) in
+        candidates.iter().enumerate()
+    {
         if index > 0 {
             tokio::time::sleep(Duration::from_millis(REQUEST_GAP_MS)).await;
         }
+        // A transport or parse failure says nothing about the title, so it is not stamped as
+        // checked and is tried again on the next run.
+        let mut stamp = true;
 
-        match enrich_one(&http, &key, name, &mut requests).await {
+        // Classified the way the library itself shows it (group and title keywords, then the
+        // playlist's own live flag), so "looks like live TV" means the same here and on screen.
+        let live = crate::facets::content_kind(
+            None,
+            None,
+            group_title.as_deref(),
+            name,
+            is_live.map(|flag| flag != 0),
+        ) == "live";
+        match enrich_one(&http, &key, name, live, &mut requests).await {
             Err(TmdbFailure::Unauthorized) => {
                 return Err(PlayerError::InvalidArg(
                     "TMDB rejected the API key (HTTP 401)".into(),
@@ -461,6 +548,7 @@ pub async fn enrich(pool: &Pool<Sqlite>, limit: i64, force: bool) -> Result<Enri
                 }
                 failures += 1;
                 skipped += 1;
+                stamp = false;
             }
             Ok(None) => skipped += 1,
             Ok(Some(found)) => {
@@ -535,21 +623,38 @@ pub async fn enrich(pool: &Pool<Sqlite>, limit: i64, force: bool) -> Result<Enri
             }
         }
 
-        // Stamp every attempted row, matched or not, so re-runs move forward instead
-        // of hammering the API for channels TMDB will never know about.
-        sqlx::query("UPDATE channels SET enriched_at = ? WHERE id = ?")
-            .bind(now)
-            .bind(channel_id)
-            .execute(pool)
-            .await
-            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        // Stamp every row TMDB actually answered for, matched or not, so re-runs move forward
+        // instead of hammering the API for channels TMDB will never know about.
+        if stamp {
+            sqlx::query("UPDATE channels SET enriched_at = ? WHERE id = ?")
+                .bind(now)
+                .bind(channel_id)
+                .execute(pool)
+                .await
+                .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        }
     }
 
-    let remaining: i64 =
+    let remaining: i64 = if force {
+        let after: i64 = crate::db::get_setting(pool, FORCE_CURSOR_SETTING)
+            .await?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        if after == 0 {
+            0
+        } else {
+            sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE id > ?")
+                .bind(after)
+                .fetch_one(pool)
+                .await
+                .map_err(|e| PlayerError::Sql(e.to_string()))?
+        }
+    } else {
         sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE enriched_at IS NULL")
             .fetch_one(pool)
             .await
-            .map_err(|e| PlayerError::Sql(e.to_string()))?;
+            .map_err(|e| PlayerError::Sql(e.to_string()))?
+    };
 
     Ok(EnrichOutcome {
         enriched: matched,
@@ -561,21 +666,41 @@ pub async fn enrich(pool: &Pool<Sqlite>, limit: i64, force: bool) -> Result<Enri
 }
 
 pub async fn clear_enrichment(pool: &Pool<Sqlite>) -> Result<i64> {
-    let affected = sqlx::query(
-        "UPDATE channels SET tmdb_id = NULL, tmdb_type = NULL, poster_path = NULL, backdrop_path = NULL, \
-         overview = NULL, release_year = NULL, rating = NULL, genre_names = NULL, enriched_at = NULL",
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| PlayerError::Sql(e.to_string()))?
-    .rows_affected();
+    // In slices: one UPDATE over a 14.76M-row table holds the write lock for minutes, and every
+    // other write (a favorite, a progress save) fails with "database is locked" meanwhile.
+    let mut affected = 0_i64;
+    loop {
+        let done = sqlx::query(
+            "UPDATE channels SET tmdb_id = NULL, tmdb_type = NULL, poster_path = NULL, backdrop_path = NULL, \
+             overview = NULL, release_year = NULL, rating = NULL, genre_names = NULL, enriched_at = NULL \
+             WHERE id IN (SELECT id FROM channels WHERE enriched_at IS NOT NULL OR tmdb_id IS NOT NULL LIMIT 20000)",
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| PlayerError::Sql(e.to_string()))?
+        .rows_affected();
+        if done == 0 {
+            break;
+        }
+        affected += done as i64;
+        tokio::task::yield_now().await;
+    }
 
     // Every kind/genre/release year just changed. Drop the derived index and mark it unready;
     // the UI falls back to loaded-page counts until the background rebuild finishes.
-    sqlx::query("DELETE FROM channel_facets")
+    loop {
+        let done = sqlx::query(
+            "DELETE FROM channel_facets WHERE channel_id IN (SELECT channel_id FROM channel_facets LIMIT 20000)",
+        )
         .execute(pool)
         .await
-        .map_err(|e| PlayerError::Sql(e.to_string()))?;
+        .map_err(|e| PlayerError::Sql(e.to_string()))?
+        .rows_affected();
+        if done == 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
     sqlx::query(
         "DELETE FROM settings WHERE key IN ('channel_facets_ready', 'channel_facets_cursor')",
     )
@@ -589,7 +714,7 @@ pub async fn clear_enrichment(pool: &Pool<Sqlite>) -> Result<i64> {
         }
     });
 
-    Ok(affected as i64)
+    Ok(affected)
 }
 
 pub async fn counts(pool: &Pool<Sqlite>) -> Result<(i64, i64)> {
@@ -925,6 +1050,36 @@ mod tests {
             2,
         );
         assert_eq!(rows.len(), 2);
+    }
+
+    fn detail(json: serde_json::Value) -> DetailsResponse {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn a_film_needs_a_release_and_a_runtime_to_count() {
+        let film = detail(serde_json::json!({ "id": 1, "runtime": 112, "status": "Released" }));
+        assert!(plausible_title(&film, "movie", false));
+        let placeholder = detail(serde_json::json!({ "id": 2, "runtime": 0, "status": "Released" }));
+        assert!(!plausible_title(&placeholder, "movie", false));
+        let no_runtime = detail(serde_json::json!({ "id": 3, "status": "Released" }));
+        assert!(!plausible_title(&no_runtime, "movie", false));
+        let unreleased = detail(serde_json::json!({ "id": 4, "runtime": 90, "status": "In Production" }));
+        assert!(!plausible_title(&unreleased, "movie", false));
+    }
+
+    #[test]
+    fn a_live_looking_channel_only_matches_scripted_shows_and_documentaries() {
+        let drama = detail(serde_json::json!({ "id": 1, "type": "Scripted", "number_of_episodes": 24 }));
+        let news = detail(serde_json::json!({ "id": 2, "type": "News", "number_of_episodes": 9000 }));
+        let talk = detail(serde_json::json!({ "id": 3, "type": "Talk Show", "number_of_episodes": 500 }));
+        let empty = detail(serde_json::json!({ "id": 4, "type": "Scripted", "number_of_episodes": 0 }));
+        assert!(plausible_title(&drama, "tv", true));
+        assert!(!plausible_title(&news, "tv", true));
+        assert!(!plausible_title(&talk, "tv", true));
+        assert!(!plausible_title(&empty, "tv", true));
+        // A title that is not live-looking (it has an episode marker, say) keeps any show type.
+        assert!(plausible_title(&talk, "tv", false));
     }
 
     #[test]

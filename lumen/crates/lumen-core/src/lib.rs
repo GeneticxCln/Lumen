@@ -19,6 +19,7 @@ pub mod player_prefs;
 pub mod playlist;
 pub mod privacy;
 pub mod probe;
+pub mod redirect;
 pub mod remote_image;
 pub mod search;
 pub mod secrets;

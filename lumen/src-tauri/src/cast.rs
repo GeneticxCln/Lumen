@@ -8,7 +8,7 @@ use std::time::Duration;
 use lumen_core::cast::{self, Renderer, Session, Source, Status};
 use lumen_core::subtitles::service::PlayingItem;
 use serde::Serialize;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
 
 use crate::commands::{allow_lan_sources, ensure_db};
@@ -71,10 +71,29 @@ pub async fn cast_start_cmd(
         })?;
     let pool = ensure_db(&app).await?;
     let allow_lan = allow_lan_sources(pool).await;
-    let source = if item.source.starts_with("http://") || item.source.starts_with("https://") {
-        Source::Url(item.source.clone())
+    // An entry saved from a web page holds the page, not a stream: a TV cannot play a web page.
+    // Resolve it the way playing it does.
+    let mut cast_url = item.source.clone();
+    if let Some(id) = item.channel_id
+        && let Some(page) = lumen_core::db::extract_origin_for_channel(pool, id).await?
+    {
+        let resolved = lumen_core::extract::resolve_stream(
+            &page,
+            app.path().app_data_dir().ok(),
+            allow_lan,
+        )
+        .await?;
+        if resolved.audio_url.is_some() {
+            return Err(PlayerError::InvalidArg(
+                "This page keeps its video and audio separate, which a TV cannot play".into(),
+            ));
+        }
+        cast_url = resolved.url;
+    }
+    let source = if cast_url.starts_with("http://") || cast_url.starts_with("https://") {
+        Source::Url(cast_url.clone())
     } else {
-        Source::File(item.source.clone().into())
+        Source::File(cast_url.clone().into())
     };
     let title = item.name.clone().unwrap_or_else(|| "Lumen".into());
     // Serializes this start against any other start in progress, but not against `ACTIVE`: the

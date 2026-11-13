@@ -93,3 +93,11 @@ export async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T
   await Promise.all(runners);
   return results;
 }
+
+/** Today's date in the user's own time zone as `YYYY-MM-DD` (`toISOString` is UTC, which names
+ * the wrong day for several hours every day anywhere but Greenwich). */
+export function localDateString(date: Date = new Date()): string {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}

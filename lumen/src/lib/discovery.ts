@@ -65,6 +65,34 @@ export function readPreferences(): Preferences {
   }
 }
 
+const PLACEHOLDER_TVG_IDS = new Set(["", "none", "null", "nil", "n/a", "na", "-", "unknown", "undefined"]);
+
+/**
+ * What makes two library entries the same title, in the order the backend's content key prefers:
+ * a TMDB match (per episode for series), then a real `tvg-id`, then the stream address itself.
+ */
+export function titleIdentity(channel: Channel): string {
+  if (typeof channel.tmdb_id === "number") {
+    return channel.tmdb_type === "tv"
+      ? `tmdb:tv:${channel.tmdb_id}:${channel.name.toLocaleLowerCase()}`
+      : `tmdb:${channel.tmdb_type ?? "movie"}:${channel.tmdb_id}`;
+  }
+  const tvg = (channel.tvg_id ?? "").trim().toLocaleLowerCase();
+  if (!PLACEHOLDER_TVG_IDS.has(tvg)) return `tvg:${tvg}`;
+  return `url:${channel.url}`;
+}
+
+/** Keeps the first entry of each title, so a title carried by several sources shows once. */
+export function dedupeByTitle(channels: Channel[]): Channel[] {
+  const seen = new Set<string>();
+  return channels.filter((channel) => {
+    const key = titleIdentity(channel);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export function uniqueHistory(history: HistoryEntry[]): HistoryEntry[] {
   const latest = new Map<string, HistoryEntry>();
   for (const item of [...history].sort((a, b) => b.played_at - a.played_at || b.id - a.id)) {
@@ -435,17 +463,18 @@ export function catalogShelves(channels: Channel[]): CatalogShelf[] {
 export function catalogShelvesFromServer(data: CatalogShelves): CatalogShelf[] {
   const shelves: CatalogShelf[] = [];
   if (data.top_rated.length) {
-    shelves.push({ id: "top-rated", title: t("lib.shelf.topRated.title"), subtitle: t("lib.shelf.topRated.subtitle"), channels: data.top_rated });
+    shelves.push({ id: "top-rated", title: t("lib.shelf.topRated.title"), subtitle: t("lib.shelf.topRated.subtitle"), channels: dedupeByTitle(data.top_rated) });
   }
   if (data.recent.length) {
-    shelves.push({ id: "recent", title: t("lib.shelf.recent.title"), subtitle: t("lib.shelf.recent.subtitle"), channels: data.recent });
+    shelves.push({ id: "recent", title: t("lib.shelf.recent.title"), subtitle: t("lib.shelf.recent.subtitle"), channels: dedupeByTitle(data.recent) });
   }
   for (const shelf of data.genres) {
+    const channels = dedupeByTitle(shelf.channels);
     shelves.push({
       id: `genre-${shelf.genre}`,
       title: shelf.genre,
-      subtitle: tn("lib.shelf.genre", shelf.channels.length),
-      channels: shelf.channels,
+      subtitle: tn("lib.shelf.genre", channels.length),
+      channels,
     });
   }
   return shelves;

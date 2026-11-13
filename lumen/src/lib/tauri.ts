@@ -291,7 +291,7 @@ export async function listChannels(playlistId: number, query?: string, group?: s
 }
 
 /** One keyset page of the library. Prefer this over `listChannels` on any user-facing path. */
-export async function listChannelsPage(playlistId: number | null, query?: string, group?: string | null, afterName?: string | null, afterId?: number | null, limit = 500) {
+export async function listChannelsPage(playlistId: number | null, query?: string, group?: string | null, afterName?: string | null, afterId?: number | null, limit = 500, substring = false) {
   return callBackend<ChannelPage>("list_channels_page_cmd", {
     playlistId,
     query: query?.trim() || null,
@@ -299,6 +299,7 @@ export async function listChannelsPage(playlistId: number | null, query?: string
     afterName: afterName ?? null,
     afterId: afterId ?? null,
     limit,
+    substring,
   });
 }
 
