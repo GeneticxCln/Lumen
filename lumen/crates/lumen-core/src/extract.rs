@@ -887,7 +887,10 @@ mod tests {
         assert_eq!(version_at_least("2026.11.01", "2026.10.26"), Some(true));
         assert_eq!(version_at_least("2026.10.25", "2026.10.26"), Some(false));
         assert_eq!(version_at_least("2025.12.31", "2026.01.01"), Some(false));
-        assert_eq!(version_at_least("2026.10.26.232045", "2026.10.26"), Some(true));
+        assert_eq!(
+            version_at_least("2026.10.26.232045", "2026.10.26"),
+            Some(true)
+        );
         assert_eq!(version_at_least("2026.10.26", "2026.10.26.1"), Some(false));
         assert_eq!(version_at_least("not a version", "2026.10.26"), None);
         assert_eq!(version_at_least("", "2026.10.26"), None);

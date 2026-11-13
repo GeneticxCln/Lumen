@@ -685,7 +685,11 @@ mod tests {
             .unwrap();
 
         let stats = refresh_playlist(&pool, playlist_id, true).await.unwrap();
-        assert_eq!((stats.added, stats.removed), (1, 1), "the URL really rotated");
+        assert_eq!(
+            (stats.added, stats.removed),
+            (1, 1),
+            "the URL really rotated"
+        );
 
         let favorites = db::list_favorites(&pool, profile_id).await.unwrap();
         let after = channel_rows(&pool, playlist_id).await;
@@ -694,11 +698,12 @@ mod tests {
             vec![after[0].0],
             "the favorite follows the title to its new URL instead of being tombstoned"
         );
-        let tombstones: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM sync_queue WHERE kind = 'favorite' AND deleted = 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let tombstones: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sync_queue WHERE kind = 'favorite' AND deleted = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(tombstones, 0, "no removal is synced to other devices");
     }
 

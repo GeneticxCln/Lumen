@@ -294,7 +294,8 @@ async fn play_url_inner(
     // the end of the chain is what mpv opens: mpv's own hops are not checked. A repeat play of
     // an address already resolved costs no request (see `lumen_core::redirect`).
     let original_load_url = load_url.clone();
-    let load_url = lumen_core::redirect::resolve(&load_url, hdrs.as_deref().unwrap_or(&[]), allow_lan).await?;
+    let load_url =
+        lumen_core::redirect::resolve(&load_url, hdrs.as_deref().unwrap_or(&[]), allow_lan).await?;
 
     // This profile's audio and subtitle preferences, and a fresh subtitle delay for the new file.
     let prefs = player_prefs::load(pool, profile_id)

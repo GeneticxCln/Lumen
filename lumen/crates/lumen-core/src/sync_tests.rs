@@ -106,7 +106,9 @@ fn handle_request(
             mock.groups.remove(&sync_id);
             reply(200, json!({ "ok": true }))
         }
-        ("POST", "/v1/items") if group.deny_push => reply(413, json!({ "error": "quota_exceeded" })),
+        ("POST", "/v1/items") if group.deny_push => {
+            reply(413, json!({ "error": "quota_exceeded" }))
+        }
         ("POST", "/v1/items") => {
             let items = json_body["items"].as_array().cloned().unwrap_or_default();
             if !items.is_empty() {
@@ -572,7 +574,12 @@ async fn a_record_the_server_altered_is_skipped_and_counted_not_applied() {
 async fn an_applied_pull_notifies_the_registered_callback_with_its_count() {
     let log: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
     let captured = log.clone();
-    set_applied_callback(move |count| captured.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(count));
+    set_applied_callback(move |count| {
+        captured
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(count)
+    });
 
     let (origin, _mock) = start_mock().await;
     let root = generate_root().unwrap();

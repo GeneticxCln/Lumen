@@ -44,7 +44,9 @@ static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| {
 });
 
 fn state() -> std::sync::MutexGuard<'static, State> {
-    STATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// What the player should open for `url`: the end of its redirect chain, or `url` itself when it
@@ -251,9 +253,14 @@ mod tests {
     #[tokio::test]
     async fn only_http_addresses_are_resolved() {
         assert_eq!(
-            resolve("rtsp://example.test/live", &[], false).await.unwrap(),
+            resolve("rtsp://example.test/live", &[], false)
+                .await
+                .unwrap(),
             "rtsp://example.test/live"
         );
-        assert_eq!(resolve("/home/u/movie.mkv", &[], false).await.unwrap(), "/home/u/movie.mkv");
+        assert_eq!(
+            resolve("/home/u/movie.mkv", &[], false).await.unwrap(),
+            "/home/u/movie.mkv"
+        );
     }
 }

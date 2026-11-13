@@ -657,10 +657,7 @@ pub(crate) async fn apply_progress(conn: &mut SqliteConnection, item: &SyncItem)
 /// Queues everything already on this device the first time it signs in, so existing profiles,
 /// favorites and history reach the account.
 async fn queue_all(pool: &Pool<Sqlite>) -> Result<()> {
-    let mut tx = pool
-        .begin_with("BEGIN IMMEDIATE")
-        .await
-        .map_err(sql_err)?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.map_err(sql_err)?;
 
     let profile_ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM profiles")
         .fetch_all(&mut *tx)
@@ -897,7 +894,11 @@ async fn push_batch(remote: &Remote, items: &[SyncItem], pushed: &mut PushedItem
     Ok(())
 }
 
-async fn push_pending(pool: &Pool<Sqlite>, remote: &Remote, pushed: &mut PushedItems) -> Result<()> {
+async fn push_pending(
+    pool: &Pool<Sqlite>,
+    remote: &Remote,
+    pushed: &mut PushedItems,
+) -> Result<()> {
     loop {
         let rows = sqlx::query(
             "SELECT kind, item_key, payload, updated_at, deleted FROM sync_queue ORDER BY updated_at LIMIT ?",
@@ -1006,10 +1007,7 @@ async fn pull_remote(
     loop {
         let page = pull_page(remote, &cursor).await?;
 
-        let mut tx = pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(sql_err)?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.map_err(sql_err)?;
         for sealed in &page.items {
             match remote.keys.open(sealed) {
                 Ok(item) => {

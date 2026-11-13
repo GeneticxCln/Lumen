@@ -91,7 +91,9 @@ pub fn run() {
                         // stale one on PATH is noticed at start, not on the first page link.
                         let extractor_dir = app_handle.path().app_data_dir().ok();
                         let _ = tokio::task::spawn_blocking(move || {
-                            lumen_core::extract::check_extractor_at_startup(extractor_dir.as_deref());
+                            lumen_core::extract::check_extractor_at_startup(
+                                extractor_dir.as_deref(),
+                            );
                         })
                         .await;
                     }
