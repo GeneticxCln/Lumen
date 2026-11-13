@@ -142,10 +142,14 @@ async fn play_url_inner(
         .await
         .ok()
         .flatten()
-        .is_some_and(|source| matches!(source.as_str(), "url" | "extract" | "harvest" | "catalog")),
+        // An id that matches no row (deleted, or made up) is not a trusted library entry.
+        .is_none_or(|source| matches!(source.as_str(), "url" | "extract" | "harvest" | "catalog")),
         None => false,
     };
     crate::playback_policy::check_playback_url(&url, from_remote_playlist, allow_lan)?;
+    if channel_id.is_none() {
+        crate::playback_policy::check_direct_local_media(&url)?;
+    }
     let hwdec = get_setting(pool, "hwdec")
         .await?
         .unwrap_or_else(|| "auto-safe".to_string());
@@ -165,6 +169,7 @@ async fn play_url_inner(
     let extra_args = with_privacy_args(&extra_args, privacy_proxy);
 
     let backend_cell = get_playback_backend().await?;
+    let mut created_here = false;
     let existing = {
         let guard = backend_cell.lock().await;
         match guard.as_ref() {
@@ -236,6 +241,7 @@ async fn play_url_inner(
                 return Ok(());
             }
             *guard = Some(backend.clone());
+            created_here = true;
             backend
         }
     };
@@ -269,6 +275,11 @@ async fn play_url_inner(
         if let Some(audio) = audio_url.as_deref() {
             crate::playback_policy::check_privacy_route(audio)?;
         }
+    } else {
+        crate::playback_policy::check_resolved_host(&load_url, allow_lan).await?;
+        if let Some(audio) = audio_url.as_deref() {
+            crate::playback_policy::check_resolved_host(audio, allow_lan).await?;
+        }
     }
 
     let hdrs = headers.as_ref().and_then(|v| {
@@ -278,6 +289,12 @@ async fn play_url_inner(
                 .collect::<Vec<_>>()
         })
     });
+
+    // Redirects are followed here, through the same address checks as every other request, and
+    // the end of the chain is what mpv opens: mpv's own hops are not checked. A repeat play of
+    // an address already resolved costs no request (see `lumen_core::redirect`).
+    let original_load_url = load_url.clone();
+    let load_url = lumen_core::redirect::resolve(&load_url, hdrs.as_deref().unwrap_or(&[]), allow_lan).await?;
 
     // This profile's audio and subtitle preferences, and a fresh subtitle delay for the new file.
     let prefs = player_prefs::load(pool, profile_id)
@@ -289,9 +306,33 @@ async fn play_url_inner(
     if let Some(volume) = volume {
         let _ = backend.set_volume(volume).await;
     }
-    backend
+    if let Err(error) = backend
         .load(&load_url, hdrs.as_deref(), audio_url.as_deref())
-        .await?;
+        .await
+    {
+        // A player this very call started, whose first load failed, would otherwise stay open as
+        // an empty mpv window nothing is playing in. (A load cancelled by Stop or a newer play
+        // already belongs to whoever cancelled it.)
+        let cancelled = matches!(&error, PlayerError::Mpv(message)
+            if message == crate::playback::mpv_ipc::CANCELLED_MESSAGE);
+        if !cancelled {
+            // The resolved address may have been a token that has since expired (a 403, a
+            // dropped connection): the next attempt resolves the original afresh.
+            lumen_core::redirect::invalidate(&original_load_url);
+        }
+        if created_here && !cancelled {
+            let mut guard = backend_cell.lock().await;
+            if guard
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &backend))
+            {
+                guard.take();
+                drop(guard);
+                let _ = backend.stop().await;
+            }
+        }
+        return Err(error);
+    }
 
     // Resume follows this title whichever source is playing it; passing the channel lets the
     // lookup derive the same content_key another source's history was saved under.
@@ -800,6 +841,7 @@ pub async fn list_channels_cmd(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn list_channels_page_cmd(
     playlist_id: Option<i64>,
     query: Option<String>,
@@ -807,10 +849,11 @@ pub async fn list_channels_page_cmd(
     after_name: Option<String>,
     after_id: Option<i64>,
     limit: Option<i64>,
+    substring: Option<bool>,
     app: AppHandle,
 ) -> Result<crate::db::ChannelPage> {
     let pool = ensure_db(&app).await?;
-    crate::db::list_channels_page(
+    crate::db::list_channels_page_mode(
         pool,
         playlist_id,
         query.as_deref(),
@@ -818,6 +861,7 @@ pub async fn list_channels_page_cmd(
         after_name.as_deref(),
         after_id,
         limit.unwrap_or(500),
+        substring.unwrap_or(false),
     )
     .await
 }
@@ -1004,6 +1048,13 @@ pub async fn search_engine(
                 result.get("available").and_then(|value| value.as_bool()),
             ) {
                 let status = result.get("status").and_then(|value| value.as_i64());
+                // A search probe is a side effect the user did not ask for, so only what it
+                // actually learned is recorded: a working stream, or an HTTP error the server
+                // really sent. "No answer" (a probe that was skipped, timed out or blocked) says
+                // nothing about the entry and must not hide it under "hide unavailable".
+                if !available && status.is_none() {
+                    continue;
+                }
                 let error = if available {
                     None
                 } else {
@@ -1296,12 +1347,17 @@ pub async fn probe_urls(ids: Vec<i64>, app: AppHandle) -> Result<ProbeResponse> 
 
     let mut results = Vec::with_capacity(id_and_target.len());
     for ((channel_id, target), outcome) in id_and_target.into_iter().zip(outcomes) {
-        let res = outcome.unwrap_or(ProbeResult {
-            url: target.url,
-            live: false,
-            status: None,
-            content_type: None,
-        });
+        // A probe cut off by the overall deadline never answered either way: report it as not
+        // live to the page, but do not write "Unreachable" onto the channel for it.
+        let Some(res) = outcome else {
+            results.push(ProbeResult {
+                url: target.url,
+                live: false,
+                status: None,
+                content_type: None,
+            });
+            continue;
+        };
         let err_msg = if res.live {
             None
         } else {

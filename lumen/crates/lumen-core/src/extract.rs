@@ -137,7 +137,46 @@ pub fn managed_binary_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("bin").join("yt-dlp")
 }
 
-/// Resolves which `yt-dlp` binary to run: managed binary in app data dir first, then system `yt-dlp` on PATH.
+/// Reads a yt-dlp version (`2026.10.26`, or a nightly `2026.10.26.232045`) as its numeric parts.
+fn version_parts(version: &str) -> Option<Vec<u64>> {
+    let parts: Vec<u64> = version
+        .trim()
+        .split('.')
+        .map(|part| part.parse::<u64>())
+        .collect::<std::result::Result<_, _>>()
+        .ok()?;
+    (!parts.is_empty()).then_some(parts)
+}
+
+/// Whether `found` is at least `minimum`, comparing part by part (a missing part is zero).
+/// `None` when either is not a version in yt-dlp's date format.
+pub fn version_at_least(found: &str, minimum: &str) -> Option<bool> {
+    let (found, minimum) = (version_parts(found)?, version_parts(minimum)?);
+    for index in 0..found.len().max(minimum.len()) {
+        let (a, b) = (
+            found.get(index).copied().unwrap_or(0),
+            minimum.get(index).copied().unwrap_or(0),
+        );
+        if a != b {
+            return Some(a > b);
+        }
+    }
+    Some(true)
+}
+
+static WARNED_ABOUT_PATH_EXTRACTOR: AtomicBool = AtomicBool::new(false);
+
+fn warn_once(message: &str) {
+    if !WARNED_ABOUT_PATH_EXTRACTOR.swap(true, Ordering::Relaxed) {
+        tracing::warn!("{message}");
+    }
+}
+
+/// Resolves which `yt-dlp` binary to run: managed binary in app data dir first, then a system
+/// `yt-dlp` on PATH. The one on PATH is not covered by the pinned checksum, so it is only used
+/// when it is at least as new as the pinned release: an older one is what sites have already
+/// broken, and silently running it reads as "Lumen cannot play this". It is reported once and
+/// ignored; installing the managed copy from Settings fixes it.
 pub fn resolve_ytdlp_binary(app_data_dir: Option<&Path>) -> Option<(PathBuf, &'static str)> {
     if let Some(dir) = app_data_dir {
         let managed = managed_binary_path(dir);
@@ -147,17 +186,42 @@ pub fn resolve_ytdlp_binary(app_data_dir: Option<&Path>) -> Option<(PathBuf, &'s
     }
     let mut system = Command::new("yt-dlp");
     crate::child_env::scrub(&mut system);
-    if let Ok(output) = system
+    let output = system
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
-        && output.status.success()
-    {
-        return Some((PathBuf::from("yt-dlp"), "system"));
+        .ok()
+        .filter(|output| output.status.success())?;
+    let found = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if let Ok(pinned) = pinned_manifest() {
+        match version_at_least(&found, &pinned.version) {
+            Some(true) => {}
+            Some(false) => {
+                warn_once(&format!(
+                    "the yt-dlp on PATH is version {found}, older than the pinned {}; it is not used. Install the managed copy from Settings.",
+                    pinned.version
+                ));
+                return None;
+            }
+            None => warn_once(&format!(
+                "the yt-dlp on PATH reports an unrecognised version ({found}); using it unchecked."
+            )),
+        }
     }
-    None
+    Some((PathBuf::from("yt-dlp"), "system"))
+}
+
+/// Looks at the extractor once at startup and says in the log which copy will be used (or why
+/// none will), so a stale or missing yt-dlp is visible before anyone tries to play a page.
+pub fn check_extractor_at_startup(app_data_dir: Option<&Path>) {
+    match resolve_ytdlp_binary(app_data_dir) {
+        Some((path, source)) => {
+            tracing::info!(source, path = %path.display(), "yt-dlp extractor available");
+        }
+        None => tracing::info!("no usable yt-dlp extractor; page links need one from Settings"),
+    }
 }
 
 /// Queries the version string of a yt-dlp binary, if runnable.
@@ -818,6 +882,18 @@ mod tests {
     }
 
     #[test]
+    fn versions_compare_by_date_parts_and_nightlies_count_as_newer_than_their_release() {
+        assert_eq!(version_at_least("2026.10.26", "2026.10.26"), Some(true));
+        assert_eq!(version_at_least("2026.11.01", "2026.10.26"), Some(true));
+        assert_eq!(version_at_least("2026.10.25", "2026.10.26"), Some(false));
+        assert_eq!(version_at_least("2025.12.31", "2026.01.01"), Some(false));
+        assert_eq!(version_at_least("2026.10.26.232045", "2026.10.26"), Some(true));
+        assert_eq!(version_at_least("2026.10.26", "2026.10.26.1"), Some(false));
+        assert_eq!(version_at_least("not a version", "2026.10.26"), None);
+        assert_eq!(version_at_least("", "2026.10.26"), None);
+    }
+
+    #[test]
     fn parses_combined_stream_json() {
         let raw = br#"{
             "title": "Big Buck Bunny",
@@ -905,21 +981,21 @@ mod tests {
     /// The two lines of the real upstream `SHA2-256SUMS` for the pinned release (downloaded from
     /// the release page and the binary itself hashed). The manifest once shipped with different
     /// values, and nothing noticed because the pin was not enforced.
-    const UPSTREAM_SUMS_2026_02_04: &str = "\
-051ed827a836f56772d662c38ebfabd8d613a21a39376737d56893184bcc53f8  yt-dlp_linux
-6b83f090768a9d428456b7998a5b8fc1c628895647df2763f54f9552601b732e  yt-dlp_linux_aarch64
+    const UPSTREAM_SUMS_2026_10_26: &str = "\
+767ba9dce7052aa196f8b12652f433d76de128ba168966fa84b6394d5e6c6795  yt-dlp_linux
+e87e9533e89fe5889abaa21f5114dfe7756d6aa6219b83551add04d48b18e483  yt-dlp_linux_aarch64
 ";
 
     #[test]
     fn the_pinned_manifest_matches_the_upstream_release_checksums() {
         let manifest = pinned_manifest().unwrap();
         assert_eq!(
-            manifest.version, "2026.02.04",
-            "update UPSTREAM_SUMS_2026_02_04 when the pin moves"
+            manifest.version, "2026.10.26",
+            "update UPSTREAM_SUMS_2026_10_26 when the pin moves"
         );
         assert!(!manifest.assets.is_empty());
         for (target, asset) in &manifest.assets {
-            let published = parse_checksum_for_asset(UPSTREAM_SUMS_2026_02_04, &asset.asset)
+            let published = parse_checksum_for_asset(UPSTREAM_SUMS_2026_10_26, &asset.asset)
                 .unwrap_or_else(|| {
                     panic!(
                         "no upstream checksum recorded for {target} ({})",
@@ -971,7 +1047,7 @@ mod tests {
             .expect("pinned download verifies");
         assert!(status.available);
         assert_eq!(status.source, "managed");
-        assert_eq!(status.version.as_deref(), Some("2026.02.04"));
+        assert_eq!(status.version.as_deref(), Some("2026.10.26"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

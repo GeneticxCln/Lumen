@@ -450,7 +450,7 @@ export function SettingsPage({
                     ? extractor.version
                       ? t("settings.extractor.activeWithVersion", { source: extractor.source, version: extractor.version, pinned: extractor.pinnedVersion })
                       : t("settings.extractor.active", { source: extractor.source, pinned: extractor.pinnedVersion })
-                    : t("settings.extractor.notInstalled", { pinned: extractor?.pinnedVersion || "2026.02.04" })}
+                    : t("settings.extractor.notInstalled", { pinned: extractor?.pinnedVersion || "" })}
                 </p>
                 {extractorNotice && <p className="saved-badge" role="status">{extractorNotice}</p>}
               </div>

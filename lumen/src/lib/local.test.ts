@@ -54,3 +54,10 @@ const empty = await mapLimit([], 3, async () => 0);
 assert(empty.length === 0, "An empty scan resolves without starting a worker");
 
 console.log("Local media checks passed; labels, durations, paths and bounded folder scanning behave.");
+
+import { localDateString } from "./local.ts";
+{
+  const lateEvening = new Date(2026, 0, 5, 23, 30);
+  if (localDateString(lateEvening) !== "2026-01-05") throw new Error("localDateString must use the local calendar day, not the UTC one");
+  console.log("Local date checks passed.");
+}

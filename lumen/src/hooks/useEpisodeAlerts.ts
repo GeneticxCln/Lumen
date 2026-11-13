@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { newEpisodeAlerts, rememberNotified } from "../lib/alerts";
 import { upcomingEpisodes } from "../lib/tauri";
+import { localDateString } from "../lib/local";
 import { t, tn } from "../i18n/index.ts";
 
 const ENABLED_KEY = "lumen.alerts.enabled";
@@ -54,7 +55,7 @@ async function check(profileId: number | null): Promise<void> {
   if (!episodeAlertsEnabled()) return;
   const upcoming = (await upcomingEpisodes(true)) ?? [];
   const seen = seenFor(profileId);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateString();
   const alerts = newEpisodeAlerts(upcoming, today, new Set(seen));
   if (alerts.length === 0) return;
 

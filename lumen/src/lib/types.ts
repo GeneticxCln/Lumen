@@ -30,6 +30,8 @@ export interface ChannelPage {
   next_after_name: string | null;
   next_after_id: number | null;
   has_more: boolean;
+  /** The page was matched as a substring; pass it back with the cursor for the next page. */
+  substring?: boolean;
 }
 
 export interface FacetCount {
@@ -199,6 +201,10 @@ export interface PlayerState extends PlayerOptions {
   error?: string;
   /** The player's control connection ended (mpv closed or crashed); nothing is playing. */
   ended?: boolean;
+  /** The player's own window is fullscreen (it can change from inside mpv). */
+  fullscreen?: boolean;
+  /** mpv's own volume, 0 to 150; changes made inside its window arrive here. */
+  volume?: number | null;
 }
 
 export const DEFAULT_PLAYER_OPTIONS: PlayerOptions = {

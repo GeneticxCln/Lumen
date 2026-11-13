@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{Pool, Row, Sqlite, SqliteConnection};
 use tokio::sync::Mutex;
 
+use crate::content_key::ContentKey;
 use crate::db::{clean_profile_name, get_setting, set_setting};
 use crate::error::{PlayerError, Result};
 use crate::sync_crypto::{SealedItem, SyncKeys};
@@ -508,6 +509,16 @@ pub(crate) async fn apply_favorite(conn: &mut SqliteConnection, item: &SyncItem)
         return Ok(());
     }
 
+    // An older client may send no key; a row without one would also block the content-key
+    // migration's verification, so derive the same stream fallback it would have used.
+    let derived_key;
+    let content_key = match content_key {
+        Some(key) => Some(key),
+        None => {
+            derived_key = ContentKey::for_stream_url(url).into_string();
+            Some(derived_key.as_str())
+        }
+    };
     sqlx::query(
         "INSERT INTO favorites (profile_id, channel_url, content_key, active, updated_at) VALUES (?, ?, ?, 1, ?)
          ON CONFLICT (profile_id, channel_url) DO UPDATE SET
@@ -609,6 +620,14 @@ pub(crate) async fn apply_progress(conn: &mut SqliteConnection, item: &SyncItem)
         }
     }
 
+    let derived_key;
+    let content_key = match content_key {
+        Some(key) => Some(key),
+        None => {
+            derived_key = ContentKey::for_stream_url(url).into_string();
+            Some(derived_key.as_str())
+        }
+    };
     // One history row per stream, as add_history keeps it. A channel link is taken from any
     // local channel with the same URL, if one exists.
     sqlx::query("DELETE FROM history WHERE profile_id = ? AND (path = ? OR (content_key IS NOT NULL AND content_key = ?))")
@@ -638,7 +657,10 @@ pub(crate) async fn apply_progress(conn: &mut SqliteConnection, item: &SyncItem)
 /// Queues everything already on this device the first time it signs in, so existing profiles,
 /// favorites and history reach the account.
 async fn queue_all(pool: &Pool<Sqlite>) -> Result<()> {
-    let mut tx = pool.begin().await.map_err(sql_err)?;
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(sql_err)?;
 
     let profile_ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM profiles")
         .fetch_all(&mut *tx)
@@ -854,7 +876,11 @@ async fn check(response: reqwest::Response) -> Result<reqwest::Response> {
     Err(describe(status, code.as_deref()))
 }
 
-async fn push_batch(remote: &Remote, items: &[SyncItem]) -> Result<()> {
+/// Records this device sent in the current cycle, by sealed id, with the `updated_at` that was
+/// sent. A pull that hands back exactly the same record is this device's own push, not news.
+type PushedItems = std::collections::HashMap<String, i64>;
+
+async fn push_batch(remote: &Remote, items: &[SyncItem], pushed: &mut PushedItems) -> Result<()> {
     let sealed = items
         .iter()
         .map(|item| remote.keys.seal(item))
@@ -864,10 +890,14 @@ async fn push_batch(remote: &Remote, items: &[SyncItem]) -> Result<()> {
         .json(&json!({ "items": sealed }))
         .send()
         .await?;
-    check(response).await.map(|_| ())
+    check(response).await?;
+    for item in &sealed {
+        pushed.insert(item.id.clone(), item.updated_at);
+    }
+    Ok(())
 }
 
-async fn push_pending(pool: &Pool<Sqlite>, remote: &Remote) -> Result<()> {
+async fn push_pending(pool: &Pool<Sqlite>, remote: &Remote, pushed: &mut PushedItems) -> Result<()> {
     loop {
         let rows = sqlx::query(
             "SELECT kind, item_key, payload, updated_at, deleted FROM sync_queue ORDER BY updated_at LIMIT ?",
@@ -892,7 +922,7 @@ async fn push_pending(pool: &Pool<Sqlite>, remote: &Remote) -> Result<()> {
             });
         }
 
-        push_batch(remote, &items).await?;
+        push_batch(remote, &items, pushed).await?;
 
         // Remove only what was sent. A newer edit to the same record has a later updated_at and
         // stays queued.
@@ -956,7 +986,11 @@ async fn pull_page(remote: &Remote, cursor: &PullCursor) -> Result<PullPage> {
 /// how many records failed verification (not applied; the pull carries on past them), and how
 /// many were actually applied — the latter is what tells a caller whether anything local changed
 /// and a UI showing it needs to refresh.
-async fn pull_remote(pool: &Pool<Sqlite>, remote: &Remote) -> Result<(i64, i64)> {
+async fn pull_remote(
+    pool: &Pool<Sqlite>,
+    remote: &Remote,
+    pushed: &PushedItems,
+) -> Result<(i64, i64)> {
     let saved: i64 = get_setting(pool, CURSOR_SETTING)
         .await?
         .and_then(|value| value.parse().ok())
@@ -972,12 +1006,19 @@ async fn pull_remote(pool: &Pool<Sqlite>, remote: &Remote) -> Result<(i64, i64)>
     loop {
         let page = pull_page(remote, &cursor).await?;
 
-        let mut tx = pool.begin().await.map_err(sql_err)?;
+        let mut tx = pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(sql_err)?;
         for sealed in &page.items {
             match remote.keys.open(sealed) {
                 Ok(item) => {
                     apply_remote(&mut tx, &item).await?;
-                    applied += 1;
+                    // This device's own push coming straight back changed nothing here; counting
+                    // it made every sync during playback reload the whole library.
+                    if pushed.get(&sealed.id) != Some(&sealed.updated_at) {
+                        applied += 1;
+                    }
                 }
                 Err(_) => skipped += 1,
             }
@@ -1042,8 +1083,11 @@ pub(crate) async fn sync_with(pool: &Pool<Sqlite>, remote: &Remote) -> Result<Sy
         set_setting(pool, SEEDED_SETTING, "1").await?;
     }
 
-    push_pending(pool, remote).await?;
-    let (skipped, applied) = pull_remote(pool, remote).await?;
+    // A push that fails (a full group, say) must not also stop this device from receiving what
+    // other devices wrote: pull regardless, and report the push error once that is done.
+    let mut pushed = PushedItems::new();
+    let push_result = push_pending(pool, remote, &mut pushed).await;
+    let (skipped, applied) = pull_remote(pool, remote, &pushed).await?;
     set_setting(pool, SKIPPED_SETTING, &skipped.to_string()).await?;
     set_setting(pool, LAST_SYNC_SETTING, &now_ms().to_string()).await?;
     if applied > 0
@@ -1051,6 +1095,7 @@ pub(crate) async fn sync_with(pool: &Pool<Sqlite>, remote: &Remote) -> Result<Sy
     {
         callback(applied);
     }
+    push_result?;
     status(pool).await
 }
 

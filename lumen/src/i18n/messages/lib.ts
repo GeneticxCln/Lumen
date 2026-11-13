@@ -49,6 +49,7 @@ export const lib = {
   "lib.notice.sourceFailed": "{title} failed to play from that source, so Lumen switched to another one.",
   "lib.notice.reconnecting": "{title} dropped its connection, reconnecting…",
   "lib.notice.thisTitle": "This title",
+  "lib.notice.playerClosed": "The player was closed, so {title} stopped.",
 
   "lib.units.bytes": "{value} B",
   "lib.units.kilobytes": "{value} KB",

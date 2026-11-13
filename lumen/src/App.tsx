@@ -20,15 +20,15 @@ import { SearchEnginePage } from "./components/SearchEnginePage";
 import { usePlayer } from "./hooks/usePlayer";
 import { useChannels } from "./hooks/useChannels";
 import { useBrowse } from "./hooks/useBrowse";
-import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, getPlayerPrefs, listProfiles, onSyncApplied, setPlayerFullscreen, tmdbStatus, updateRestart, updateState, libraryCatalog } from "./lib/tauri";
+import { activeProfile, boardNewChannelIds, setEmbeddedVideo, classifyOpenTargets, importPlaylistFile, takeLaunchTargets, browseTmdb, listEpisodeMarks, setEpisodesWatched, upcomingEpisodes, errorMessage, getHistory, getPlayerPrefs, listChannelsPage, listProfiles, onSyncApplied, setPlayerFullscreen, tmdbStatus, updateRestart, updateState, libraryCatalog } from "./lib/tauri";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { BrowseTitle } from "./lib/types";
 import type { CastState, Channel, HistoryEntry, PlayerPrefs, Profile, UpdateEventPayload } from "./lib/types";
-import { readPreferences, recommendChannels, catalogShelves, catalogShelvesFromServer, contentKind, isAdult, applyTheme, buildFacets, matchesFacets, facetCount, EMPTY_FACETS } from "./lib/discovery";
+import { readPreferences, recommendChannels, catalogShelves, catalogShelvesFromServer, contentKind, isAdult, applyTheme, buildFacets, matchesFacets, facetCount, dedupeByTitle, EMPTY_FACETS } from "./lib/discovery";
 import type { CatalogShelf } from "./lib/discovery";
-import { isLocalPath } from "./lib/local";
+import { isLocalPath, localDateString } from "./lib/local";
 import { refreshNetworkPrivacyEnabled } from "./lib/networkPrivacy";
-import { nextEpisode } from "./lib/episodes";
+import { episodeInfo, nextEpisode } from "./lib/episodes";
 import { buildBoard } from "./lib/board";
 import { launchNotice, planLaunch } from "./lib/launch";
 import type { OpenTarget } from "./lib/launch";
@@ -102,7 +102,14 @@ function App() {
   const player = usePlayer({ onNotice: (message) => setNotice(message) });
   const details = library.allChannels.find((channel) => channel.id === detailId) || null;
   const currentProfile = profiles.find((profile) => profile.id === activeProfileId) || null;
-  const setDetails = (channel: Channel | null) => setDetailId(channel?.id ?? null);
+  // A channel opened from a search hit or a shelf may not be on the loaded page (or may be a
+  // partial stand-in built from a search result); fetching the real row by id lets the dialog and
+  // its episode list use it.
+  const ensureLibraryChannels = library.ensureChannels;
+  const setDetails = (channel: Channel | null) => {
+    setDetailId(channel?.id ?? null);
+    if (channel) void ensureLibraryChannels([channel.id]);
+  };
 
   // `verifiedProfileId` is set only when the caller just checked a PIN (or confirmed none is
   // needed) for that exact profile, so a profile switch that did not go through that check (for
@@ -152,7 +159,7 @@ function App() {
 
   useEffect(() => {
     let active = true;
-    getHistory(200).then((entries) => { if (active) { setHistory(entries); setHistoryError(null); } }).catch((error) => { if (active) setHistoryError(errorMessage(error)); });
+    getHistory(500).then((entries) => { if (active) { setHistory(entries); setHistoryError(null); } }).catch((error) => { if (active) setHistoryError(errorMessage(error)); });
     return () => { active = false; };
   }, [refresh, player.currentUrl, activeProfileId]);
 
@@ -198,15 +205,18 @@ function App() {
     try { await action(); } catch (error) { setNotice(errorMessage(error)); }
   }
 
+  // A newer play supersedes one still loading (the backend cancels the older load), so picking
+  // another channel while a slow stream loads is never ignored; only the latest play clears `busy`.
+  const playTicket = useRef(0);
   async function play(channel: Channel) {
-    if (busy) return;
+    const ticket = ++playTicket.current;
     setBusy(true);
     // Open the player and its buffering spinner before waiting for mpv. A slow stream can take
     // up to its 30s load timeout, and until now nothing appeared until that finished.
     setPlayerOpen(true);
     setDetails(null);
     await run(async () => { await player.playChannel(channel, preferences.defaultVolume); });
-    setBusy(false);
+    if (ticket === playTicket.current) setBusy(false);
   }
 
   // Lets the user pick a subtitle file for what is playing now.
@@ -341,6 +351,13 @@ function App() {
     await setPlayerFullscreen(next);
     setIsFullscreen(next);
   }, [isFullscreen]);
+  // Follow a fullscreen change made inside the mpv window itself; the in-window player is
+  // fullscreened through the app window, which this page already drives.
+  const reportedFullscreen = player.playerState.fullscreen;
+  useEffect(() => {
+    if (reportedFullscreen === undefined || !player.currentUrl || embeddedActive) return;
+    setIsFullscreen(reportedFullscreen);
+  }, [reportedFullscreen]); // eslint-disable-line react-hooks/exhaustive-deps
   const closePlayer = useCallback(() => {
     setPlayerOpen(false);
     if (isFullscreen) void run(toggleFullscreen);
@@ -504,6 +521,21 @@ function App() {
     autoplayedFor.current = player.currentUrl;
     void playRef.current(followingEpisode);
   }, [startNextNow, followingEpisode, player.currentUrl]);
+  // The rest of a series (the next episode, the episode list) is not necessarily on the loaded
+  // page of a large library: fetch its sibling entries by the series name when one is opened or
+  // playing.
+  const addLibraryChannels = library.addChannels;
+  const hydrateSeriesOf = useCallback((channel: Channel | null | undefined) => {
+    const info = channel ? episodeInfo(channel) : null;
+    if (!info) return () => {};
+    let active = true;
+    listChannelsPage(null, info.seriesKey, null, null, null, 500)
+      .then((page) => { if (active) addLibraryChannels(page.channels); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [addLibraryChannels]);
+  useEffect(() => hydrateSeriesOf(currentChannel), [currentChannel?.id, hydrateSeriesOf]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => hydrateSeriesOf(details), [details?.id, hydrateSeriesOf]); // eslint-disable-line react-hooks/exhaustive-deps
   const byKind = useMemo(() => ({
     movie: available.filter((channel) => contentKind(channel) === "movie"),
     series: available.filter((channel) => contentKind(channel) === "series"),
@@ -512,7 +544,7 @@ function App() {
   // Favorites always show regardless of availability (unlike `available`, there's no
   // `hideUnavailable` check here), but the Adult toggle is a content-visibility policy, not an
   // availability signal, so it still applies here the same as everywhere else.
-  const myList = useMemo(() => library.allChannels.filter((channel) => library.favoriteIds.has(channel.id) && !isLocalPath(channel.url) && (preferences.showAdult || !isAdult(channel))), [library.allChannels, library.favoriteIds, preferences.showAdult]);
+  const myList = useMemo(() => dedupeByTitle(library.allChannels.filter((channel) => library.favoriteIds.has(channel.id) && !isLocalPath(channel.url) && (preferences.showAdult || !isAdult(channel)))), [library.allChannels, library.favoriteIds, preferences.showAdult]);
   // Entries added since this profile last used Lumen. The backend answers the same way for the
   // whole session, so this is "since the previous session" however often it is asked.
   const [newChannelIds, setNewChannelIds] = useState<number[]>([]);
@@ -549,7 +581,7 @@ function App() {
       setMarks((await listEpisodeMarks()) ?? []);
     });
   };
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateString();
   const upcomingCards = useMemo<UpcomingCard[]>(() => upcoming.flatMap((item) => {
     const label = describeUpcoming(item, today);
     if (!label) return [];
@@ -580,7 +612,9 @@ function App() {
   const browseChannels = useMemo(() => baseChannels.filter((channel) => matchesFacets(channel, facetSelection)), [baseChannels, facetSelection]);
   // When the full-library index exists, the backend owns both counts and filtering. Otherwise
   // the pre-index behavior (loaded pages only) keeps the page usable while it builds.
-  const useServerBrowse = serverBrowse.ready === true && serverBrowse.facets !== null;
+  // The server-side rails know nothing about the header search, so a search falls back to the
+  // loaded, already-searched results instead of silently ignoring what was typed.
+  const useServerBrowse = serverBrowse.ready === true && serverBrowse.facets !== null && !library.searchQuery.trim();
   const shownFacets = useServerBrowse ? serverBrowse.facets! : facets;
   const shownBrowseChannels = useServerBrowse ? serverBrowse.channels : browseChannels;
   const shownBrowseTotal = useServerBrowse ? serverBrowse.total : browseChannels.length;

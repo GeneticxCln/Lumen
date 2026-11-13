@@ -30,6 +30,11 @@ interface PlayerOptions {
   onNotice?: (message: string) => void;
 }
 
+/** The text the backend gives a load that Stop (or a newer play) interrupted. */
+function isCancelledPlayback(failure: unknown): boolean {
+  return errorMessage(failure).includes("stopped before the stream finished loading");
+}
+
 export function usePlayer(options: PlayerOptions = {}) {
   const onNoticeRef = useRef(options.onNotice);
   onNoticeRef.current = options.onNotice;
@@ -56,7 +61,14 @@ export function usePlayer(options: PlayerOptions = {}) {
   // it has been overtaken and must not apply its result.
   const playEpochRef = useRef(0);
   const [errorTick, setErrorTick] = useState(0);
+  // A failure that is not about the stream (a progress save, the event listener) must never feed
+  // the retry/fallback effect below, or a database hiccup would restart or switch playback.
+  const reportSideError = useCallback((failure: unknown) => {
+    onNoticeRef.current?.(errorMessage(failure));
+  }, []);
   const reportError = useCallback((failure: unknown) => {
+    // Stop interrupting a load is not a failure of the stream: nothing to retry or fall back to.
+    if (isCancelledPlayback(failure)) return;
     setPlayerState((previous) => ({ ...previous, error: errorMessage(failure) }));
     // The retry/fallback effect keys off this, not the message: two attempts can fail with the
     // exact same text, and the initial load's rejection has no backend state event of its own.
@@ -74,18 +86,42 @@ export function usePlayer(options: PlayerOptions = {}) {
 
   useEffect(() => {
     const unlistenPromise = onPlayerState((state) => {
+      // mpv went away while something was playing (its window was closed, or it crashed): the
+      // page must stop presenting it as playing. While a load is still in progress the retry
+      // logic below owns the failure instead, so it keeps the current attempt.
+      if (state.ended && !progressRef.current.playerState.buffering && progressRef.current.currentUrl) {
+        const title = currentTitleRef.current ?? t("lib.notice.thisTitle");
+        playEpochRef.current += 1;
+        clearPendingRetry();
+        fallbackFromRef.current = null;
+        headersRef.current = undefined;
+        currentTitleRef.current = null;
+        setCurrentTitle(null);
+        setCurrentUrl(null);
+        setCurrentChannelId(undefined);
+        setPlayerState(DEFAULT_PLAYER_STATE);
+        onNoticeRef.current?.(t("lib.notice.playerClosed", { title }));
+        return;
+      }
       setPlayerState(state);
+      if (typeof state.volume === "number") {
+        // A change made inside the mpv window (its keys, its mouse wheel) shows on the page too.
+        const heard = Math.max(0, Math.min(100, Math.round(state.volume)));
+        setVolumeState(heard);
+        setMuted(heard === 0);
+        if (heard > 0) prevVolumeRef.current = heard;
+      }
       if (state.title && !currentTitleRef.current) {
         currentTitleRef.current = state.title;
         setCurrentTitle(state.title);
       }
       if (state.error) setErrorTick((n) => n + 1);
     });
-    unlistenPromise.catch(reportError);
+    unlistenPromise.catch(reportSideError);
     return () => {
-      unlistenPromise.then((fn) => fn()).catch(reportError);
+      unlistenPromise.then((fn) => fn()).catch(reportSideError);
     };
-  }, [reportError]);
+  }, [reportSideError, clearPendingRetry]);
 
   // A clean resumption of playback (buffering finished, no error) on the URL a retry was tracking
   // resets its attempt budget, so a stream that drops again later gets a fresh set of retries
@@ -95,9 +131,9 @@ export function usePlayer(options: PlayerOptions = {}) {
     if (retryStateRef.current?.url === progressRef.current.currentUrl) retryStateRef.current = null;
   }, [playerState.buffering, playerState.error]);
 
-  // When the current stream fails, first try the same URL again a few times with backoff — mpv's
-  // own --stream-lavf-o reconnect flags (see mpv_ipc.rs) handle most drops on their own, so by the
-  // time this sees an error mpv has already given up — before moving to the next ranked source.
+  // When the current stream fails, first try the same URL again a few times with backoff (mpv is
+  // not given reconnect options of its own, see mpv_ipc.rs, so this is the only retry) before
+  // moving to the next ranked source.
   useEffect(() => {
     const current = progressRef.current;
     const failedUrl = current.currentUrl;
@@ -166,11 +202,11 @@ export function usePlayer(options: PlayerOptions = {}) {
     const timer = setInterval(() => {
       const current = progressRef.current;
       if (current.currentUrl && current.playerState.time > 1 && current.playerState.duration > 0) {
-        saveProgress(current.currentUrl, current.playerState.time, current.playerState.duration, current.currentChannelId).catch(reportError);
+        saveProgress(current.currentUrl, current.playerState.time, current.playerState.duration, current.currentChannelId).catch(reportSideError);
       }
     }, 5000);
     return () => clearInterval(timer);
-  }, [currentUrl, currentChannelId, playerState.paused, playerState.duration, reportError]);
+  }, [currentUrl, currentChannelId, playerState.paused, playerState.duration, reportSideError]);
 
   // The backend sets the volume before the file loads; this only brings the UI state in line.
   const applyStartVolume = useCallback((startVolume?: number) => {
@@ -213,6 +249,8 @@ export function usePlayer(options: PlayerOptions = {}) {
     try {
       await playUrl(channel.url, parsedHeaders, channel.id, startVolume);
     } catch (failure) {
+      // Superseded by Stop or a newer play: not an error for the user.
+      if (isCancelledPlayback(failure)) return;
       reportError(failure);
       throw failure;
     }
@@ -243,6 +281,7 @@ export function usePlayer(options: PlayerOptions = {}) {
       try {
         await playUrl(url, headers, channelId, startVolume, audioUrl);
       } catch (failure) {
+        if (isCancelledPlayback(failure)) return;
         reportError(failure);
         throw failure;
       }
@@ -309,7 +348,7 @@ export function usePlayer(options: PlayerOptions = {}) {
         playerState.duration,
         currentChannelId,
         true
-      ).catch(reportError);
+      ).catch(reportSideError);
     }
     await stopCmd();
     headersRef.current = undefined;
@@ -317,7 +356,7 @@ export function usePlayer(options: PlayerOptions = {}) {
     setCurrentUrl(null);
     setCurrentChannelId(undefined);
     setPlayerState(DEFAULT_PLAYER_STATE);
-  }, [currentUrl, currentChannelId, playerState.time, playerState.duration, reportError, clearPendingRetry]);
+  }, [currentUrl, currentChannelId, playerState.time, playerState.duration, reportSideError, clearPendingRetry]);
 
   const selectTrack = useCallback(async (kind: PlayerTrackKind, id: string) => {
     await setPlayerTrackCmd(kind, id);

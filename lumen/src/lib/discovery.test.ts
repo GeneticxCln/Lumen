@@ -1,4 +1,4 @@
-import { filterChannels, recommendChannels, uniqueHistory, readPreferences, artworkCategory, themes, resolveTheme, contentKind, inferGenre, inferGenres, groupsOf, genresOf, yearOf, matchesFacets, buildFacets, facetCount, catalogShelves, isCatalogTitle, browseCaption, isAdult, EMPTY_FACETS, ALL_FACETS, UNKNOWN_FACET } from "./discovery.ts";
+import { filterChannels, recommendChannels, uniqueHistory, readPreferences, artworkCategory, themes, resolveTheme, contentKind, inferGenre, inferGenres, groupsOf, genresOf, yearOf, matchesFacets, buildFacets, facetCount, catalogShelves, isCatalogTitle, browseCaption, isAdult, dedupeByTitle, titleIdentity, EMPTY_FACETS, ALL_FACETS, UNKNOWN_FACET } from "./discovery.ts";
 import type { FacetValue } from "./discovery.ts";
 import type { Channel, HistoryEntry } from "./types.ts";
 
@@ -173,3 +173,16 @@ assert(isAdult({ ...adultByGroup, group_title: "xxx adult" }), "Adult classifica
 assert(!isAdult(notAdult), "A plain '18' in a title does not falsely match the adult-content guard");
 assert(filterChannels([adultByGroup], "", "all", false, false).length === 0, "Adult titles are hidden when showAdult is off");
 assert(filterChannels([adultByGroup], "", "all", false, true).length === 1, "Adult titles appear once showAdult is on");
+
+// --- One card per title -------------------------------------------------------
+const copyA: Channel = { id: 301, playlist_id: 1, name: "News One", url: "http://a/x", tvg_id: "news.one" };
+const copyB: Channel = { id: 302, playlist_id: 2, name: "News One HD", url: "http://b/y", tvg_id: "NEWS.ONE" };
+const placeholderA: Channel = { id: 303, playlist_id: 1, name: "A", url: "http://a/1", tvg_id: "None" };
+const placeholderB: Channel = { id: 304, playlist_id: 1, name: "B", url: "http://a/2", tvg_id: "None" };
+assert(titleIdentity(copyA) === titleIdentity(copyB), "The same tvg-id (any case) is one title");
+assert(titleIdentity(placeholderA) !== titleIdentity(placeholderB), "A placeholder tvg-id such as None never merges two titles");
+const episode1: Channel = { id: 305, playlist_id: 1, name: "Show S01E01", url: "u305", tmdb_id: 9, tmdb_type: "tv" };
+const episode2: Channel = { id: 306, playlist_id: 1, name: "Show S01E02", url: "u306", tmdb_id: 9, tmdb_type: "tv" };
+assert(titleIdentity(episode1) !== titleIdentity(episode2), "Two episodes of one TMDB series are two titles");
+assert(dedupeByTitle([copyA, copyB, placeholderA, placeholderB]).map((c) => c.id).join() === "301,303,304", "Only the first source of a title is kept");
+console.log("Title identity checks passed.");

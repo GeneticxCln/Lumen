@@ -121,6 +121,23 @@ struct UpdateEvent {
     page: String,
 }
 
+/// The tag of an update that is installed and waiting for a restart. Once the running version is
+/// that very release the wait is over, so the record is dropped: it used to stay forever, which
+/// kept Settings offering only "Restart" after the first update and hid every later one.
+async fn pending_restart_tag(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<Option<String>> {
+    let Some(tag) = get_setting(pool, INSTALLED_TAG_SETTING)
+        .await?
+        .filter(|tag| !tag.is_empty())
+    else {
+        return Ok(None);
+    };
+    if tag.trim_start_matches('v') == CURRENT_VERSION {
+        crate::db::delete_setting(pool, INSTALLED_TAG_SETTING).await?;
+        return Ok(None);
+    }
+    Ok(Some(tag))
+}
+
 #[tauri::command]
 pub async fn update_state_cmd(app: AppHandle) -> Result<UpdateState> {
     let pool = ensure_db(&app).await?;
@@ -131,9 +148,7 @@ pub async fn update_state_cmd(app: AppHandle) -> Result<UpdateState> {
         last_checked: get_setting(pool, LAST_CHECK_SETTING)
             .await?
             .and_then(|v| v.parse().ok()),
-        installed: get_setting(pool, INSTALLED_TAG_SETTING)
-            .await?
-            .filter(|tag| !tag.is_empty()),
+        installed: pending_restart_tag(pool).await?,
     })
 }
 
@@ -259,7 +274,7 @@ async fn automatic(app: &AppHandle) {
         let tag = available.tag.clone();
         async move { get_setting(pool, key).await.ok().flatten().as_deref() == Some(tag.as_str()) }
     };
-    if said(INSTALLED_TAG_SETTING).await {
+    if said(INSTALLED_TAG_SETTING).await && pending_restart_tag(pool).await.ok().flatten().is_some() {
         return; // Already put in place; waiting for a restart.
     }
     let event = UpdateEvent {

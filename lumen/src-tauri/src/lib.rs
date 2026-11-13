@@ -1,6 +1,6 @@
 pub use lumen_core::{
     auth, board, db, error, extract, harvest, media_tools, netguard, pin_guard, player_prefs,
-    playlist, probe, search, secrets, series, tmdb,
+    playlist, probe, redirect, search, secrets, series, tmdb,
 };
 
 mod bulk;
@@ -87,6 +87,13 @@ pub fn run() {
                         sync::start(pool);
                         playlist::refresh::start(pool);
                         updater::start(app_handle.clone());
+                        // Says in the log which yt-dlp will be used (or that none can be), so a
+                        // stale one on PATH is noticed at start, not on the first page link.
+                        let extractor_dir = app_handle.path().app_data_dir().ok();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            lumen_core::extract::check_extractor_at_startup(extractor_dir.as_deref());
+                        })
+                        .await;
                     }
                 }
             });

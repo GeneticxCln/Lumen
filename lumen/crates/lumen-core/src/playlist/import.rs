@@ -67,8 +67,14 @@ pub async fn import_m3u_file(path: &str, name: Option<String>) -> Result<(Playli
     let name_owned = name.clone();
 
     tokio::task::spawn_blocking(move || {
-        let content =
-            std::fs::read_to_string(&path_owned).map_err(|e| PlayerError::Io(e.to_string()))?;
+        let bytes = std::fs::read(&path_owned).map_err(|e| PlayerError::Io(e.to_string()))?;
+        if bytes.len() > MAX_PLAYLIST_BYTES {
+            return Err(PlayerError::Io(format!(
+                "That playlist is over the {MAX_PLAYLIST_BYTES} byte limit"
+            )));
+        }
+        // Decoded the same way as a downloaded playlist (Latin-1, Windows-1251, UTF-16, ...).
+        let content = crate::text_encoding::decode_text(&bytes);
         let source_path = PathBuf::from(&path_owned);
         let playlist_name = name_owned.unwrap_or_else(|| {
             source_path

@@ -26,6 +26,9 @@ interface ChannelsOptions {
   onNotice?: (message: string) => void;
 }
 
+/** How many hydrated-by-id channels (history, details, search hits) are kept beside the page. */
+const EXTRA_CHANNEL_LIMIT = 3000;
+
 function mergeChannels(...groups: Channel[][]): Channel[] {
   const byId = new Map<number, Channel>();
   for (const group of groups) {
@@ -48,6 +51,7 @@ export function useChannels(refreshTrigger = 0, options: ChannelsOptions = {}) {
   const [nextAfterName, setNextAfterName] = useState<string | null>(null);
   const [nextAfterId, setNextAfterId] = useState<number | null>(null);
   const [hasMore, setHasMore] = useState(false);
+  const [substring, setSubstring] = useState(false);
   const [selectedGroup, setSelectedGroup] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
@@ -83,6 +87,12 @@ export function useChannels(refreshTrigger = 0, options: ChannelsOptions = {}) {
         setPlaylists(sources);
         setFavoriteIds(new Set(favorites));
         setFavoriteChannels(favoriteRows);
+        // A deleted source's channels must not linger (or stay playable) in what was hydrated by id.
+        const live = new Set(sources.map((source) => source.id));
+        setExtraChannels((current) => {
+          const kept = current.filter((channel) => live.has(channel.playlist_id));
+          return kept.length === current.length ? current : kept;
+        });
         setSelectedPlaylistId((current) =>
           current !== null && sources.some((source) => source.id === current) ? current : null,
         );
@@ -132,6 +142,7 @@ export function useChannels(refreshTrigger = 0, options: ChannelsOptions = {}) {
         setNextAfterName(page.next_after_name);
         setNextAfterId(page.next_after_id);
         setHasMore(page.has_more);
+        setSubstring(page.substring === true);
         loadedOnce.current = true;
       } catch (failure) {
         if (!cancelled && request === requestId.current) setError(errorMessage(failure));
@@ -156,6 +167,7 @@ export function useChannels(refreshTrigger = 0, options: ChannelsOptions = {}) {
         nextAfterName,
         nextAfterId,
         PAGE_SIZE,
+        substring,
       );
       if (request !== requestId.current) return;
       setPageChannels((current) => mergeChannels(current, page.channels));
@@ -168,14 +180,14 @@ export function useChannels(refreshTrigger = 0, options: ChannelsOptions = {}) {
       loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, [hasMore, nextAfterId, nextAfterName, searchQuery, selectedGroup, selectedPlaylistId]);
+  }, [hasMore, nextAfterId, nextAfterName, searchQuery, selectedGroup, selectedPlaylistId, substring]);
 
   const ensureChannels = useCallback(async (ids: number[]) => {
     const wanted = [...new Set(ids)].filter((id) => Number.isInteger(id));
     if (wanted.length === 0) return;
     try {
       const rows = await listChannelsByIds(wanted);
-      setExtraChannels((current) => mergeChannels(current, rows));
+      setExtraChannels((current) => mergeChannels(current, rows).slice(-EXTRA_CHANNEL_LIMIT));
     } catch {
       // The board simply omits channels it could not hydrate; playback is unaffected.
     }
@@ -185,18 +197,20 @@ export function useChannels(refreshTrigger = 0, options: ChannelsOptions = {}) {
     () => mergeChannels(extraChannels, favoriteChannels, pageChannels),
     [extraChannels, favoriteChannels, pageChannels],
   );
-  const sourceChannels = useMemo(
-    () => selectedPlaylistId === null ? allChannels : allChannels.filter((channel) => channel.playlist_id === selectedPlaylistId),
-    [allChannels, selectedPlaylistId],
-  );
   // This hook powers the Sources management page too, where every loaded channel must stay visible
   // and manageable regardless of the "hide unavailable"/"show adult content" preferences — those
   // only gate what the Home/Discover/My List pages show, not what you can see and edit here.
-  const channels = useMemo(
-    () => filterChannels(sourceChannels, searchQuery, selectedGroup, false, true)
-      .filter((channel) => !favoritesOnly || favoriteIds.has(channel.id)),
-    [sourceChannels, searchQuery, selectedGroup, favoritesOnly, favoriteIds],
-  );
+  //
+  // The page was already filtered (search, source, group) by the database, with matching rules
+  // the client cannot reproduce (word-prefix full-text search, diacritics, tvg-id), so it is kept
+  // as is; only the channels hydrated by id are filtered here.
+  const channels = useMemo(() => {
+    const onPage = new Set(pageChannels.map((channel) => channel.id));
+    const others = [...extraChannels, ...favoriteChannels].filter((channel) =>
+      !onPage.has(channel.id) && (selectedPlaylistId === null || channel.playlist_id === selectedPlaylistId));
+    return mergeChannels(filterChannels(others, searchQuery, selectedGroup, false, true), pageChannels)
+      .filter((channel) => !favoritesOnly || favoriteIds.has(channel.id));
+  }, [pageChannels, extraChannels, favoriteChannels, selectedPlaylistId, searchQuery, selectedGroup, favoritesOnly, favoriteIds]);
   const selectPlaylist = useCallback((id: number | null) => {
     setSelectedGroup("all");
     setSelectedPlaylistId(id);
@@ -219,12 +233,13 @@ export function useChannels(refreshTrigger = 0, options: ChannelsOptions = {}) {
 
   const handleToggleFavorite = useCallback(async (id: number) => {
     try {
-      const active = await toggleFavorite(id);
-      setFavoriteIds((previous) => {
-        const next = new Set(previous);
-        if (active) next.add(id); else next.delete(id);
-        return next;
-      });
+      await toggleFavorite(id);
+      // A favorite belongs to the title: turning it off clears every source of it, and one added
+      // from a search hit or a shelf may sit outside the loaded page. Re-reading both lists keeps
+      // the badge, the heart and My List in step with what the database now says.
+      const [favorites, favoriteRows] = await Promise.all([listFavorites(), listFavoriteChannels()]);
+      setFavoriteIds(new Set(favorites));
+      setFavoriteChannels(favoriteRows);
     } catch (failure) {
       setError(errorMessage(failure));
     }
@@ -267,7 +282,7 @@ export function useChannels(refreshTrigger = 0, options: ChannelsOptions = {}) {
   }, [reload]);
 
   const addChannels = useCallback((channels: Channel[]) => {
-    setExtraChannels((current) => mergeChannels(current, channels));
+    setExtraChannels((current) => mergeChannels(current, channels).slice(-EXTRA_CHANNEL_LIMIT));
   }, []);
 
   return { playlists, selectedPlaylistId, selectPlaylist, allChannels, ensureChannels, addChannels, channels, groups, selectedGroup, setSelectedGroup,

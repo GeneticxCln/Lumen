@@ -26,6 +26,8 @@ struct Group {
     /// Mirrors the Worker's own `sync_seq` counter: bumped once per push that lands at least one
     /// write, independent of the client-supplied `updated_at` - see `worker.ts`'s `pushItems`.
     next_seq: i64,
+    /// Refuses every push with the Worker's "group is full" answer while pulls keep working.
+    deny_push: bool,
 }
 
 #[derive(Default)]
@@ -80,6 +82,7 @@ fn handle_request(
                 verifier,
                 items: BTreeMap::new(),
                 next_seq: 0,
+                deny_push: false,
             },
         );
         return reply(201, json!({ "created": true }));
@@ -103,6 +106,7 @@ fn handle_request(
             mock.groups.remove(&sync_id);
             reply(200, json!({ "ok": true }))
         }
+        ("POST", "/v1/items") if group.deny_push => reply(413, json!({ "error": "quota_exceeded" })),
         ("POST", "/v1/items") => {
             let items = json_body["items"].as_array().cloned().unwrap_or_default();
             if !items.is_empty() {
@@ -568,19 +572,18 @@ async fn a_record_the_server_altered_is_skipped_and_counted_not_applied() {
 async fn an_applied_pull_notifies_the_registered_callback_with_its_count() {
     let log: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
     let captured = log.clone();
-    set_applied_callback(move |count| captured.lock().unwrap().push(count));
+    set_applied_callback(move |count| captured.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(count));
 
     let (origin, _mock) = start_mock().await;
     let root = generate_root().unwrap();
     remote(&origin, &root).register(POW_BITS).await.unwrap();
     let a = device().await;
+    let b = device().await;
 
     const FAVORITES: i64 = 37;
-    // `queue_all`'s first-sync seed also queues this device's own profile record (its name and
-    // color), so the round trip below applies 38 records, not just the 37 favorites inserted
-    // here - the +1 is that profile, pushed and immediately pulled back the same as everything
-    // else queue_all seeded.
-    const DISTINCTIVE_COUNT: i64 = FAVORITES + 1;
+    // The two test devices share one default profile record, which counts as news to `a` only
+    // when the two were created in different seconds; the 37 favorites always are. So the
+    // callback reports 37 or 38, and no other test in this file applies that many at once.
     for n in 0..FAVORITES {
         sqlx::query(
             "INSERT INTO favorites (profile_id, channel_url, content_key, active, updated_at) VALUES (1, ?, ?, 1, ?)",
@@ -588,21 +591,21 @@ async fn an_applied_pull_notifies_the_registered_callback_with_its_count() {
         .bind(format!("https://cdn.example/callback-test/{n}.m3u8"))
         .bind(format!("tmdb:movie:{}", 9000 + n))
         .bind(1_234)
-        .execute(&a)
+        .execute(&b)
         .await
         .unwrap();
     }
 
-    // This device's first-ever sync queues and pushes everything it already has (see
-    // `queue_all`), then immediately pulls it straight back — nothing else has advanced its own
-    // cursor yet. That round trip fires the callback the exact same way a genuinely remote
-    // change would.
+    // `b` pushes everything it has. Its own pull hands those same records straight back, which
+    // is not news to it and must not count (that used to reload the whole UI on every sync).
+    sync_with(&b, &remote(&origin, &root)).await.unwrap();
+    // `a` has never seen any of it: everything `b` wrote is applied, and counted.
     sync_with(&a, &remote(&origin, &root)).await.unwrap();
 
-    let seen = log.lock().unwrap();
+    let seen = log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     assert!(
-        seen.contains(&DISTINCTIVE_COUNT),
-        "expected a callback invocation reporting {DISTINCTIVE_COUNT} applied records, saw {:?}",
+        seen.iter().any(|count| *count >= FAVORITES),
+        "expected a callback invocation reporting at least {FAVORITES} applied records, saw {:?}",
         seen,
     );
 }
@@ -938,4 +941,41 @@ async fn hand_set_watched_marks_sync_between_devices_and_the_newer_one_wins() {
         !stored.contains("tmdb:tv:42") && !stored.contains("episode"),
         "{stored}"
     );
+}
+
+/// A group that is full refuses pushes, but that must not also stop this device from receiving
+/// what the others wrote: the pull still runs, and the push error is reported after it.
+#[tokio::test]
+async fn a_full_group_still_lets_the_device_pull_what_others_wrote() {
+    let (origin, mock) = start_mock().await;
+    let root = generate_root().unwrap();
+    remote(&origin, &root).register(POW_BITS).await.unwrap();
+    let a = device().await;
+    let b = device().await;
+    sqlx::query(
+        "INSERT INTO favorites (profile_id, channel_url, content_key, active, updated_at) VALUES (1, 'https://cdn.example/full/1.m3u8', 'tmdb:movie:1', 1, 1234)",
+    )
+    .execute(&b)
+    .await
+    .unwrap();
+    sync_with(&b, &remote(&origin, &root)).await.unwrap();
+
+    mock.lock()
+        .unwrap()
+        .groups
+        .get_mut(&SyncKeys::from_root(&root).sync_id())
+        .unwrap()
+        .deny_push = true;
+    // `a` has something of its own to push, which is refused ...
+    set_setting(&a, "sync_seeded", "").await.unwrap();
+    let outcome = sync_with(&a, &remote(&origin, &root)).await;
+    assert!(outcome.is_err(), "the refused push is still reported");
+    // ... and yet b's favorite arrived.
+    let held: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM favorites WHERE channel_url = 'https://cdn.example/full/1.m3u8' AND active = 1",
+    )
+    .fetch_one(&a)
+    .await
+    .unwrap();
+    assert_eq!(held, 1);
 }

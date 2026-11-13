@@ -11,3 +11,8 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+# RUSTSEC-2026-0459: sqlx-sqlite 0.9.0 only accepts libsqlite3-sys <0.38, all of which bundle a
+# vulnerable SQLite. See vendor/libsqlite3-sys/LUMEN-PATCH.md.
+[patch.crates-io]
+libsqlite3-sys = { path = "vendor/libsqlite3-sys" }

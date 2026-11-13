@@ -31,6 +31,13 @@ pub struct PlayerStateEvent {
     /// tests still deserialize.
     #[serde(default)]
     pub ended: bool,
+    /// Whether the player's own window is fullscreen, so the page follows a change made in mpv
+    /// itself (its key bindings, the window manager) instead of showing a stale button.
+    #[serde(default)]
+    pub fullscreen: bool,
+    /// mpv's own volume (0 to 150), so a change made inside its window shows on the page.
+    #[serde(default)]
+    pub volume: Option<f64>,
     pub title: Option<String>,
     pub error: Option<String>,
     pub tracks: Vec<PlayerTrack>,
@@ -59,6 +66,8 @@ impl Default for PlayerStateEvent {
             duration: 0.0,
             buffering: false,
             ended: false,
+            fullscreen: false,
+            volume: None,
             title: None,
             error: None,
             tracks: Vec::new(),

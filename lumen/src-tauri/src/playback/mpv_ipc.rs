@@ -72,12 +72,15 @@ pub struct MpvIpcBackend {
     /// Requests waiting for mpv's reply, so a timed-out one can be dropped instead of lingering.
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<MpvValue>>>>>,
     /// Load lifecycle from the reader loop: 0 = not started, 1 = start-file seen, 2 = loaded,
-    /// 3 = failed, 4 = cancelled. Keeping the intermediate state matters when replacing a file: mpv may emit
+    /// 3 = failed, 4 = cancelled, 5 = the player went away. Keeping the intermediate state matters when replacing a file: mpv may emit
     /// end-file for the old item before start-file for the new one.
     load_state: tokio::sync::watch::Sender<u8>,
     /// Set by `cancel_load`/`stop`. Once set, a `load` that is waiting returns an error instead of
     /// holding the caller for the rest of `LOAD_SETTLE_TIMEOUT`, and new loads are refused.
-    closing: AtomicBool,
+    closing: Arc<AtomicBool>,
+    /// Counts started loads. A `load` that finds a newer one has begun on the same player returns
+    /// cancelled instead of reporting the newer file's success as its own.
+    load_gen: AtomicU64,
     /// Latest player state shared with the reader loop, so UI-only changes can emit it whole.
     state: Arc<Mutex<PlayerStateEvent>>,
     app: Option<AppHandle>,
@@ -391,8 +394,10 @@ impl MpvIpcBackend {
 
         let (load_state_tx, _) = tokio::sync::watch::channel(0_u8);
         let connection_alive = Arc::new(AtomicBool::new(true));
+        let closing = Arc::new(AtomicBool::new(false));
 
         let pending_reader = pending.clone();
+        let closing_reader = closing.clone();
         let state_reader = state.clone();
         let app_reader = app.clone();
         let load_state_reader = load_state_tx.clone();
@@ -410,11 +415,18 @@ impl MpvIpcBackend {
                 match reader.read_line(&mut line).await {
                     Ok(0) => {
                         connection_alive_reader.store(false, Ordering::SeqCst);
+                        // A load still waiting must learn at once that mpv is gone, not sit out
+                        // the rest of its 30 seconds.
+                        let _ = load_state_reader.send_replace(5);
                         // mpv closed its end of the control socket (quit, a window close, or a
                         // crash). Emit the ended state so the page stops showing "playing".
                         let mut st = state_reader.lock().await;
                         st.mark_ended();
-                        if let Some(ref handle) = app_reader {
+                        // A deliberate Stop closes the connection too; the page already knows, and
+                        // an ended event arriving after a newer play started must not clear it.
+                        if !closing_reader.load(Ordering::SeqCst)
+                            && let Some(ref handle) = app_reader
+                        {
                             let _ = handle.emit("player://state", st.clone());
                         }
                         break;
@@ -456,26 +468,29 @@ impl MpvIpcBackend {
                                                     }
                                                 }
                                                 "time-pos" => {
-                                                    if let Some(t) =
-                                                        msg.data.as_ref().and_then(|v| v.as_f64())
+                                                    // No data means mpv has no position (between
+                                                    // files): forget the old one rather than keep
+                                                    // saving it under the next file.
+                                                    let t = msg
+                                                        .data
+                                                        .as_ref()
+                                                        .and_then(|v| v.as_f64())
+                                                        .unwrap_or(0.0);
+                                                    st.time = t;
+                                                    if last_time_emit.elapsed()
+                                                        >= TIME_EMIT_INTERVAL
                                                     {
-                                                        st.time = t;
-                                                        if last_time_emit.elapsed()
-                                                            >= TIME_EMIT_INTERVAL
-                                                        {
-                                                            last_time_emit =
-                                                                std::time::Instant::now();
-                                                            changed = true;
-                                                        }
+                                                        last_time_emit = std::time::Instant::now();
+                                                        changed = true;
                                                     }
                                                 }
                                                 "duration" => {
-                                                    if let Some(d) =
-                                                        msg.data.as_ref().and_then(|v| v.as_f64())
-                                                    {
-                                                        st.duration = d;
-                                                        changed = true;
-                                                    }
+                                                    st.duration = msg
+                                                        .data
+                                                        .as_ref()
+                                                        .and_then(|v| v.as_f64())
+                                                        .unwrap_or(0.0);
+                                                    changed = true;
                                                 }
                                                 "paused-for-cache" | "core-idle" => {
                                                     if prop_name == "paused-for-cache"
@@ -485,6 +500,22 @@ impl MpvIpcBackend {
                                                             .and_then(|v| v.as_bool())
                                                     {
                                                         st.buffering = b;
+                                                        changed = true;
+                                                    }
+                                                }
+                                                "volume" => {
+                                                    if let Some(v) =
+                                                        msg.data.as_ref().and_then(|v| v.as_f64())
+                                                    {
+                                                        st.volume = Some(v);
+                                                        changed = true;
+                                                    }
+                                                }
+                                                "fullscreen" => {
+                                                    if let Some(b) =
+                                                        msg.data.as_ref().and_then(|v| v.as_bool())
+                                                    {
+                                                        st.fullscreen = b;
                                                         changed = true;
                                                     }
                                                 }
@@ -559,6 +590,9 @@ impl MpvIpcBackend {
                                     }
                                     "start-file" => {
                                         st.error = None;
+                                        st.time = 0.0;
+                                        st.duration = 0.0;
+                                        st.title = None;
                                         st.tracks.clear();
                                         st.audio_track = "auto".into();
                                         st.subtitle_track = "off".into();
@@ -586,6 +620,9 @@ impl MpvIpcBackend {
                                             let _ = load_state_reader.send_replace(3);
                                         }
                                         if msg.reason.as_deref() == Some("error") {
+                                            // What was resolved for this address may have expired
+                                            // (a 403 is an error here): resolve it afresh next time.
+                                            lumen_core::redirect::invalidate_current();
                                             st.error =
                                                 Some(msg.file_error.unwrap_or_else(|| {
                                                     "Playback failed".to_string()
@@ -605,9 +642,12 @@ impl MpvIpcBackend {
                     }
                     Err(_) => {
                         connection_alive_reader.store(false, Ordering::SeqCst);
+                        let _ = load_state_reader.send_replace(5);
                         let mut st = state_reader.lock().await;
                         st.mark_ended();
-                        if let Some(ref handle) = app_reader {
+                        if !closing_reader.load(Ordering::SeqCst)
+                            && let Some(ref handle) = app_reader
+                        {
                             let _ = handle.emit("player://state", st.clone());
                         }
                         break;
@@ -671,7 +711,8 @@ impl MpvIpcBackend {
             request_id: AtomicU64::new(1),
             pending: pending.clone(),
             load_state: load_state_tx,
-            closing: AtomicBool::new(false),
+            closing,
+            load_gen: AtomicU64::new(0),
             state,
             app,
             connection_alive,
@@ -686,6 +727,8 @@ impl MpvIpcBackend {
             (5_i64, "media-title"),
             (6_i64, "track-list"),
             (7_i64, "hls-bitrate"),
+            (8_i64, "fullscreen"),
+            (9_i64, "volume"),
         ] {
             let _ = backend
                 .send_command(vec![
@@ -757,6 +800,7 @@ impl PlaybackBackend for MpvIpcBackend {
         if self.closing.load(Ordering::SeqCst) {
             return Err(PlayerError::Mpv(CANCELLED_MESSAGE.into()));
         }
+        let generation = self.load_gen.fetch_add(1, Ordering::SeqCst) + 1;
         if let Some(hdrs) = headers {
             let header_list: Vec<String> =
                 hdrs.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
@@ -802,7 +846,10 @@ impl PlaybackBackend for MpvIpcBackend {
         // playback restarted from zero. Wait for the file to be loaded (or to fail) first.
         let wait_result = timeout(LOAD_SETTLE_TIMEOUT, async {
             loop {
-                if self.closing.load(Ordering::SeqCst) {
+                // A newer load on this player replaced this one; its result is not ours.
+                if self.closing.load(Ordering::SeqCst)
+                    || self.load_gen.load(Ordering::SeqCst) != generation
+                {
                     return Err(PlayerError::Mpv(CANCELLED_MESSAGE.into()));
                 }
                 match *load_state_rx.borrow_and_update() {
@@ -810,6 +857,12 @@ impl PlaybackBackend for MpvIpcBackend {
                     3 => {
                         return Err(PlayerError::Mpv(
                             "mpv failed to load the requested media".into(),
+                        ));
+                    }
+                    5 => {
+                        return Err(PlayerError::Mpv(
+                            "mpv stopped responding (its control connection closed) while loading"
+                                .into(),
                         ));
                     }
                     _ => {}

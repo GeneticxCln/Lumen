@@ -53,6 +53,7 @@ pub(crate) async fn migrate_inner(
 ) -> Result<bool> {
     let _guard = MIGRATION_LOCK.lock().await;
     if setting(pool, CONTENT_KEY_VERSION_SETTING).await?.as_deref() == Some("2") {
+        prune_old_backups(pool).await;
         return Ok(true);
     }
 
@@ -103,7 +104,10 @@ pub(crate) async fn migrate_inner(
         }
 
         let now = Utc::now().timestamp_millis();
-        let mut tx = pool.begin().await.map_err(sql_err)?;
+        let mut tx = pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(sql_err)?;
         let mut last_id = cursor;
         for row in &rows {
             let id: i64 = row.get("id");
@@ -169,6 +173,7 @@ pub(crate) async fn migrate_inner(
     rekey_orphan_history(pool, batch_size, sync_used).await?;
     rekey_orphan_title_sources(pool, batch_size).await?;
     rebuild_titles(pool, batch_size).await?;
+    fill_missing_keys(pool, batch_size).await?;
     verify(pool).await?;
     finish(pool).await?;
     tracing::info!("content-key v2 migration complete");
@@ -461,7 +466,8 @@ async fn rebuild_titles(pool: &Pool<Sqlite>, batch: i64) -> Result<()> {
     loop {
         let channels = sqlx::query(
             "SELECT id, name, url, group_title, tvg_id, tvg_logo, extra_headers, is_live, \
-             tmdb_id, tmdb_type, poster_path, backdrop_path, overview, release_year, genre_names \
+             tmdb_id, tmdb_type, poster_path, backdrop_path, overview, release_year, genre_names, \
+             (SELECT p.created_at * 1000 FROM playlists p WHERE p.id = channels.playlist_id) AS playlist_created_at \
              FROM channels WHERE id > ? ORDER BY id LIMIT ?",
         )
         .bind(cursor)
@@ -493,6 +499,69 @@ async fn rebuild_titles(pool: &Pool<Sqlite>, batch: i64) -> Result<()> {
     .await
     .map_err(sql_err)?;
     crate::db::set_setting(pool, TITLES_BACKFILL_SETTING, "done").await?;
+    Ok(())
+}
+
+/// Favorite and history rows can carry no key at all (written by an older release, or received
+/// from a client that did not send one). Verification rejects those, so without this the
+/// migration would fail on every start and repeat its whole title rebuild each time.
+async fn fill_missing_keys(pool: &Pool<Sqlite>, batch: i64) -> Result<()> {
+    loop {
+        let rows: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT profile_id, channel_url, channel_url FROM favorites \
+             WHERE content_key IS NULL OR content_key = '' LIMIT ?",
+        )
+        .bind(batch)
+        .fetch_all(pool)
+        .await
+        .map_err(sql_err)?;
+        if rows.is_empty() {
+            break;
+        }
+        let mut tx = pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(sql_err)?;
+        for (profile_id, url, _) in rows {
+            let key = ContentKey::derive(None, None, "", None, &url).into_string();
+            sqlx::query(
+                "UPDATE favorites SET content_key = ? WHERE profile_id = ? AND channel_url = ?",
+            )
+            .bind(&key)
+            .bind(profile_id)
+            .bind(&url)
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_err)?;
+        }
+        tx.commit().await.map_err(sql_err)?;
+    }
+    loop {
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, path FROM history WHERE content_key IS NULL OR content_key = '' LIMIT ?",
+        )
+        .bind(batch)
+        .fetch_all(pool)
+        .await
+        .map_err(sql_err)?;
+        if rows.is_empty() {
+            break;
+        }
+        let mut tx = pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(sql_err)?;
+        for (id, path) in rows {
+            let key = ContentKey::derive(None, None, "", None, &path).into_string();
+            sqlx::query("UPDATE history SET content_key = ? WHERE id = ?")
+                .bind(&key)
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(sql_err)?;
+        }
+        tx.commit().await.map_err(sql_err)?;
+    }
     Ok(())
 }
 
@@ -575,6 +644,50 @@ async fn ensure_backup(pool: &Pool<Sqlite>) -> Result<()> {
     )
     .await?;
     Ok(())
+}
+
+/// How long the pre-migration copy is kept once the migration is done: long enough to notice a
+/// problem and go back, short enough not to leave a copy of a very large library on disk forever.
+const BACKUP_KEEP: Duration = Duration::from_secs(30 * 24 * 3600);
+
+/// Removes `<database>.pre-key-v2-*.db` copies older than `BACKUP_KEEP`. Best effort.
+async fn prune_old_backups(pool: &Pool<Sqlite>) {
+    let Ok(rows) = sqlx::query("PRAGMA database_list").fetch_all(pool).await else {
+        return;
+    };
+    let Some(file) = rows.iter().find_map(|row| {
+        let name: String = row.get("name");
+        (name == "main")
+            .then(|| row.get::<Option<String>, _>("file"))
+            .flatten()
+            .filter(|path| !path.is_empty())
+    }) else {
+        return;
+    };
+    let path = std::path::Path::new(&file);
+    let (Some(dir), Some(stem)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+        return;
+    };
+    let prefix = format!("{stem}.pre-key-v2-");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !(name.starts_with(&prefix) && name.ends_with(".db")) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > BACKUP_KEEP);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+            tracing::info!(backup = %name, "removed an old content-key migration backup");
+        }
+    }
 }
 
 async fn count(pool: &Pool<Sqlite>, table: &str) -> Result<i64> {

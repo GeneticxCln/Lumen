@@ -497,3 +497,46 @@ async fn v2_migration_queues_tombstones_when_sync_has_been_used() {
     pool.close().await;
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A favorite or history row with no key at all (an older release, or a sync client that sent
+/// none) used to make verification fail on every start. The migration now gives it one.
+#[tokio::test]
+async fn rows_without_any_key_do_not_stop_the_migration_from_completing() {
+    let (pool, dir) = test_pool("null-keys").await;
+    import_playlist(
+        &pool,
+        &playlist(),
+        &[channel("Keyless", "https://cdn.example/keyless.m3u8", None)],
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO favorites (profile_id, channel_url, content_key, active, updated_at) \
+         VALUES (1, 'https://cdn.example/keyless.m3u8', NULL, 1, 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO history (profile_id, path, content_key, position, duration, played_at) \
+         VALUES (1, 'https://cdn.example/keyless.m3u8', NULL, 5, 100, 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    assert!(migrate_content_keys_v2(&pool).await.unwrap());
+    assert_eq!(
+        setting(&pool, CONTENT_KEY_VERSION_SETTING).await.as_deref(),
+        Some("2")
+    );
+    let missing: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM favorites WHERE content_key IS NULL) \
+              + (SELECT COUNT(*) FROM history WHERE content_key IS NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(missing, 0);
+    let _ = std::fs::remove_dir_all(dir);
+}

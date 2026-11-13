@@ -291,26 +291,41 @@ async function pushItems(request: Request, env: Env): Promise<Response> {
   await env.DB.prepare('INSERT INTO sync_seq (sync_id, value) VALUES (?, 0) ON CONFLICT (sync_id) DO NOTHING')
     .bind(auth.syncId)
     .run()
-  const seqRow = await env.DB.prepare('UPDATE sync_seq SET value = value + 1 WHERE sync_id = ? RETURNING value')
-    .bind(auth.syncId)
-    .first<{ value: number }>()
-  const seq = seqRow?.value ?? Date.now()
 
-  // Last write wins: a stale push never replaces a newer record. `seq` advances on every push that
-  // lands a write, whether that write is a brand-new item or a genuinely newer update to one.
-  await env.DB.batch(
-    items.map((item) =>
-      env.DB.prepare(
-        `INSERT INTO sync_blobs (sync_id, item_id, updated_at, deleted, blob, seq) VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT (sync_id, item_id) DO UPDATE SET
-           updated_at = excluded.updated_at,
-           deleted = excluded.deleted,
-           blob = excluded.blob,
-           seq = excluded.seq
-         WHERE excluded.updated_at > sync_blobs.updated_at`,
-      ).bind(auth.syncId, item.id, item.updated_at, item.deleted ? 1 : 0, item.blob, seq),
-    ),
-  )
+  // The counter is bumped and the rows written in one batch (one transaction), so the order of
+  // sequence numbers is the order the writes commit in. Taking the number in a separate request
+  // first let a slower push commit after a faster one that had drawn a later number: a puller
+  // whose cursor had already passed the later number never saw the slower push's rows.
+  // Last write wins: a stale push never replaces a newer record.
+  try {
+    await env.DB.batch([
+      env.DB.prepare('UPDATE sync_seq SET value = value + 1 WHERE sync_id = ?').bind(auth.syncId),
+      ...items.map((item) =>
+        env.DB.prepare(
+          `INSERT INTO sync_blobs (sync_id, item_id, updated_at, deleted, blob, seq)
+           VALUES (?, ?, ?, ?, ?, (SELECT value FROM sync_seq WHERE sync_id = ?))
+           ON CONFLICT (sync_id, item_id) DO UPDATE SET
+             updated_at = excluded.updated_at,
+             deleted = excluded.deleted,
+             blob = excluded.blob,
+             seq = excluded.seq
+           WHERE excluded.updated_at > sync_blobs.updated_at`,
+        ).bind(auth.syncId, item.id, item.updated_at, item.deleted ? 1 : 0, item.blob, auth.syncId),
+      ),
+    ])
+  } finally {
+    // `row_count` is only an atomic gate for the quota; what the group really holds is the
+    // table. Settling it to the real count after every push that reserved room means a failed
+    // write, or two pushes that both counted the same brand-new item, cannot leave it drifting
+    // upward until the group is wrongly reported full.
+    if (newRows > 0) {
+      await env.DB.prepare(
+        'UPDATE sync_groups SET row_count = (SELECT COUNT(*) FROM sync_blobs WHERE sync_id = ?) WHERE sync_id = ?',
+      )
+        .bind(auth.syncId, auth.syncId)
+        .run()
+    }
+  }
   return json({ ok: true, received: items.length })
 }
 

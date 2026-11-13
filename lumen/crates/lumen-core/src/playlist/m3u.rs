@@ -241,6 +241,20 @@ pub fn parse_m3u(
     playlist_id: i64,
     base_url: Option<&str>,
 ) -> Result<ParsedPlaylist> {
+    // A web page (an error page, a login wall) is not a playlist; without this every one of its
+    // text lines would become a "channel".
+    let head: String = content
+        .trim_start_matches('\u{feff}')
+        .trim_start()
+        .chars()
+        .take(1024)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if head.starts_with('<') || head.contains("<html") || head.contains("<!doctype") {
+        return Err(crate::error::PlayerError::Parse(
+            "That is a web page, not a playlist".into(),
+        ));
+    }
     if is_hls_manifest(content) {
         return Ok(ParsedPlaylist::Hls(parse_hls_manifest(content, base_url)));
     }
@@ -366,6 +380,14 @@ pub fn parse_m3u(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_web_page_is_refused_instead_of_becoming_channels() {
+        let html = "<!DOCTYPE html>\n<html><body>Not found\nhttp://example.test/x</body></html>";
+        assert!(parse_m3u(html, 0, None).is_err());
+        assert!(parse_m3u("\u{feff}  <html>login</html>", 0, None).is_err());
+        assert!(parse_m3u("#EXTM3U\n#EXTINF:-1,A\nhttp://example.test/a\n", 0, None).is_ok());
+    }
+
     use super::*;
 
     fn channels_of(content: &str, base: Option<&str>) -> Vec<Channel> {
