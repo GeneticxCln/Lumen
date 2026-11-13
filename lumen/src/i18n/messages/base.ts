@@ -33,7 +33,7 @@ export const base = {
 
   "embed.label": "Play video inside the Lumen window",
   "embed.description":
-    "Shows the video above the controls in this window instead of opening a separate mpv window. On by default; turn it off to use mpv's own window. Takes effect the next time playback starts.",
+    "Shows the video above the controls in this window instead of opening a separate mpv window. On by default on Wayland; turn it off to use mpv's own window. Takes effect the next time playback starts.",
 
   "episodes.title": "Episodes",
   "episodes.season": "Season {season}",

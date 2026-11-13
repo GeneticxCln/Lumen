@@ -19,7 +19,7 @@ Built with Tauri v2, React 19, TypeScript, Rust, SQLite and native mpv.
 - **Discovery that works offline.** Thumbnails from FFmpeg/folders, resume points per file, favorites, recently watched, recommendations from your own history, poster-frame chooser.
 - **Series state.** Watched marks per episode, next episode, new/upcoming episodes (optional TMDB key), opt-in desktop notifications when a followed series airs.
 - **Search** across sources and files (Ctrl/Cmd + K).
-- **Native mpv playback.** Your own mpv.conf/scripts apply. Video in a separate mpv window (X11/Wayland) or inside the Lumen window (the default where the display allows it).
+- **Native mpv playback.** Your own mpv.conf/scripts apply. Video in a separate mpv window (X11/Wayland) or inside the Lumen window (the default on native Wayland).
 - **Subtitles** from the file, next to it, or found online (no account/API key).
 - **Profiles** with optional PINs, per-profile language/subtitle/playback preferences.
 - **Encrypted sync, no accounts**, between your own devices.
